@@ -23,14 +23,14 @@
  *     Enter URL = فقط دامنهٔ سایت بدون https (مثال: xxx.workers.dev)
  *  5) اولین کسی که با تلگرام وارد شود مدیر است.
  *
- *  ── مینی‌اپ تمام‌صفحه + سایز ثابت (مثل بات‌فادر) ────────────────
+ *  ── مینی‌اپ تمام‌صفحه + چیدمان ریسپانسیو ───────────────────────
  *  • BotFather → /mybots → بوت شما → Bot Settings → Configure Mini App:
  *      Enable Mini App + URL = دامنهٔ Worker، سپس Mode = «Fullscreen».
  *    (همین Mode همان «لانچ مود» بات‌فادر است: Fullscreen / Fullsize / Compact.
  *     حالت Fullscreen نوار عنوان بالایی ربات را در موبایل پنهان می‌کند.)
  *  • دکمهٔ «خانه» پایین دیگر وجود ندارد: TG.MainButton اصلاً show نمی‌شود.
- *  • سایز ثابت: کل اپ داخل ستونی به پهنای --app-w وسط صفحه است؛ در دسکتاپ
- *    هم دقیقاً مثل موبایل نمایش داده می‌شود و از فریم تلگرام بیرون نمی‌زند.
+ *  • عرض ریسپانسیو: در موبایل تمام عرض است و در دسکتاپ محتوا تا سقف
+ *    --content-w کش می‌آید و وسط‌چین می‌شود (دیگر ستون ثابت ۴۸۰px نیست).
  *  • در موبایل با env(safe-area-inset-*) محتوا از نوار وضعیت (ساعت/باتری)
  *    و دکمه‌های پایین گوشی فاصله می‌گیرد (viewport-fit=cover).
  * =====================================================================
@@ -5330,16 +5330,17 @@ const APP_HTML = `<!doctype html>
   --ok:#3ddc84; --err:#ff5470; --warn:#ffc53d;
   --rad:14px; --rad-s:10px;
   --hdr-h:60px;
-  /* پهنای ثابت اپ: در موبایل تمام عرض است، در دسکتاپ/تبلت یک ستون
-     به اندازهٔ موبایل وسط صفحه (مثل بات‌فادر) */
-  --app-w:480px;
+  /* چیدمان ریسپانسیو: محتوا در دسکتاپ تا سقف --content-w کش می‌آید و وسط‌چین
+     می‌شود؛ در موبایل تمام عرض است. مودال‌ها سقف جداگانه‌ای دارند. */
+  --content-w:1240px;
+  --modal-w:520px;
+  --modal-w-wide:780px;
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html{scroll-behavior:smooth}
 body{background:#07090d;color:var(--tx);font-family:Vazirmatn,Vazir,system-ui,Tahoma,sans-serif;font-size:15px;line-height:1.7;overflow-x:hidden}
-/* ستون ثابت اپ: همهٔ محتوا (هدر + مین + ناوبری پایین) در این پهنای ثابت */
-#app{max-width:var(--app-w);margin:0 auto;min-height:100vh;min-height:100dvh;background:var(--bg);position:relative}
-@media (min-width:521px){#app{box-shadow:-1px 0 0 var(--line),1px 0 0 var(--line)}}
+/* پوستهٔ ریسپانسیو: هدر و ناوبری تمام عرض، مین تا سقف --content-w وسط‌چین */
+#app{width:100%;min-height:100vh;min-height:100dvh;background:var(--bg);position:relative}
 a{color:inherit;text-decoration:none}
 button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
 input,select,textarea{font-family:inherit;font-size:14px;color:var(--tx);background:var(--bg2);border:1px solid var(--line);border-radius:var(--rad-s);padding:10px 12px;outline:none;width:100%}
@@ -5359,6 +5360,12 @@ img{max-width:100%}
 .logo-tx{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
 .hdr-actions{display:flex;align-items:center;gap:8px;margin-inline-start:auto}
 .hdr-hamb{display:none;font-size:20px;width:38px;height:38px;border-radius:10px;background:var(--bg2)}
+/* ناوبری دسکتاپ در هدر (موبایل ناوبری پایین را دارد) */
+.hdr-nav{display:none;align-items:center;gap:2px;margin-inline-start:6px}
+.hdr-nav a{padding:8px 12px;border-radius:999px;font-size:14px;font-weight:700;color:var(--tx2);white-space:nowrap}
+.hdr-nav a:hover{color:var(--tx)}
+.hdr-nav a.on{color:var(--acc2);background:var(--acc-soft)}
+@media (min-width:601px){.hdr-nav{display:flex}}
 .user-chip{display:flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid var(--line);border-radius:999px;padding:4px 12px 4px 5px;font-size:13px;cursor:pointer}
 .user-chip:hover{border-color:var(--acc)}
 .wallet-chip{padding:4px 12px;background:var(--acc-soft);border-color:rgba(255,122,26,.35);color:var(--acc2);font-weight:800}
@@ -5380,12 +5387,12 @@ img{max-width:100%}
 .btn-block{width:100%}
 .btn:disabled{opacity:.5;cursor:not-allowed}
 
-.bnav{position:fixed;bottom:0;right:0;left:0;margin:0 auto;max-width:var(--app-w);z-index:50;display:none;align-items:stretch;justify-content:space-around;background:rgba(11,14,20,.92);backdrop-filter:blur(14px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+.bnav{position:fixed;bottom:0;right:0;left:0;z-index:50;display:none;align-items:stretch;justify-content:space-around;background:rgba(11,14,20,.92);backdrop-filter:blur(14px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
 .bnav a{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 0 6px;font-size:11px;color:var(--tx3)}
 .bnav a .ic{font-size:20px}
 .bnav a.on{color:var(--acc2)}
 .bnav a.on .ic{filter:drop-shadow(0 2px 8px rgba(255,122,26,.6))}
-main{min-height:calc(100vh - var(--hdr-h));min-height:calc(100dvh - var(--hdr-h));padding:20px 18px 90px;max-width:var(--app-w);margin:0 auto}
+main{min-height:calc(100vh - var(--hdr-h));min-height:calc(100dvh - var(--hdr-h));padding:20px 18px 90px;max-width:var(--content-w);margin:0 auto}
 
 .hero-wrap{position:relative;border-radius:var(--rad);overflow:hidden;margin-bottom:26px;background:#0a0d14;direction:rtl}
 .hero-track{display:flex;direction:ltr;width:100%;transition:transform .55s ease}
@@ -5524,7 +5531,7 @@ button.dp-slide{cursor:zoom-in}
 .fmsg.ok{color:var(--ok)}
 .poll-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);margin-left:6px;animation:pulse 1.2s infinite;flex:none}
 @keyframes pulse{50%{opacity:.3}}
-.login-wait{position:fixed;top:calc(var(--hdr-h) + 8px);left:12px;right:12px;margin:0 auto;max-width:calc(var(--app-w) - 24px);z-index:90;background:#163325;color:#3ddc84;border:1px solid rgba(61,220,132,.4);border-radius:12px;padding:12px 14px;font-size:13.5px;font-weight:800;display:none;align-items:center;gap:10px;box-shadow:0 10px 28px rgba(0,0,0,.4)}
+.login-wait{position:fixed;top:calc(var(--hdr-h) + 8px);left:12px;right:12px;margin:0 auto;max-width:560px;z-index:90;background:#163325;color:#3ddc84;border:1px solid rgba(61,220,132,.4);border-radius:12px;padding:12px 14px;font-size:13.5px;font-weight:800;display:none;align-items:center;gap:10px;box-shadow:0 10px 28px rgba(0,0,0,.4)}
 
 .acc{max-width:560px;margin:0 auto}
 .acc-card{background:var(--card);border:1px solid var(--line);border-radius:var(--rad);padding:24px;text-align:center;margin-bottom:14px}
@@ -5649,8 +5656,8 @@ button.dp-slide{cursor:zoom-in}
 
 .mwrap{position:fixed;inset:0;z-index:400;background:rgba(5,7,10,.72);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:16px;animation:fadeIn .15s}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-.modal{background:var(--card);border:1px solid var(--line);border-radius:var(--rad);width:100%;max-width:var(--app-w);max-height:92vh;max-height:92dvh;overflow-y:auto;padding:22px;animation:pop .18s}
-.modal.wide{max-width:var(--app-w)}
+.modal{background:var(--card);border:1px solid var(--line);border-radius:var(--rad);width:100%;max-width:var(--modal-w);max-height:92vh;max-height:92dvh;overflow-y:auto;padding:22px;animation:pop .18s}
+.modal.wide{max-width:var(--modal-w-wide)}
 @keyframes pop{from{transform:translateY(14px) scale(.98);opacity:0}to{transform:none;opacity:1}}
 .modal-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
 .modal-h h3{font-size:17px;font-weight:800}
@@ -5705,6 +5712,7 @@ button.dp-slide{cursor:zoom-in}
 .q-btn.lock{border-color:rgba(255,176,31,.55);box-shadow:inset 0 0 0 1px rgba(255,176,31,.22)}
 .q-btn.lock span{color:var(--acc2)}
 .q-btn:not(.off):hover{border-color:var(--acc);background:var(--acc-soft)}
+.q-btn.on{border-color:var(--acc);background:var(--acc-soft);box-shadow:0 0 0 3px var(--acc-soft)}
 .season-bar{display:flex;gap:8px;overflow-x:auto;padding:2px 0 12px;margin:0 0 4px;scrollbar-width:thin}
 .season-chip{flex:none;padding:8px 16px;border-radius:999px;background:var(--card);border:1px solid var(--line);font-weight:800;font-size:13px;white-space:nowrap}
 .season-chip.on{background:var(--grad);color:#fff;border-color:transparent}
@@ -5717,7 +5725,7 @@ button.dp-slide{cursor:zoom-in}
 .var-q:last-child{border-bottom:0}
 .var-extra{display:grid;grid-template-columns:minmax(100px,160px) 1fr auto auto;gap:8px;align-items:center;margin:6px 0}
 .var-add{margin:4px 0 8px}
-.var-newq{grid-template-columns:minmax(120px,180px) 1fr auto}
+.var-newq{grid-template-columns:minmax(120px,1fr) auto}
 .q-alts{display:flex;flex-direction:column;gap:6px;margin:8px 0 12px;max-width:560px}
 .q-alt{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 12px;border-radius:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);font-weight:700;font-size:13.5px;text-align:right}
 .q-alt .go{color:var(--acc2)}
@@ -5771,27 +5779,24 @@ button.dp-slide{cursor:zoom-in}
 .share-app{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px 6px;border-radius:12px;background:var(--bg2);border:1px solid var(--line);font-size:12px;font-weight:800;color:var(--tx)}
 .share-app:hover{border-color:var(--acc);background:var(--acc-soft)}
 .share-app span{font-size:22px;line-height:1}
-/* ── بلوک‌های چیدمان: همیشه اعمال می‌شوند (min-width:0) ──
-   چون ستون اپ همیشه حداکثر 480px است، چیدمان موبایل (ستون‌تک) در همه
-   دستگاه‌ها لازم است؛ اگر max-width صفحه باشند، در دسکتاپ (viewport
-   بزرگ) چیدمان دو ستونه داخل ستون 480px شلخته می‌شود. */
-@media (min-width:0){
+/* ── چیدمان ریسپانسیو: قوانین زیر فقط در عرض‌های کوچک (موبایل/تبلت) ── */
+@media (max-width:820px){
   .pro-search{grid-template-columns:1fr}
   .pro-side{flex-direction:row;justify-content:flex-start;border-inline-end:none;border-bottom:1px solid var(--line);padding-bottom:12px}
   .pro-grid{grid-template-columns:1fr 1fr}
 }
-@media (min-width:0){
+@media (max-width:520px){
   .pro-grid{grid-template-columns:1fr}
   .ps-range{grid-column:auto}
 }
-@media (min-width:0){
+@media (max-width:760px){
   .detail{grid-template-columns:1fr}
   .d-poster{max-width:260px}
   .adm{grid-template-columns:1fr}
   .adm-nav{position:static;flex-direction:row;overflow-x:auto;padding:8px}
   .adm-nav button{white-space:nowrap;flex:none}
 }
-@media (min-width:0){
+@media (max-width:600px){
   body{font-size:14px}
   .hdr{padding:env(safe-area-inset-top,0px) 12px 0;gap:10px}
   .hdr-hamb{display:flex;align-items:center;justify-content:center}
@@ -5806,6 +5811,8 @@ button.dp-slide{cursor:zoom-in}
   .d-info h1{font-size:19px}
   .q-row{display:flex}
   .var-row,.var-extra{grid-template-columns:1fr}
+  .mwrap{padding:10px}
+  .modal{padding:18px 16px}
 }
 </style>
 </head>
@@ -6316,8 +6323,14 @@ function headerHtml (active) {
     userPart = '<a class="btn btn-primary btn-sm" href="#/auth">ورود با تلگرام</a>';
   }
   var admBtn = APP.user && APP.user.role === 'admin' ? '<a class="hdr-hamb" href="#/admin" title="پنل مدیریت">⚙️</a>' : '';
+  var desktopNav = '<a href="#/" class="' + (active === 'home' ? 'on' : '') + '">خانه</a>' +
+    '<a href="#/catalog" class="' + (active === 'catalog' ? 'on' : '') + '">آرشیو</a>' +
+    '<a href="#/wallet" class="' + (active === 'wallet' ? 'on' : '') + '">کیف پول</a>' +
+    '<a href="#/account" class="' + (active === 'account' ? 'on' : '') + '">حساب</a>' +
+    (APP.user && APP.user.role === 'admin' ? '<a href="#/admin" class="' + (active === 'admin' ? 'on' : '') + '">مدیریت</a>' : '');
   return '<header class="hdr">' +
     '<a class="logo" href="#/"><span class="logo-ic">🎬</span><span class="logo-tx">' + esc(APP.siteName) + '</span></a>' +
+    '<nav class="hdr-nav">' + desktopNav + '</nav>' +
     '<div class="hdr-actions">' + walletPart + admBtn + userPart + '</div>' +
     '</header>' +
     '<nav class="bnav">' +
@@ -7153,6 +7166,10 @@ function bindQualityClicks (root, it, track, ep, bagLock) {
         nav('#/subscribe');
         return;
       }
+      /* رنگ دکمهٔ کیفیتِ انتخاب‌شده مثل حالت هاور می‌شود تا نسخه‌های زیر
+         مشخص باشد برای کدام کیفیت است */
+      $all('.q-btn', root).forEach(function (x) { x.classList.remove('on'); });
+      b.classList.add('on');
       var q = b.getAttribute('data-q');
       var cell = (variants[track] || {})[q] || {};
       var files = cellFilesOf(cell);
@@ -8613,10 +8630,6 @@ function openItemEditor (it, prefillUrl) {
   function cellOf (bag, track, q) {
     return bag && bag.variants && bag.variants[track] && bag.variants[track][q];
   }
-  function cellUrl (bag, track, q) {
-    var v = cellOf(bag, track, q);
-    return sourceHref(v && v.source) || '';
-  }
   function cellPrem (bag, track, q) {
     var v = cellOf(bag, track, q);
     return !!(v && v.premium);
@@ -8643,9 +8656,10 @@ function openItemEditor (it, prefillUrl) {
       var ids = qualityIds(bag, t.k);
       var blocks = ids.map(function (q) {
         var files = cellFiles(bag, t.k, q);
-        var url = cellUrl(bag, t.k, q) || sourceHref(files[0] && files[0].source) || '';
         var prem = cellPrem(bag, t.k, q);
-        var extras = files.slice(1);
+        /* کیفیت اصلی فقط عنوان است (بدون لینک)؛ همهٔ فایل‌ها به‌صورت
+           «نسخهٔ دیگر» با عنوان + لینک نمایش داده می‌شوند. */
+        var extras = files;
         var extraHtml = extras.map(function (f) {
           return '<div class="var-extra">' +
             '<input data-vt="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="عنوان نسخه" value="' + esc(f.title || '') + '">' +
@@ -8658,9 +8672,6 @@ function openItemEditor (it, prefillUrl) {
           '<input data-ql="' + t.k + '-' + q + (epId ? '-' + epId : '') + '" placeholder="عنوان کیفیت" value="' + esc(qLabel(bag, t.k, q)) + '">' +
           '<button type="button" class="btn btn-ghost btn-sm star-btn' + (prem ? ' on' : '') + '" data-vp="' + t.k + ':' + q + ':' + (epId || '') + '" data-on="' + (prem ? '1' : '0') + '" title="فقط اشتراک">⭐</button>' +
           '<button type="button" class="btn btn-danger btn-sm" data-vq="' + t.k + ':' + q + ':' + (epId || '') + '" title="حذف این کیفیت">🗑</button></div>' +
-          '<div class="var-row"><span class="badge">' + (url || extras.length ? '✓ ' : '') + 'لینک</span>' +
-          '<input data-vu="' + t.k + '-' + q + (epId ? '-' + epId : '') + '" placeholder="لینک فایل اصلی این کیفیت" value="' + esc(url) + '" dir="ltr">' +
-          '<button type="button" class="btn btn-ghost btn-sm" data-vs="' + t.k + ':' + q + ':' + (epId || '') + '">ثبت</button></div>' +
           extraHtml +
           '<button type="button" class="btn btn-ghost btn-sm var-add" data-va="' + t.k + ':' + q + ':' + (epId || '') + '">＋ نسخه دیگر (عنوان + لینک)</button>' +
           '</div>';
@@ -8669,7 +8680,6 @@ function openItemEditor (it, prefillUrl) {
         (blocks || '<p style="font-size:12.5px;color:var(--tx3)">هنوز کیفیتی نیست — پایین اضافه کنید.</p>') +
         '<div class="var-extra var-newq">' +
         '<input class="nq-lab" placeholder="عنوان کیفیت مثلاً 720p WEB-DL">' +
-        '<input class="nq-url" placeholder="https://t.me/kanal/123" dir="ltr">' +
         '<button type="button" class="btn btn-primary btn-sm" data-nq="' + t.k + ':' + (epId || '') + '">افزودن کیفیت</button></div></div>';
     }).join('');
   }
@@ -8702,7 +8712,7 @@ function openItemEditor (it, prefillUrl) {
     '<div class="field"><label>لینک فایل تلگرام</label><input id="e-source" value="' + esc(prefillUrl || sourceHref(it.source) || '') + '" placeholder="https://t.me/kanal/12345"></div>' +
     '<div class="field"><label>توضیحات</label><textarea id="e-desc">' + esc(it.description || '') + '</textarea></div>' +
     '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-bottom:12px"><input type="checkbox" id="e-featured" style="width:auto"' + (it.featured ? ' checked' : '') + '> ⭐ نمایش در هیرو صفحهٔ اصلی</label>' +
-    (isSeries ? '' : ('<div class="d-sec-h">کیفیت‌ها و نوع صدا</div><p style="font-size:12px;color:var(--tx3);margin-bottom:8px">کیفیت‌ها ثابت نیستند. برای زیرنویس و دوبله جداگانه «افزودن کیفیت» بزنید، عنوان را خودتان بنویسید و لینک بدهید. زیر هر کیفیت می‌توان چند نسخه با عنوان جدا گذاشت. ستاره یعنی فقط اشتراک.</p><div id="e-var">' + variantGridHtml(it, '') + '</div>')) +
+    (isSeries ? '' : ('<div class="d-sec-h">کیفیت‌ها و نوع صدا</div><p style="font-size:12px;color:var(--tx3);margin-bottom:8px">کیفیت اصلی فقط عنوان است (بدون لینک). زیر هر کیفیت با «نسخه دیگر» فایل را با عنوان و لینک اضافه کنید. ستاره یعنی فقط اشتراک.</p><div id="e-var">' + variantGridHtml(it, '') + '</div>')) +
     (isSeries ? (
       '<div class="d-sec-h">فصل‌ها و قسمت‌ها</div>' +
       '<p style="font-size:12px;color:var(--tx3);margin-bottom:8px">ستاره روی قسمت کل قسمت را قفل اشتراک می‌کند؛ ستاره کنار کیفیت همان فایل را.</p>' +
@@ -8820,26 +8830,6 @@ function openItemEditor (it, prefillUrl) {
       bindVar(root, epid || '');
     }
     function bindVar (root, epId) {
-      $all('[data-vs]', root).forEach(function (b) {
-        b.addEventListener('click', function () {
-          var parts = b.getAttribute('data-vs').split(':');
-          var track = parts[0];
-          var q = parts[1];
-          var epid = parts[2] || epId || '';
-          var inp = $('[data-vu="' + track + '-' + q + (epid ? '-' + epid : '') + '"]', root);
-          var url = inp ? inp.value.trim() : '';
-          b.disabled = true;
-          var labEl = $('[data-ql="' + track + '-' + q + (epid ? '-' + epid : '') + '"]', root);
-          api('/admin/item/' + it.id + '/variant', { method: 'POST', body: { track: track, quality: q, url: url, epId: epid, qualityLabel: labEl ? labEl.value.trim() : '' } }).then(function (r) {
-            it = r.item;
-            toast('کیفیت ثبت شد ✓', 'ok');
-            rebindVar(root, epid);
-          }).catch(function (e) {
-            b.disabled = false;
-            toast(e.message, 'err');
-          });
-        });
-      });
       $all('[data-vp]', root).forEach(function (b) {
         b.addEventListener('click', function () {
           var parts = b.getAttribute('data-vp').split(':');
@@ -8929,10 +8919,9 @@ function openItemEditor (it, prefillUrl) {
           var track = parts[0], epid = parts[1] || epId || '';
           var box = b.parentNode;
           var lab = ($('.nq-lab', box) && $('.nq-lab', box).value.trim()) || '';
-          var url = ($('.nq-url', box) && $('.nq-url', box).value.trim()) || '';
           if (!lab) { toast('عنوان کیفیت را بنویسید', 'err'); return; }
-          if (!url) { toast('لینک کیفیت را وارد کنید', 'err'); return; }
-          api('/admin/item/' + it.id + '/variant', { method: 'POST', body: { track: track, qualityLabel: lab, url: url, addQuality: true, epId: epid } }).then(function (r) {
+          /* کیفیت اصلی فقط عنوان دارد (بدون لینک) */
+          api('/admin/item/' + it.id + '/variant', { method: 'POST', body: { track: track, qualityLabel: lab, addQuality: true, epId: epid } }).then(function (r) {
             it = r.item;
             toast('کیفیت اضافه شد ✓', 'ok');
             rebindVar(root, epid);
