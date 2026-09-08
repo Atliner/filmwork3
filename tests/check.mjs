@@ -1,0 +1,18 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
+const mod = await import('data:text/javascript;base64,' + Buffer.from(source + '\nexport { APP_HTML, apiAuthTicket };').toString('base64'));
+const scripts = [...mod.APP_HTML.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).filter(Boolean);
+for (const script of scripts) new vm.Script(script);
+assert(!mod.APP_HTML.includes('id="hdr-back"'));
+assert(mod.APP_HTML.includes('.hero-desc{display:none}'));
+assert(mod.APP_HTML.includes('.detail-posters .dp-carousel{position:relative'));
+assert(source.includes("infoCard + '<section class=\"d-sec detail-posters\""));
+const ready = await mod.apiAuthTicket({get: async () => ({status:'ready', token:'test', user:{username:'test'}, createdAt:Date.now()})}, 'ticket');
+assert.equal((await ready.json()).token, 'test');
+const expired = await mod.apiAuthTicket({get: async () => ({status:'pending', createdAt:1})}, 'ticket');
+assert.equal(expired.status, 404);
+const missing = await mod.apiAuthTicket({get: async () => null}, 'ticket');
+assert.equal(missing.status, 404);
+console.log('PASS: generated browser scripts parse; header, mobile banner, gallery placement, ready/expired/missing tickets.');
