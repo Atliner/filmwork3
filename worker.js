@@ -7174,7 +7174,8 @@ function bindQualityClicks (root, it, track, ep, bagLock) {
       var cell = (variants[track] || {})[q] || {};
       var files = cellFilesOf(cell);
       var alts = $('#q-alts', root) || $('#q-alts');
-      if (files.length > 1 && alts) {
+      /* نسخه‌ها را همیشه نشان بده — حتی وقتی کیفیت فقط یک نسخه دارد */
+      if (files.length > 0 && alts) {
         alts.innerHTML = files.map(function (f, i) {
           var cell = (variants[track] || {})[q] || {};
           var qlab = cell.label || Q_LABEL[q] || q;
