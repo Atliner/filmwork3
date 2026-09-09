@@ -80,6 +80,7 @@ const CONFIG = {
 
 const ECONOMY_DEFAULTS = {
   walletUnitName: 'سکه',
+  signupBonus: CONFIG.SIGNUP_BONUS,
   sub1m: 100,
   sub3m: 250,
   sub6m: 450,
@@ -564,7 +565,7 @@ const memFallback = new Map();
 class Store {
   constructor(kv, env) { this.kv = kv || null; this.env = env || {}; }
   async get(k) {
-    if (this.kv) { try { return await this.kv.get(k, 'json'); } catch (e) { return null; } }
+    if (this.kv) { try { return await this.kv.get(k, /^(tick:|tg:|tgstate:|u:|ph:)/.test(k) ? { type: 'json', cacheTtl: 30 } : 'json'); } catch (e) { return null; } }
     const v = memFallback.get(k);
     return v == null ? null : JSON.parse(v);
   }
@@ -1671,6 +1672,31 @@ function formatCardNumber(s) {
   const d = digitsOnly(s).slice(0, 16);
   return d.replace(/(\d{4})(?=\d)/g, '$1 ');
 }
+// Validate the complete list: never silently drop a mistyped price.
+function parseStarPacks(value) {
+  let rows = value;
+  if (typeof value === 'string') {
+    rows = value.split('\n').map(function (line) { return line.trim(); }).filter(Boolean).map(function (line) {
+      const parts = line.split('|');
+      if (parts.length !== 2) throw new Error('هر خط بسته استارز باید به صورت «استارز | سکه» باشد');
+      return { stars: parts[0], units: parts[1] };
+    });
+  }
+  if (!Array.isArray(rows) || rows.length < 1 || rows.length > 8) throw new Error('بین ۱ تا ۸ بسته استارز وارد کنید؛ برای توقف فروش، شارژ با استارز را غیرفعال کنید');
+  function positiveInteger(value) {
+    if (typeof value !== 'string' && typeof value !== 'number') return NaN;
+    const text = toEnDigits(value).trim();
+    if (!/^[0-9]+$/.test(text)) return NaN;
+    const n = Number(text);
+    return Number.isSafeInteger(n) && n > 0 ? n : NaN;
+  }
+  return rows.map(function (row, i) {
+    const stars = positiveInteger(row && row.stars);
+    const units = positiveInteger(row && row.units);
+    if (!Number.isFinite(stars) || !Number.isFinite(units) || stars > 10000) throw new Error('بسته ' + (i + 1) + ': استارز باید عدد صحیح ۱ تا ۱۰۰۰۰ و سکه عدد صحیح مثبت باشد');
+    return { stars: stars, units: units };
+  });
+}
 function parseK2kPacksText(text) {
   return String(text || '').split('\n').map(function (line) {
     const p = String(line || '').split('|').map(function (x) { return x.trim(); });
@@ -2117,6 +2143,15 @@ async function ensureTgAdmin(store, user) {
   return user;
 }
 
+function signupBonusOf(set) {
+  const value = set && set.signupBonus;
+  if (value == null || value === '') return CONFIG.SIGNUP_BONUS;
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n >= 0 ? n : CONFIG.SIGNUP_BONUS;
+}
+function telegramDisplayName(from) {
+  return [from.first_name, from.last_name].filter(Boolean).join(' ').trim() || from.username || ('کاربر ' + from.id);
+}
 async function createTgUser(store, opts) {
   const existing = await findUserByTg(store, opts.tgId);
   if (existing) return existing;
@@ -2147,7 +2182,8 @@ async function createTgUser(store, opts) {
     txs: [],
   };
   // Credit the welcome gift only when a new account is created, independently of referral rewards.
-  await creditWallet(store, user, CONFIG.SIGNUP_BONUS, 'signup_bonus', 'هدیهٔ اولین ثبت‌نام');
+  user.signupBonusGranted = signupBonusOf(await getSettings(store));
+  if (user.signupBonusGranted > 0) await creditWallet(store, user, user.signupBonusGranted, 'signup_bonus', 'هدیهٔ اولین ثبت‌نام');
   await store.set('tg:' + user.tgId, user.username);
   await store.set('refcode:' + refCode, user.username);
   if (user.phone) await store.set('ph:' + user.phone, user.username);
@@ -3001,7 +3037,7 @@ async function apiAuthStart(store, body, request) {
 
 async function apiAuthTicket(store, id) {
   const rec = await store.get('tick:' + String(id || ''));
-  if (!rec) return json({ status: 'missing' }, 404);
+  if (!rec || Date.now() - rec.createdAt > CONFIG.TICKET_TTL * 1000) return json({ status: 'missing' }, 404);
   if (rec.status === 'ready') return json({ status: 'ready', token: rec.token, user: rec.user });
   return json({ status: rec.status || 'pending' });
 }
@@ -3120,17 +3156,17 @@ function contactKeyboard() {
 }
 function phoneAskText(set) {
   const name = (set && set.siteName) || 'سایت';
-  return 'برای ورود / ثبت‌نام در ' + name + '، روی دکمه زیر بزن تا شماره‌ات ارسال بشه:';
+  return 'برای ورود / ثبت‌نام در ' + name + '، روی دکمه زیر بزن تا شماره‌ات ارسال بشه:\n\nاین اطلاعات نزد ما محفوظ می‌ماند و صرفاً برای تکمیل حساب کاربری شما دریافت می‌شود.';
 }
 async function askOwnPhone(token, chatId, set, extraLine) {
   const text = (extraLine ? extraLine + '\n\n' : '') + phoneAskText(set);
   return tgSend(token, chatId, text, { reply_markup: contactKeyboard() });
 }
-async function sendMiniAppReturn(token, chatId, isNew, isAdmin) {
+async function sendMiniAppReturn(token, chatId, isNew, isAdmin, signupBonus) {
   let text = isNew
     ? ('✅ ثبت‌نام انجام شد' + (isAdmin ? ' — شما مدیر سایت هستید' : '') + '.')
     : '✅ ورود انجام شد.';
-  if (isNew) text += '\n🎁 ' + CONFIG.SIGNUP_BONUS.toLocaleString('fa-IR') + ' سکه هدیهٔ اولین ثبت‌نام به کیف پول شما اضافه شد.';
+  if (isNew && signupBonus > 0) text += '\n🎁 ' + signupBonus.toLocaleString('fa-IR') + ' سکه هدیهٔ اولین ثبت‌نام به کیف پول شما اضافه شد.';
   text += '\nبرای ادامه، روی دکمهٔ «ورود به مینی‌اپ» بزنید.';
   return tgSend(token, chatId, text, {
     reply_markup: { inline_keyboard: [[{ text: 'ورود به مینی‌اپ', url: CONFIG.MINI_APP_URL }]] },
@@ -3378,7 +3414,7 @@ async function finishNewUserFromState(store, set, from, chatId, state, phone, na
   }
   await completeTicket(store, ticket, user);
   await store.del('tgstate:' + tgId);
-  await sendMiniAppReturn(token, chatId, isNew, user.role === 'admin');
+  await sendMiniAppReturn(token, chatId, isNew, user.role === 'admin', user.signupBonusGranted);
   return user;
 }
 
@@ -3456,10 +3492,11 @@ async function handleTgUpdate(store, update, ctx, request, opts) {
     }
     const phone = normPhone(msg.contact.phone_number);
     const st = state || { mode: 'wait_contact', ticket: '', refCode: '' };
-    st.phone = phone;
-    st.mode = 'wait_name';
-    await store.set('tgstate:' + tgId, st, 1800);
-    await tgSend(token, chatId, '👤 لطفاً نام و نام خانوادگی خود را وارد کنید:', { reply_markup: { remove_keyboard: true } });
+    const user = await finishNewUserFromState(store, set, from, chatId, st, phone, telegramDisplayName(from));
+    if (st.pendingDl && user) {
+      const dl = await store.get('dl:' + st.pendingDl);
+      if (dl && !dl.used) await fulfillDownload(store, ctx, token, chatId, dl, set);
+    }
     return json({ ok: true });
   }
 
@@ -3469,16 +3506,12 @@ async function handleTgUpdate(store, update, ctx, request, opts) {
   }
 
   if (state && state.mode === 'wait_name') {
-    const name = text.replace(/[<>]/g, '').slice(0, 40);
-    if (/^[0-9+\s()-]{8,}$/.test(name)) {
-      await tgSend(token, chatId, '👤 لطفاً نام و نام خانوادگی خود را وارد کنید:');
+    // Complete registrations started before the name step was removed.
+    if (!state.phone) {
+      await askOwnPhone(token, chatId, set);
       return json({ ok: true });
     }
-    if (name.length < 2) {
-      await tgSend(token, chatId, '👤 لطفاً نام و نام خانوادگی خود را وارد کنید:');
-      return json({ ok: true });
-    }
-    const user = await finishNewUserFromState(store, set, from, chatId, state, state.phone, name);
+    const user = await finishNewUserFromState(store, set, from, chatId, state, state.phone, telegramDisplayName(from));
     if (state.pendingDl && user) {
       const dl = await store.get('dl:' + state.pendingDl);
       if (dl && !dl.used) await fulfillDownload(store, ctx, token, chatId, dl, set);
@@ -4440,6 +4473,7 @@ async function handleAdmin(store, url, request, adminUser) {
       zarinpalMerchant: set.zarinpalMerchant ? maskToken(set.zarinpalMerchant) : '',
       starsEnabled: set.starsEnabled !== false,
       walletUnitName: set.walletUnitName,
+      signupBonus: signupBonusOf(set),
       sub1m: set.sub1m, sub3m: set.sub3m, sub6m: set.sub6m, sub1y: set.sub1y,
       dlClickPrice: set.dlClickPrice, refSignupBonus: set.refSignupBonus, refPurchasePercent: set.refPurchasePercent,
       vanishSec: set.vanishSec,
@@ -4461,6 +4495,11 @@ async function handleAdmin(store, url, request, adminUser) {
 
   if (p === 'settings' && m === 'POST') {
     const body = await readBody(request, 50 * 1024);
+    let starPacks;
+    if (body.starPacksText !== undefined || body.starPacks !== undefined) {
+      try { starPacks = parseStarPacks(body.starPacksText !== undefined ? body.starPacksText : body.starPacks); }
+      catch (e) { return json({ error: e.message }, 400); }
+    }
     if (body.siteName !== undefined) set.siteName = String(body.siteName).slice(0, 60) || set.siteName;
     if (body.tagline !== undefined) set.tagline = String(body.tagline).slice(0, 140) || '';
     if (body.autoSync !== undefined) set.autoSync = !!body.autoSync;
@@ -4488,6 +4527,11 @@ async function handleAdmin(store, url, request, adminUser) {
       if (wsl >= 0) wd = wd.slice(0, wsl);
       set.widgetDomain = wd.slice(0, 80);
     }
+    if (body.signupBonus !== undefined) {
+      const n = Number(body.signupBonus);
+      if (body.signupBonus === '' || body.signupBonus === null || typeof body.signupBonus === 'boolean' || !Number.isSafeInteger(n) || n < 0) return json({ error: 'هدیه ثبت‌نام باید عدد صحیح صفر یا بیشتر باشد' }, 400);
+      set.signupBonus = n;
+    }
     if (body.walletUnitName !== undefined) set.walletUnitName = String(body.walletUnitName).slice(0, 20) || set.walletUnitName;
     ['sub1m', 'sub3m', 'sub6m', 'sub1y', 'dlClickPrice', 'refSignupBonus', 'refPurchasePercent', 'vanishSec'].forEach(function (k) {
       if (body[k] !== undefined) {
@@ -4511,9 +4555,7 @@ async function handleAdmin(store, url, request, adminUser) {
       const z = String(body.zarinpalMerchant).trim();
       if (z) set.zarinpalMerchant = z;
     }
-    if (Array.isArray(body.starPacks)) set.starPacks = body.starPacks.slice(0, 8).map(function (p) {
-      return { stars: Number(p.stars) || 0, units: Number(p.units) || 0 };
-    }).filter(function (p) { return p.stars > 0 && p.units > 0; });
+    if (starPacks !== undefined) set.starPacks = starPacks;
     if (body.starShopsText !== undefined) {
       set.starShops = String(body.starShopsText).split('\n').map(function (line) {
         const p = String(line || '').split('|').map(function (x) { return x.trim(); });
@@ -5297,6 +5339,7 @@ function faviconSvg() {
 
 function htmlPage(settings) {
   const html = APP_HTML
+    .replace(/@@MINI_APP_URL@@/g, CONFIG.MINI_APP_URL)
     .replace(/@@SITE@@/g, htmlEscape(settings.siteName))
     .replace(/@@TAG@@/g, htmlEscape(settings.tagline || ''));
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' } });
@@ -5412,7 +5455,7 @@ img{max-width:100%}
 .hdr.hdr-float.scrolled{background:rgba(11,14,20,.72);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border-bottom:1px solid var(--glass-line)}
 .hdr.hdr-float{transition:background .25s,border-color .25s}
 .hdr-back{display:none;width:38px;height:38px;border-radius:50%;background:var(--glass);border:1px solid var(--glass-line);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);align-items:center;justify-content:center;font-size:20px;color:#fff;flex:none}
-.hdr.hdr-float .hdr-back{display:flex}
+
 main.m-full{max-width:none;padding:0}
 .logo{display:flex;align-items:center;gap:8px;font-weight:900;font-size:19px;white-space:nowrap}
 .logo-ic{font-size:22px;filter:drop-shadow(0 2px 6px rgba(255,122,26,.5))}
@@ -5521,8 +5564,8 @@ main{min-height:calc(100vh - var(--hdr-h));min-height:calc(100dvh - var(--hdr-h)
 .d-meta-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;font-weight:800;font-size:13.5px;color:#e8edf7}
 .dm{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 .dm-age{padding:1px 9px;border-radius:999px;border:1.5px solid rgba(255,255,255,.55);font-size:12px;letter-spacing:.02em;direction:ltr}
-.dm-imdb{gap:6px}
-.dm-imdb b{font-size:11px;font-weight:900;color:#f5c518;background:rgba(245,197,24,.14);border:1px solid rgba(245,197,24,.45);border-radius:6px;padding:0 6px;line-height:1.7}
+.dm-imdb{gap:7px;direction:ltr;unicode-bidi:isolate;background:#f5c518;color:#171409;border-radius:7px;padding:3px 9px;font-weight:900;white-space:nowrap}
+.dm-imdb b{font-size:11px;font-weight:900;color:inherit;border-right:1px solid #17140940;padding-right:7px;line-height:1.7}
 .dm-live{color:#ff8aa0;background:rgba(255,59,92,.16);border:1px solid rgba(255,59,92,.5);border-radius:999px;padding:2px 10px 2px 8px;font-size:12px}
 .dm-live:before{content:'';width:7px;height:7px;border-radius:50%;background:var(--live);box-shadow:0 0 0 3px rgba(255,59,92,.25);animation:pulse 1.4s infinite}
 .d-genres{display:flex;flex-wrap:wrap;gap:6px}
@@ -5977,6 +6020,37 @@ button.dp-slide{cursor:zoom-in}
   .adspec{grid-template-columns:1fr}
   .k2k-when{grid-template-columns:1fr}
 }
+
+/* Cinematic home banner; preserve portrait artwork without stretching it. */
+.hero-slide{height:clamp(400px,39vw,560px);min-height:0;isolation:isolate}
+.hero-blur{filter:blur(28px) brightness(.48) saturate(1.1)}
+.hero-poster{left:0;right:38%;background-size:contain;background-position:center}
+.hero-slide:after{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(270deg,#0a0d14 0%,rgba(10,13,20,.92) 30%,rgba(10,13,20,.15) 66%,transparent),linear-gradient(0deg,rgba(10,13,20,.65),transparent 35%);pointer-events:none}
+.hero-in{width:55%;align-self:center;padding:40px 42px 52px;background:none;gap:16px}
+.hero-title{font-size:clamp(26px,3vw,42px);line-height:1.5;text-wrap:balance}
+.hero-desc{line-height:1.9;color:#d1d5df;-webkit-line-clamp:3}
+.hero-cta{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.4);color:#fff;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);gap:24px;border-radius:12px;padding:11px 20px}
+.hero-cta:hover{background:rgba(255,255,255,.2);border-color:#fff}
+.hero-dot{width:24px;height:24px;background:radial-gradient(circle,#ffffff70 3px,transparent 4px)}
+.hero-dot.on{width:24px;background:radial-gradient(circle,var(--acc) 5px,transparent 6px)}
+.detail-posters{max-width:440px;margin:28px auto}
+.detail-posters .dp-carousel{position:relative;inset:auto;width:100%;aspect-ratio:2/3;border-radius:16px}
+@media(max-width:640px){
+.hero-wrap{border-radius:20px;margin-bottom:24px}
+.hero-slide{height:clamp(420px,125vw,580px);min-height:0}
+.hero-poster{inset:0;background-position:center top;background-size:contain}
+.hero-slide:after{background:linear-gradient(0deg,rgba(7,9,13,.96),rgba(7,9,13,.62) 20%,transparent 52%)}
+.hero-in{width:100%;align-self:flex-end;padding:20px 20px 44px;gap:9px}
+.hero-title{font-size:23px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.hero-desc{display:none}
+.hero-meta .badge:nth-child(n+3){display:none}
+.hero-meta .badge{font-size:11px;background:rgba(0,0,0,.22)}
+.hero-btns{margin-top:3px}
+.hero-cta{font-size:13px;padding:9px 16px}
+.detail-posters{max-width:360px;width:100%}
+}
+@media(prefers-reduced-motion:reduce){.hero-track{transition:none}}
+
 </style>
 </head>
 <body>
@@ -6134,7 +6208,7 @@ function showLoginWait () {
     el = document.createElement('div');
     el.id = 'login-wait';
     el.className = 'login-wait';
-    el.innerHTML = '<span class="poll-dot"></span><span>در حال ورود از ربات… چند لحظه بمانید، صفحه را نبندید</span>';
+    el.innerHTML = '<span class="poll-dot"></span><span>در انتظار تأیید تلگرام؛ ورود را در ربات تأیید کنید.</span>';
     (document.body || document.documentElement).appendChild(el);
   }
   el.style.display = 'flex';
@@ -6145,11 +6219,12 @@ function peekLoginTicket (force) {
   if (!id) { hideLoginWait(); return; }
   showLoginWait();
   var now = Date.now();
-  if (!force && __pollBusy && (now - __pollAt) < 800) return;
+  if (__pollBusy) return;
   __pollBusy = true;
   __pollAt = now;
-  api('/auth/ticket/' + id + '?t=' + now).then(function (t) {
+  api('/auth/ticket/' + id + '?t=' + now, { timeout: 8000 }).then(function (t) {
     if (__pollAt === now) __pollBusy = false;
+    if (getTick() !== id || APP.user) return;
     if (t && t.status === 'ready' && t.token) {
       stopPoll();
       setTick('');
@@ -6164,23 +6239,17 @@ function peekLoginTicket (force) {
       stopPoll();
       hideLoginWait();
     }
-  }).catch(function () {
+  }).catch(function (e) {
     if (__pollAt === now) __pollBusy = false;
+    if (getTick() !== id || APP.user) return;
+    if (e.status === 404) { setTick(''); stopPoll(); hideLoginWait(); toast('لینک ورود منقضی شده؛ دوباره ورود با تلگرام را بزنید.', 'err'); }
   });
 }
 function burstPeek () {
   if (getToken() || APP.user || !getTick()) return;
   showLoginWait();
   peekLoginTicket(true);
-  var n = 0;
-  if (__burstTimer) clearInterval(__burstTimer);
-  __burstTimer = setInterval(function () {
-    n += 1;
-    peekLoginTicket(true);
-    if (n >= 24 || APP.user || !getTick()) {
-      if (__burstTimer) { clearInterval(__burstTimer); __burstTimer = null; }
-    }
-  }, 200);
+
 }
 var __miniLoginBusy = false;
 function loginMiniApp () {
@@ -6206,14 +6275,14 @@ function startLoginWatch () {
   showLoginWait();
   burstPeek();
   if (__pollTimer) return;
-  __pollTimer = setInterval(function () { peekLoginTicket(false); }, 400);
+  __pollTimer = setInterval(function () { peekLoginTicket(false); }, 1500);
 }
 function bindLoginResume () {
   if (window.__loginResumeBound) return;
   window.__loginResumeBound = true;
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) burstPeek(); });
-  window.addEventListener('focus', function () { burstPeek(); });
-  window.addEventListener('pageshow', function () { burstPeek(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) { loginMiniApp(); burstPeek(); } });
+  window.addEventListener('focus', function () { loginMiniApp(); burstPeek(); });
+  window.addEventListener('pageshow', function () { loginMiniApp(); burstPeek(); });
   document.addEventListener('click', function () { if (getTick() && !APP.user) peekLoginTicket(true); }, true);
 }
 bindLoginResume();
@@ -6222,7 +6291,11 @@ function api (path, opts) {
   var hd = { 'Content-Type': 'application/json' };
   var t = getToken();
   if (t) hd['Authorization'] = 'Bearer ' + t;
+  var controller = new AbortController();
+  var timeout = setTimeout(function () { controller.abort(); }, opts.timeout || 15000);
   return fetch('/api' + path, {
+    signal: controller.signal,
+    cache: 'no-store',
     method: opts.method || 'GET',
     headers: hd,
     body: opts.body ? JSON.stringify(opts.body) : undefined
@@ -6231,7 +6304,10 @@ function api (path, opts) {
       if (!r.ok) { var e = new Error(j.error || ('خطا ' + r.status)); e.status = r.status; e.data = j; throw e; }
       return j;
     });
-  });
+  }).catch(function (e) {
+    if (e.name === 'AbortError') throw new Error('پاسخ سرور طول کشید؛ اتصال را بررسی و دوباره تلاش کنید.');
+    throw e;
+  }).finally(function () { clearTimeout(timeout); });
 }
 
 function qs (q) {
@@ -6248,6 +6324,36 @@ function qs (q) {
 function isTgWebHash (h) {
   h = String(h || '');
   return h.indexOf('tgWebApp') >= 0 || h.indexOf('#tgWebApp') >= 0;
+}
+function miniAppItemUrl (id) {
+  if (!/^i_[a-z0-9]+$/.test(String(id || ''))) return '';
+  return '@@MINI_APP_URL@@' + '?startapp=item_' + id;
+}
+function itemRouteFromStart (value) {
+  var match = /^item_(i_[a-z0-9]+)$/.exec(String(value || ''));
+  return match && value.length <= 512 ? '#/item/' + match[1] : '';
+}
+var __itemLaunchHandled = false;
+function applyMiniAppItemLaunch () {
+  if (__itemLaunchHandled) return;
+  var hash = location.hash || '';
+  // Only apply launch navigation at entry, never after the user has navigated.
+  if (hash && hash !== '#' && hash !== '#/' && !isTgWebHash(hash)) {
+    __itemLaunchHandled = true;
+    return;
+  }
+  var query = new URLSearchParams(location.search || '');
+  var fragment = new URLSearchParams(hash.slice(1));
+  var start = (TG && TG.initDataUnsafe && TG.initDataUnsafe.start_param) ||
+    query.get('tgWebAppStartParam') || fragment.get('tgWebAppStartParam') || '';
+  // This is a navigation hint only; authentication still verifies Telegram initData server-side.
+  var route = itemRouteFromStart(start);
+  if (route) {
+    __itemLaunchHandled = true;
+    query.delete('tgWebAppStartParam');
+    var search = query.toString();
+    history.replaceState(null, '', location.pathname + (search ? '?' + search : '') + route);
+  }
 }
 function currentRoute () {
   var h = '';
@@ -6492,9 +6598,7 @@ function headerHtml (active, opts) {
     '<a href="#/wallet" class="' + (active === 'wallet' ? 'on' : '') + '">کیف پول</a>' +
     '<a href="#/account" class="' + (active === 'account' ? 'on' : '') + '">حساب</a>' +
     (APP.user && APP.user.role === 'admin' ? '<a href="#/admin" class="' + (active === 'admin' ? 'on' : '') + '">مدیریت</a>' : '');
-  var backBtn = '<button type="button" class="hdr-back" id="hdr-back" aria-label="بازگشت"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
   return '<header class="hdr' + (opts.float ? ' hdr-float' : '') + '">' +
-    backBtn +
     '<a class="logo" href="#/"><span class="logo-ic">🎬</span><span class="logo-tx">' + esc(APP.siteName) + '</span></a>' +
     '<nav class="hdr-nav">' + desktopNav + '</nav>' +
     '<div class="hdr-actions">' + walletPart + admBtn + userPart + '</div>' +
@@ -6515,8 +6619,6 @@ function syncFloatHeader () {
   if (y > 30) h.classList.add('scrolled'); else h.classList.remove('scrolled');
 }
 function bindHeader () {
-  var b = $('#hdr-back');
-  if (b) b.addEventListener('click', function () { history.length > 1 ? history.back() : nav('#/'); });
   if (!__hdrScrollBound) {
     __hdrScrollBound = true;
     window.addEventListener('scroll', syncFloatHeader, { passive: true });
@@ -6551,7 +6653,7 @@ function cardHtml (it) {
   var imdb = it.imdb ? '<span class="card-imdb"><b>' + Number(it.imdb).toFixed(1) + '</b><i>IMDb</i></span>' : '';
   var live = isAiring(it) ? '<span class="card-live">در حال پخش</span>' : '';
   var inner = poster
-    ? '<div class="card-p" style="background-image:url(' + poster + ')">' + imdb + live + '<div class="card-ov"><span>📥</span></div></div>'
+    ? '<div class="card-p" style="background-image:url(' + esc(poster) + ')">' + imdb + live + '<div class="card-ov"><span>📥</span></div></div>'
     : '<div class="card-p">' + imdb + live + '<div class="card-ov"><span>📥</span></div></div>';
   var yl = yearLabel(it);
   var sub = isAiring(it) && it.airingSeason ? ('فصل ' + faNum(it.airingSeason)) : typeLabel(it.type);
@@ -6580,22 +6682,21 @@ function adminEmptyGuide () {
 
 function heroSlideHtml (it) {
   var poster = it.poster || '';
-  var blur = poster ? '<div class="hero-blur" style="background-image:url(' + poster + ')"></div>' : '';
-  var fit = poster ? '<div class="hero-poster" style="background-image:url(' + poster + ')"></div>' : '';
+  var blur = poster ? '<div class="hero-blur" style="background-image:url(' + esc(poster) + ')"></div>' : '';
+  var fit = poster ? '<div class="hero-poster" style="background-image:url(' + esc(poster) + ')"></div>' : '';
   return '<div class="hero-slide">' + blur + fit + '<div class="hero-in">' +
     '<h1 class="hero-title">' + esc(it.title) + '</h1>' +
     '<div class="hero-meta">' + (isAiring(it) ? '<span class="badge live">' + esc(airingLabel(it)) + '</span>' : '') +
     '<span class="badge">' + typeLabel(it.type) + (yearLabel(it) ? ' • ' + yearLabel(it) : '') + '</span>' +
     (it.genres && it.genres.length ? it.genres.slice(0, 4).map(function (g) { return '<span class="badge">' + esc(g) + '</span>'; }).join('') : '') + '</div>' +
     (it.desc ? '<div class="hero-desc">' + esc(it.desc) + '</div>' : '') +
-    '<div class="hero-btns"><a class="btn btn-primary" href="#/item/' + it.id + '">📥 دریافت از ربات</a>' +
-    '<a class="btn btn-ghost" href="#/item/' + it.id + '">جزئیات</a></div>' +
+    '<div class="hero-btns"><a class="btn hero-cta" href="#/item/' + it.id + '">مشاهده و دریافت <span aria-hidden="true">↗</span></a></div>' +
     '</div></div>';
 }
 function heroHtml (items) {
   if (!items || !items.length) return '';
   var dots = items.map(function (_, i) {
-    return '<button type="button" class="hero-dot' + (i === 0 ? ' on' : '') + '" data-hi="' + i + '"></button>';
+    return '<button type="button" class="hero-dot' + (i === 0 ? ' on' : '') + '" aria-label="نمایش اسلاید ' + faNum(i + 1) + '" data-hi="' + i + '"></button>';
   }).join('');
   return '<div class="hero-wrap" id="hero-wrap" dir="rtl">' +
     '<div class="hero-track" id="hero-track">' + items.map(heroSlideHtml).join('') + '</div>' +
@@ -6617,8 +6718,8 @@ function bindHero () {
   var x0 = 0;
   function go (n) {
     i = (n + slides.length) % slides.length;
-    var w = wrap.clientWidth || 0;
-    track.style.transform = 'translateX(' + (-i * w) + 'px)';
+    track.style.transform = 'translateX(' + (-i * 100) + '%)';
+    slides.forEach(function (slide, k) { slide.inert = k !== i; slide.setAttribute('aria-hidden', k !== i ? 'true' : 'false'); });
     dots.forEach(function (d, k) {
       d.className = 'hero-dot' + (k === i ? ' on' : '');
     });
@@ -6638,8 +6739,8 @@ function bindHero () {
     else if (dx < -48) go(i + 1);
   }, { passive: true });
   go(0);
-  if (slides.length > 1) {
-    __heroTimer = setInterval(function () { go(i + 1); }, 5000);
+  if (slides.length > 1 && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    __heroTimer = setInterval(function () { if (!document.hidden && !wrap.matches(':hover') && !wrap.contains(document.activeElement)) go(i + 1); }, 6500);
   }
 }
 function viewHome (c) {
@@ -7118,7 +7219,6 @@ function viewItem (data, id) {
   var it = data.item;
   var canPlay = data.canPlay;
   var posterHtml = posterCarouselHtml(it);
-  var lockOverlay = '';
   var mainPoster = '';
   try { mainPoster = (posterSlidesForView(it)[0] || {}).url || ''; } catch (e) { mainPoster = ''; }
   var isSeries = it.type === 'series';
@@ -7172,7 +7272,7 @@ function viewItem (data, id) {
     (mainPoster ? '<div class="dhero-bg" style="background-image:url(' + esc(mainPoster) + ')"></div><div class="dhero-img" style="background-image:url(' + esc(mainPoster) + ')"></div>' : '') +
     '<div class="dhero-fade"></div>' +
     '<div class="dhero-in">' +
-    '<div class="d-poster">' + posterHtml + lockOverlay + '</div>' +
+    '<div class="d-poster">' + (mainPoster ? '<img class="dp-img" src="' + esc(mainPoster) + '" alt="' + esc(it.title) + '">' : '') + '</div>' +
     '<div class="d-head">' +
     '<h1 class="d-title">' + esc(tFa) + '</h1>' +
     (tEn ? '<div class="d-title-en">' + esc(tEn) + '</div>' : '') +
@@ -7240,7 +7340,7 @@ function viewItem (data, id) {
     related = rowHtml('🎯 مرتبط با این اثر', relItems);
   }
   return hero + '<div class="d-body">' +
-    lockNote + dlPanel + note + infoCard + castSec + crewSec + galleryHtml(it) + related + footerHtml() +
+    lockNote + dlPanel + note + infoCard + '<section class="d-sec detail-posters" aria-label="گالری پوسترها"><h2 class="d-sec-h">گالری پوسترها</h2>' + posterHtml + '</section>' + castSec + crewSec + related + footerHtml() +
     '</div>';
 }
 
@@ -7574,9 +7674,21 @@ function bindItem (it, data) {
   else bindMovieDl(it);
 }
 function shareOrCopy (it) {
-  var origin = '';
-  try { origin = location.origin; } catch (e) { origin = ''; }
-  sharePage(it.title, origin + '/#/item/' + it.id);
+  var siteUrl = location.origin + '/#/item/' + it.id;
+  var miniUrl = miniAppItemUrl(it.id);
+  var html = '<p class="note">لینک مینی‌اپ، تلگرام را روی صفحه همین فیلم یا سریال باز می‌کند. لینک سایت در مرورگر باز می‌شود.</p>' +
+    '<div class="field"><label for="share-mini-url">لینک مینی‌اپ تلگرام</label><input id="share-mini-url" dir="ltr" readonly value="' + esc(miniUrl) + '"></div>' +
+    '<div class="adm-row"><button type="button" class="btn btn-primary" id="share-mini-copy">کپی لینک مینی‌اپ</button><button type="button" class="btn btn-ghost" id="share-mini-send">اشتراک در تلگرام</button></div>' +
+    '<div class="field" style="margin-top:20px"><label for="share-site-url">لینک سایت</label><input id="share-site-url" dir="ltr" readonly value="' + esc(siteUrl) + '"></div>' +
+    '<button type="button" class="btn btn-ghost" id="share-site-copy">کپی لینک سایت</button>';
+  openModal('اشتراک‌گذاری ' + (it.title || ''), html, function (wrap) {
+    $('#share-mini-copy', wrap).addEventListener('click', function () { copyText(miniUrl, function () { toast('لینک مینی‌اپ کپی شد', 'ok'); }); });
+    $('#share-site-copy', wrap).addEventListener('click', function () { copyText(siteUrl, function () { toast('لینک سایت کپی شد', 'ok'); }); });
+    $('#share-mini-send', wrap).addEventListener('click', function () {
+      openBot('https://t.me/share/url?url=' + encodeURIComponent(miniUrl) + '&text=' + encodeURIComponent(it.title || ''));
+    });
+    $all('input[readonly]', wrap).forEach(function (input) { input.addEventListener('click', function () { input.select(); }); });
+  });
 }
 
 /* ═══════════ ورود با تلگرام ═══════════ */
@@ -8314,6 +8426,7 @@ function adminTabHtml (tab, data, q) {
       '<div class="adm-box"><h4>اقتصاد و اشتراک</h4>' +
       '<div class="form-2col">' +
       '<div class="field"><label>نام واحد کیف پول</label><input id="set-unit" value="' + esc(data.walletUnitName || 'سکه') + '"></div>' +
+      '<div class="field"><label>هدیه سکه اولین ثبت‌نام (صفر = بدون هدیه)</label><input id="set-signup-bonus" type="number" min="0" step="1" value="' + esc(data.signupBonus) + '"><small>فقط برای حساب‌های جدید؛ مستقل از پاداش دعوت.</small></div>' +
       '<div class="field"><label>قیمت هر دانلود (فقط کاربر بدون اشتراک)</label><input id="set-dlp" type="number" value="' + esc(data.dlClickPrice) + '"></div>' +
       '<div class="field"><label>اشتراک ۱ ماهه</label><input id="set-s1" type="number" value="' + esc(data.sub1m) + '"></div>' +
       '<div class="field"><label>اشتراک ۳ ماهه</label><input id="set-s3" type="number" value="' + esc(data.sub3m) + '"></div>' +
@@ -8324,6 +8437,9 @@ function adminTabHtml (tab, data, q) {
       '<div class="field"><label>ثانیه تا حذف فایل در ربات</label><input id="set-van" type="number" min="3" max="25" value="' + esc(data.vanishSec || 10) + '"></div>' +
       '</div>' +
       '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-top:8px"><input type="checkbox" id="set-stars" style="width:auto"' + (data.starsEnabled !== false ? ' checked' : '') + '> شارژ با استارز تلگرام (فاکتور رسمی)</label>' +
+      '<div class="field" style="margin-top:10px"><label for="set-star-packs">بسته‌های شارژ استارز (هر خط: استارز | سکه)</label><textarea id="set-star-packs" rows="4" dir="ltr" aria-describedby="star-packs-help">' +
+      (data.starPacks || []).map(function (x) { return esc(x.stars + ' | ' + x.units); }).join('&#10;') +
+      '</textarea><small id="star-packs-help">مثال: 50 | 500 یعنی پرداخت ۵۰ استارز و دریافت ۵۰۰ سکه. بین ۱ تا ۸ بسته؛ استارز عدد صحیح ۱ تا ۱۰۰۰۰ و سکه عدد صحیح مثبت. برای حذف یک بسته، خط آن را پاک کنید.</small></div>' +
       '<div class="field" style="margin-top:10px"><label>سایت‌ها و ربات‌های خرید استارز با کارت شتاب (هر خط: عنوان | لینک | توضیح)</label><textarea id="set-shops" rows="8" dir="ltr">' +
       (data.starShops || []).map(function (x) {
         return esc((x.title || '') + ' | ' + (x.url || '') + (x.note ? (' | ' + x.note) : ''));
@@ -8833,11 +8949,13 @@ function bindAdminTab (tab, q) {
         vaultRewrite: ($('#set-vault') && $('#set-vault').value) || undefined,
         vaultChatId: ($('#set-vaultid') && $('#set-vaultid').value.trim()) || undefined,
         walletUnitName: $('#set-unit').value.trim(),
+        signupBonus: $('#set-signup-bonus').value,
         dlClickPrice: $('#set-dlp').value,
         sub1m: $('#set-s1').value, sub3m: $('#set-s3').value, sub6m: $('#set-s6').value, sub1y: $('#set-s12').value,
         refSignupBonus: $('#set-refb').value, refPurchasePercent: $('#set-refp').value,
         vanishSec: $('#set-van').value,
         starsEnabled: $('#set-stars').checked,
+        starPacksText: $('#set-star-packs').value,
         k2kEnabled: !!( $('#set-k2k') && $('#set-k2k').checked ),
         k2kCardNumber: ($('#set-k2k-card') && $('#set-k2k-card').value) || '',
         k2kCardHolder: ($('#set-k2k-holder') && $('#set-k2k-holder').value) || '',
@@ -9492,6 +9610,7 @@ function initTg (webapp) {
   } catch (e) { }
   if (TG_READY) return;
   TG_READY = true;
+  applyMiniAppItemLaunch();
   try {
     if (isTgWebHash(location.hash)) {
       history.replaceState(null, '', location.pathname + location.search + '#/');
@@ -9503,7 +9622,7 @@ function initTg (webapp) {
       window.__tgActBound = true;
       /* در بازگشت به اپ، دوباره تمام‌صفحه بماند (مثل BatFather) */
       TG.onEvent('activated', function () { loginMiniApp(); burstPeek(); try { TG.expand(); } catch (e5) { } });
-      TG.onEvent('viewportChanged', function () { burstPeek(); });
+      TG.onEvent('viewportChanged', function () { loginMiniApp(); burstPeek(); });
     }
   } catch (eAct) { }
   try { render(); } catch (e4) { }
@@ -9528,6 +9647,7 @@ function loadTgScript () {
 
 function boot () {
   try {
+    applyMiniAppItemLaunch();
     if (TG && !TG_READY) initTg(TG);
     loadTgScript();
     var rq = currentRoute();
