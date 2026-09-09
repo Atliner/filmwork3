@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-const mod = await import('data:text/javascript;base64,' + Buffer.from(source + '\nexport { APP_HTML, apiAuthTicket, signupBonusOf, telegramDisplayName, createTgUser, bustSettings };').toString('base64'));
+const mod = await import('data:text/javascript;base64,' + Buffer.from(source + '\nexport { APP_HTML, apiAuthTicket, signupBonusOf, telegramDisplayName, createTgUser, bustSettings, parseStarPacks };').toString('base64'));
 const scripts = [...mod.APP_HTML.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).filter(Boolean);
 for (const script of scripts) new vm.Script(script);
 assert(!mod.APP_HTML.includes('id="hdr-back"'));
@@ -35,3 +35,15 @@ for (const bonus of [0, 125]) {
   assert.equal(returning.wallet, bonus);
 }
 console.log('PASS: Telegram names; default/custom/zero signup gifts; no repeated gift on return.');
+
+assert.deepEqual(mod.parseStarPacks('50 | 500\n۱۰۰ | ۱۱۰۰\n٢٥٠ | ٣٠٠٠'), [
+  {stars:50,units:500}, {stars:100,units:1100}, {stars:250,units:3000}
+]);
+assert.deepEqual(mod.parseStarPacks([{stars:75,units:900}]), [{stars:75,units:900}]);
+assert.deepEqual(mod.parseStarPacks(' 10 | 20 \n\n'), [{stars:10,units:20}]);
+for (const invalid of ['', '0 | 20', '-5 | 20', '1.5 | 20', '20 | 0', '20 | 1.5', '20 | 30 | 40', 'abc | 20', '10001 | 20', '10 | 9007199254740992', Array(9).fill({stars:1,units:1}), [null], [{stars:true,units:1}]]) {
+  assert.throws(() => mod.parseStarPacks(invalid));
+}
+assert(mod.APP_HTML.includes('id="set-star-packs"'));
+assert(mod.APP_HTML.includes("starPacksText: $('#set-star-packs').value"));
+console.log('PASS: Stars package editor; Persian/Arabic digits; valid custom prices; invalid and oversized lists rejected.');

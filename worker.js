@@ -1672,6 +1672,31 @@ function formatCardNumber(s) {
   const d = digitsOnly(s).slice(0, 16);
   return d.replace(/(\d{4})(?=\d)/g, '$1 ');
 }
+// Validate the complete list: never silently drop a mistyped price.
+function parseStarPacks(value) {
+  let rows = value;
+  if (typeof value === 'string') {
+    rows = value.split('\n').map(function (line) { return line.trim(); }).filter(Boolean).map(function (line) {
+      const parts = line.split('|');
+      if (parts.length !== 2) throw new Error('هر خط بسته استارز باید به صورت «استارز | سکه» باشد');
+      return { stars: parts[0], units: parts[1] };
+    });
+  }
+  if (!Array.isArray(rows) || rows.length < 1 || rows.length > 8) throw new Error('بین ۱ تا ۸ بسته استارز وارد کنید؛ برای توقف فروش، شارژ با استارز را غیرفعال کنید');
+  function positiveInteger(value) {
+    if (typeof value !== 'string' && typeof value !== 'number') return NaN;
+    const text = toEnDigits(value).trim();
+    if (!/^[0-9]+$/.test(text)) return NaN;
+    const n = Number(text);
+    return Number.isSafeInteger(n) && n > 0 ? n : NaN;
+  }
+  return rows.map(function (row, i) {
+    const stars = positiveInteger(row && row.stars);
+    const units = positiveInteger(row && row.units);
+    if (!Number.isFinite(stars) || !Number.isFinite(units) || stars > 10000) throw new Error('بسته ' + (i + 1) + ': استارز باید عدد صحیح ۱ تا ۱۰۰۰۰ و سکه عدد صحیح مثبت باشد');
+    return { stars: stars, units: units };
+  });
+}
 function parseK2kPacksText(text) {
   return String(text || '').split('\n').map(function (line) {
     const p = String(line || '').split('|').map(function (x) { return x.trim(); });
@@ -4470,6 +4495,11 @@ async function handleAdmin(store, url, request, adminUser) {
 
   if (p === 'settings' && m === 'POST') {
     const body = await readBody(request, 50 * 1024);
+    let starPacks;
+    if (body.starPacksText !== undefined || body.starPacks !== undefined) {
+      try { starPacks = parseStarPacks(body.starPacksText !== undefined ? body.starPacksText : body.starPacks); }
+      catch (e) { return json({ error: e.message }, 400); }
+    }
     if (body.siteName !== undefined) set.siteName = String(body.siteName).slice(0, 60) || set.siteName;
     if (body.tagline !== undefined) set.tagline = String(body.tagline).slice(0, 140) || '';
     if (body.autoSync !== undefined) set.autoSync = !!body.autoSync;
@@ -4525,9 +4555,7 @@ async function handleAdmin(store, url, request, adminUser) {
       const z = String(body.zarinpalMerchant).trim();
       if (z) set.zarinpalMerchant = z;
     }
-    if (Array.isArray(body.starPacks)) set.starPacks = body.starPacks.slice(0, 8).map(function (p) {
-      return { stars: Number(p.stars) || 0, units: Number(p.units) || 0 };
-    }).filter(function (p) { return p.stars > 0 && p.units > 0; });
+    if (starPacks !== undefined) set.starPacks = starPacks;
     if (body.starShopsText !== undefined) {
       set.starShops = String(body.starShopsText).split('\n').map(function (line) {
         const p = String(line || '').split('|').map(function (x) { return x.trim(); });
@@ -8366,6 +8394,9 @@ function adminTabHtml (tab, data, q) {
       '<div class="field"><label>ثانیه تا حذف فایل در ربات</label><input id="set-van" type="number" min="3" max="25" value="' + esc(data.vanishSec || 10) + '"></div>' +
       '</div>' +
       '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-top:8px"><input type="checkbox" id="set-stars" style="width:auto"' + (data.starsEnabled !== false ? ' checked' : '') + '> شارژ با استارز تلگرام (فاکتور رسمی)</label>' +
+      '<div class="field" style="margin-top:10px"><label for="set-star-packs">بسته‌های شارژ استارز (هر خط: استارز | سکه)</label><textarea id="set-star-packs" rows="4" dir="ltr" aria-describedby="star-packs-help">' +
+      (data.starPacks || []).map(function (x) { return esc(x.stars + ' | ' + x.units); }).join('&#10;') +
+      '</textarea><small id="star-packs-help">مثال: 50 | 500 یعنی پرداخت ۵۰ استارز و دریافت ۵۰۰ سکه. بین ۱ تا ۸ بسته؛ استارز عدد صحیح ۱ تا ۱۰۰۰۰ و سکه عدد صحیح مثبت. برای حذف یک بسته، خط آن را پاک کنید.</small></div>' +
       '<div class="field" style="margin-top:10px"><label>سایت‌ها و ربات‌های خرید استارز با کارت شتاب (هر خط: عنوان | لینک | توضیح)</label><textarea id="set-shops" rows="8" dir="ltr">' +
       (data.starShops || []).map(function (x) {
         return esc((x.title || '') + ' | ' + (x.url || '') + (x.note ? (' | ' + x.note) : ''));
@@ -8881,6 +8912,7 @@ function bindAdminTab (tab, q) {
         refSignupBonus: $('#set-refb').value, refPurchasePercent: $('#set-refp').value,
         vanishSec: $('#set-van').value,
         starsEnabled: $('#set-stars').checked,
+        starPacksText: $('#set-star-packs').value,
         k2kEnabled: !!( $('#set-k2k') && $('#set-k2k').checked ),
         k2kCardNumber: ($('#set-k2k-card') && $('#set-k2k-card').value) || '',
         k2kCardHolder: ($('#set-k2k-holder') && $('#set-k2k-holder').value) || '',
