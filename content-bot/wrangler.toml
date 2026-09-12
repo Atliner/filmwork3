@@ -1,0 +1,22 @@
+name = "filmwork-content-bot"
+main = "worker.mjs"
+compatibility_date = "2026-09-01"
+
+[[services]]
+binding = "SITE"
+service = "film"
+
+[[durable_objects.bindings]]
+name = "EDITOR"
+class_name = "EditorSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["EditorSession"]
+
+[vars]
+# Replace with the actual public site origin and numeric Telegram admin IDs.
+SITE_PUBLIC_ORIGIN = "https://film.filmbazha.workers.dev"
+CONTENT_ADMIN_IDS = "REPLACE_WITH_NUMERIC_TELEGRAM_ADMIN_ID"
+# Secrets (set with wrangler secret put, never store here):
+# CONTENT_BOT_TOKEN, CONTENT_WEBHOOK_SECRET, CONTENT_BOT_SECRET
