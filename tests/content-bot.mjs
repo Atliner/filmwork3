@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import bot, {EditorSession, parseFilename, itemIdFromLink} from '../content-bot/worker.mjs';
 const source=fs.readFileSync(new URL('../worker.js',import.meta.url),'utf8');
-const main=await import('data:text/javascript;base64,'+Buffer.from(source+'\nexport { Store, contentBotBridge, ingestChannelMessage };').toString('base64'));
+const main=await import('data:text/javascript;base64,'+Buffer.from(source+'\nexport { Store, contentBotAction, ingestChannelMessage, setupContentWebhook };').toString('base64'));
+const {EditorSession,parseFilename,itemIdFromLink} = main;
+const bot = main.default;
 assert.deepEqual(parseFilename('Silo.S02E03.1080p.mkv'),{season:2,episode:3,quality:'1080',detectedTitle:'Silo'});
 assert.equal(parseFilename('Silo.2x03.2160p.mkv').quality,'4k');
 assert.equal(parseFilename('Silo.S01E01-E02.720p.mkv').episode,null);
@@ -21,14 +22,10 @@ const kv={
   delete:async k=>data.delete(k),
   list:async()=>({keys:[],list_complete:true})
 };
-const secret='a'.repeat(48);
-const mainEnv={CONTENT_BOT_SECRET:secret,CONTENT_ADMIN_IDS:'42'};
-function call(action,body,pass=secret) {
-  return main.contentBotBridge(new main.Store(kv,mainEnv),new Request('https://site.test/api/content-bot/'+action,{
-    method:'POST',headers:{'content-type':'application/json','x-content-bot-secret':pass},body:JSON.stringify(body)
-  }),action);
+const mainEnv={CONTENT_BOT_TOKEN:'fake',CONTENT_ADMIN_IDS:'42'};
+function call(action,body) {
+  return main.contentBotAction(new main.Store(kv,mainEnv),body,action);
 }
-assert.equal((await call('whoami',{actorId:'42'},'b'.repeat(48))).status,403);
 assert.equal((await call('whoami',{actorId:'43'})).status,403);
 assert.equal((await call('whoami',{actorId:'42'})).status,200);
 const file={key:'1'.repeat(16),kind:'softsub',quality:'1080',season:2,episode:3,chatId:'-1001234567890',msgId:101,title:'نسخه اول'};
@@ -60,8 +57,14 @@ globalThis.fetch=async(url,init)=>{
   return Response.json({ok:true,result:method==='copyMessage'?{message_id:nextMessage++}:{message_id:900}});
 };
 try {
-  const env={CONTENT_BOT_TOKEN:'fake',CONTENT_WEBHOOK_SECRET:'webhook-test',CONTENT_BOT_SECRET:secret,CONTENT_ADMIN_IDS:'42',SITE_PUBLIC_ORIGIN:'https://site.test',
-    SITE:{fetch:async req=>call(new URL(req.url).pathname.split('/').at(-1),await req.json())}};
+  const env={CONTENT_BOT_TOKEN:'fake',CONTENT_WEBHOOK_SECRET:'webhook-test',CONTENT_ADMIN_IDS:'42',SITE_PUBLIC_ORIGIN:'https://site.test',
+    KV:kv};
+  const setupEnv={...env,CONTENT_WEBHOOK_SECRET:'w'.repeat(48),EDITOR:{}};
+  const setup = await main.setupContentWebhook(new main.Store(kv,setupEnv));
+  assert.equal(setup.status,200);
+  const webhook = calls.find(c=>c.method==='setWebhook');
+  assert.equal(webhook.body.url,'https://site.test/api/tg/content-webhook');
+  assert.equal(webhook.body.drop_pending_updates,false);
   const coordinator=new EditorSession(context(),env);
   env.EDITOR={idFromName:n=>n,get:()=>coordinator};
   const ctx=context(), session=new EditorSession(ctx,env);
@@ -69,7 +72,15 @@ try {
   async function message(text,extras={},id=++updateId) {
     return session.fetch(new Request('https://editor.internal/update',{method:'POST',body:JSON.stringify({update_id:id,message:{message_id:id,from:{id:42},chat:{id:42,type:'private'},text,...extras}})}));
   }
-  assert.equal((await bot.fetch(new Request('https://bot.test/webhook',{method:'POST',body:'{}'}),env)).status,403);
+  assert.equal((await bot.fetch(new Request('https://bot.test/api/tg/content-webhook',{method:'POST',body:'{}'}),env)).status,403);
+  const retired = await bot.fetch(new Request('https://site.test/api/content-bot/publish',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(job)}),env,{});
+  assert.equal(retired.status,404);
+  const noBindings = await bot.fetch(new Request('https://site.test/api/tg/content-webhook',{method:'POST',headers:{'x-telegram-bot-api-secret-token':'webhook-test'},body:'{}'}),{CONTENT_WEBHOOK_SECRET:'webhook-test'},{});
+  assert.equal(noBindings.status,503);
+  const emptyUpdate = await bot.fetch(new Request('https://site.test/api/tg/content-webhook',{method:'POST',headers:{'x-telegram-bot-api-secret-token':'webhook-test'},body:'{}'}),env,{});
+  assert.equal(emptyUpdate.status,200);
+  const html = await bot.fetch(new Request('https://site.test/'),{KV:kv},{});
+  assert.equal(html.status,200); assert.match(await html.text(), /سینما|Test/);
   await message('https://site.test/#/item/i_abc');
   assert.equal(ctx.entries.get('draft').stage,0);
   await message('',{document:{file_name:'Silo.S02E04.720p.mkv',file_unique_id:'new-file',file_size:123},caption:'نسخه آزمایشی'});
@@ -101,4 +112,4 @@ try {
   data.get('u:tg42').role='free';
   assert.equal((await call('whoami',{actorId:'42'})).status,403);
 } finally {globalThis.fetch=originalFetch;}
-console.log('PASS: editorial filename parsing, bridge auth/role, validation, series grouping, replay safety, private draft workflow, manual assignment, review gate, cancellation and pending-publication protection.');
+console.log('PASS: integrated editorial filename parsing, role checks, validation, series grouping, replay safety, private draft workflow, manual assignment, review gate, cancellation and pending-publication protection.');
