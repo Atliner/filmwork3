@@ -1,0 +1,30 @@
+# Example only: keep the current Worker name, KV namespace and existing bindings.
+# Copy/merge into your deployment config before using it for a real deployment.
+name = "film"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_EXISTING_KV_NAMESPACE_ID"
+
+[[durable_objects.bindings]]
+name = "EDITOR"
+class_name = "EditorSession"
+
+# Append to any existing migration history. Never replace old migration entries.
+[[migrations]]
+tag = "content-editor-v1"
+new_sqlite_classes = ["EditorSession"]
+
+[vars]
+SITE_PUBLIC_ORIGIN = "https://film.filmbazha.workers.dev"
+CONTENT_ADMIN_IDS = "REPLACE_WITH_NUMERIC_TELEGRAM_ADMIN_ID"
+# Retain your other existing variables/bindings (BOT_USERNAME, delivery, etc.).
+# Set via Cloudflare Secrets on THIS Worker; do not put tokens here:
+# BOT_TOKEN, DELIVERY_BOT_TOKEN (existing)
+# CONTENT_BOT_TOKEN, CONTENT_WEBHOOK_SECRET (editorial bot)
+# No SITE service binding or CONTENT_BOT_SECRET is needed.
+
+# Optional channel automation (JSON string). Replace all IDs, then re-register webhook.
+# CONTENT_CHANNEL_RULES = '{"-1001111111111":{"adminId":"42","targets":["-1002222222222"],"publish":true}}'
