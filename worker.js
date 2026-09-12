@@ -4586,8 +4586,35 @@ async function maintenanceBatch(store, body) {
   }
   return json({scanned:page.keys.length, candidates:candidates, cursor:page.cursor});
 }
+async function contentSetupStatus(store, admin) {
+  const env=store.env, settings=await getSettings(store);
+  const token=String(env.CONTENT_BOT_TOKEN || '');
+  const independent=!!token && token!==settings.botToken && token!==fileBotToken(settings);
+  const adminIds=String(env.CONTENT_ADMIN_IDS || '').split(',').map(x=>x.trim()).filter(Boolean);
+  let channelMessage='اختیاری: هنوز کانالی تنظیم نشده؛ گفتگوی خصوصی ربات قابل استفاده است.', channelsOk=true;
+  try {
+    const rules=contentChannelRules(env), ids=Object.keys(rules);
+    const samples=['-1001111111111','-1002222222222','-1003333333333'];
+    if (ids.some(id=>samples.includes(id) || rules[id].targets.some(t=>samples.includes(t)))) {
+      channelsOk=false; channelMessage='شناسه‌های کانال نمونه هنوز در تنظیمات هستند. آن‌ها را با شناسه واقعی کانال خودتان جایگزین کنید.';
+    } else if (ids.length) channelMessage=ids.length+' کانال تعریف شده؛ عضویت و مجوز ادمین ربات در تلگرام باید جداگانه بررسی شود.';
+  } catch(e) { channelsOk=false; channelMessage=e.message; }
+  let origin=''; try { origin=await contentSiteOrigin(env); } catch {}
+  const steps=[
+    {ok:independent,title:'۱. توکن ربات مدیریت',help:!token?'در Cloudflare همین Worker، CONTENT_BOT_TOKEN را با نوع Secret اضافه کنید.':!independent?'توکن باید متعلق به ربات سوم باشد، نه ربات ورود یا دانلود.':'توکن تنظیم شده است. برنامه نمی‌تواند تشخیص دهد آن را Text گذاشته‌اید یا Secret؛ در پنل Cloudflare نوع Secret را انتخاب کنید.'},
+    {ok:/^[A-Za-z0-9_-]{32,256}$/.test(String(env.CONTENT_WEBHOOK_SECRET || '')),title:'۲. رمز اتصال ربات',help:'CONTENT_WEBHOOK_SECRET یک رمز تصادفی جدا از توکن است. با دکمه زیر بسازید و در Cloudflare با نوع Secret ذخیره کنید.'},
+    {ok:/^\d+(?:\s*,\s*\d+)*$/.test(String(env.CONTENT_ADMIN_IDS || '').trim()) && (!admin?.tgId || adminIds.includes(String(admin.tgId))),title:'۳. شناسه مدیر',help:'CONTENT_ADMIN_IDS باید شناسه عددی تلگرام حساب مدیر باشد؛ نام کاربری یا عدد نمونه 42 نیست.'},
+    {ok:!!env.EDITOR,title:'۴. حافظه گفتگوی ربات',help:'EDITOR متغیر متنی نیست. در Bindings باید به Durable Object با کلاس EditorSession متصل شود. ایجاد کلاس و migration یک مرحله راه‌اندازی با Wrangler نیاز دارد؛ کپی کد به‌تنهایی کافی نیست.'},
+    {ok:!!env.KV && !!origin && !!defaultVaultChatId(settings),title:'۵. سایت، مخزن و دیتابیس',help:!origin?'دامنه HTTPS سایت را در تنظیمات سایت یا SITE_PUBLIC_ORIGIN مشخص کنید.':!defaultVaultChatId(settings)?'کانال مخزن فعلی را در تنظیمات سایت مشخص کنید.':'از KV و مخزن فعلی سایت استفاده می‌شود؛ دیتابیس جدید نسازید.'},
+    {ok:channelsOk,title:'۶. کانال‌ها (اختیاری)',help:channelMessage}
+  ];
+  return {steps,ready:steps.every(x=>x.ok),adminId:String(admin?.tgId || ''),origin};
+}
+
 async function setupContentWebhook(store, request) {
   const env = store.env, settings = await getSettings(store);
+  const checklist = await contentSetupStatus(store);
+  if (!checklist.ready) return json({error:checklist.steps.filter(step=>!step.ok).map(step=>step.title+': '+step.help).join('\n')},400);
   if (!env.CONTENT_BOT_TOKEN || !env.EDITOR || !env.KV) return json({error:'CONTENT_BOT_TOKEN و bindingهای EDITOR و KV را روی همین Worker تنظیم کنید'},400);
   if (!/^[A-Za-z0-9_-]{32,256}$/.test(String(env.CONTENT_WEBHOOK_SECRET || ''))) return json({error:'CONTENT_WEBHOOK_SECRET باید ۳۲ تا ۲۵۶ کاراکتر معتبر داشته باشد'},400);
   if (!/^\d+(?:\s*,\s*\d+)*$/.test(String(env.CONTENT_ADMIN_IDS || '').trim())) return json({error:'CONTENT_ADMIN_IDS باید شناسه عددی مدیران باشد'},400);
@@ -4616,6 +4643,7 @@ async function handleAdmin(store, url, request, adminUser) {
     const items = (await store.get('idx')) || [];
     return json({
       items: items.length, users: users.length,
+      contentBotSetup: await contentSetupStatus(store, adminUser),
       lastSyncAt: set.lastSyncAt, lastSyncLog: set.lastSyncLog,
       botSet: !!set.botToken, botFromEnv: !!set.botFromEnv, botUserFromEnv: !!set.botUserFromEnv, autoSync: !!set.autoSync,
       deliverySet: !!set.deliveryBotToken, deliveryFromEnv: !!set.deliveryFromEnv, deliveryUserFromEnv: !!set.deliveryUserFromEnv,
@@ -5788,17 +5816,22 @@ export class EditorSession {
       if (event.attempts===1) { try { await this.say(rule.adminId,'⚠️ '+meta.lastError+'\nپس از اصلاح دسترسی/تنظیمات، تلاش مجدد خودکار است.'); } catch {} }
     }
   }
-  say(chat,text) { return tg(this.env,'sendMessage',{chat_id:chat,text}); }
+  say(chat,text) { return tg(this.env,'sendMessage',{chat_id:chat,text,reply_markup:{resize_keyboard:true,keyboard:[
+    ['راهنما','وضعیت کانال‌ها'],['مرحله بعد','پیش‌نمایش'],['انتشار پس از بررسی','تازه‌کردن مشخصات'],
+    ['تأیید فایل منتظر','ردکردن فایل منتظر'],['اصلاح فصل و کیفیت','لغو پیش‌نویس']
+  ]}}); }
   async save(draft) {
     draft.touchedAt=Date.now();
     await this.ctx.storage.put('draft',draft);
     await this.ctx.storage.setAlarm(Date.now()+DAY);
   }
   stageText(d) {
-    return 'اثر: '+d.item.title+'\nاکنون فایل‌های '+LABELS[STAGES[d.stage]]+' را بفرستید (خود فایل یا فوروارد). عنوان نسخه را می‌توانید در کپشن بنویسید.\n/next مرحله بعد (ردکردن مرحله)\n/review پیش‌نمایش\n/cancel لغو';
+    return 'اثر: '+d.item.title+'\nاکنون فایل‌های '+LABELS[STAGES[d.stage]]+' را بفرستید (خود فایل یا فوروارد). عنوان نسخه را می‌توانید در کپشن بنویسید.\nدکمه «مرحله بعد» برای ردکردن این دسته؛ «پیش‌نمایش» برای بررسی فایل‌ها؛ «لغو پیش‌نویس» برای انصراف';
   }
   async process(msg,actor) {
-    const text=String(msg.text || '').trim(), chat=msg.chat.id;
+    let text=String(msg.text || '').trim(); const chat=msg.chat.id;
+    const buttons={'راهنما':'/help','مرحله بعد':'/next','پیش‌نمایش':'/review','انتشار پس از بررسی':'/confirm','تأیید فایل منتظر':'/accept','ردکردن فایل منتظر':'/skip','تازه‌کردن مشخصات':'/refresh'};
+    text=buttons[text] || text;
     const publicOrigin = await contentSiteOrigin(this.env);
     const control = /^\/(channel|retry|skiprelay) (-100\d{6,20})(?: (\d+))?$/.exec(text);
     if (control) {
@@ -5810,8 +5843,36 @@ export class EditorSession {
       return this.say(chat,result.message || result.error || 'درخواست انجام شد.');
     }
     let d=await this.ctx.storage.get('draft');
+    if (text==='وضعیت کانال‌ها') {
+      const rules=contentChannelRules(this.env), ids=Object.keys(rules).filter(id=>rules[id].adminId===actor);
+      if (!ids.length) return this.say(chat,'هنوز کانالی برای شما تنظیم نشده. در پنل سایت، بخش راه‌اندازی ربات، تنظیم کانال را بسازید. شناسه تلگرام شما: '+actor);
+      for (const id of ids) {
+        const target=this.env.EDITOR.get(this.env.EDITOR.idFromName('channel:'+id));
+        const r=await target.fetch(new Request('https://editor.internal/channel-status',{method:'POST',body:'{}'}));
+        const report=await r.json(); await this.say(chat,report.message || 'وضعیت در دسترس نیست.');
+      }
+      return;
+    }
+    if (text==='لغو پیش‌نویس' && d?.phase!=='publishing') {
+      if (!d) return this.say(chat,'پیش‌نویس فعالی ندارید.');
+      d.cancelRequested=true; await this.save(d);
+      return tg(this.env,'sendMessage',{chat_id:chat,text:'فایل‌های منتشرنشده این پیش‌نویس از مخزن پاک شوند؟',reply_markup:{resize_keyboard:true,keyboard:[['تأیید لغو','ادامه کار']]}});
+    }
+    if (text==='تأیید لغو') {
+      if (!d?.cancelRequested) return this.say(chat,'درخواست لغو فعالی ندارید.');
+      text='/cancel';
+    } else if (d?.cancelRequested) { delete d.cancelRequested; await this.save(d); }
+    if (text==='ادامه کار') return this.say(chat,d ? this.stageText(d) : 'لینک صفحه اثر را بفرستید.');
+    if (text==='اصلاح فصل و کیفیت') {
+      if (!d?.pending || d.phase==='publishing') return this.say(chat,'فایل منتظر اصلاح وجود ندارد.');
+      d.awaitingAssignment=true; await this.save(d);
+      return this.say(chat,'فصل، قسمت و کیفیت را با فاصله بفرستید. مثال: 2 3 1080 یعنی فصل ۲، قسمت ۳، کیفیت 1080. برای فیلم بنویسید: 1 1 1080');
+    }
+    if (d?.awaitingAssignment && /^[0-9۰-۹]+ +[0-9۰-۹]+ +(480|720|1080|2160|4k|۴۸۰|۷۲۰|۱۰۸۰|۲۱۶۰)$/.test(text)) {
+      text='/assign '+text.replace(/[۰-۹]/g,c=>String('۰۱۲۳۴۵۶۷۸۹'.indexOf(c))); delete d.awaitingAssignment;
+    }
     if (text === '/help' || text === '/start') return this.say(chat,
-      'برای وضعیت کانال: /channel -1001234567890\nتلاش مجدد فایل خطادار: /retry -1001234567890 123\nردکردن انتقال پیام مسدود: /skiprelay -1001234567890 123\n\nلینک صفحه فیلم یا سریال در سایت را بفرستید. اثر باید از قبل در سایت ساخته شده باشد.\nفایل‌ها از روی نام مانند Silo.S02E03.1080p.mkv دسته‌بندی می‌شوند.\n/next مرحله بعد\n/accept تأیید فایل مبهم\n/assign 2 3 1080 اصلاح فصل، قسمت و کیفیت فایل منتظر (برای فیلم: 1 1 1080)\n/skip ردکردن فایل منتظر\n/review خلاصه\n/remove 2 حذف فایل دوم از پیش‌نویس\n/confirm انتشار پس از پیش‌نمایش\n/refresh تازه‌کردن مشخصات اثر\n/cancel لغو پیش‌نویس\nحداکثر ۲۰ فایل در هر پیش‌نویس؛ پس از ثبت می‌توانید دسته بعدی را شروع کنید.');
+      'سلام! شناسه تلگرام شما: '+actor+'\n\nبرای ثبت خودکار، سربرگ و فایل‌ها را در کانال تنظیم‌شده بگذارید؛ لازم نیست برای هر فایل فرمانی بفرستید. دکمه «وضعیت کانال‌ها» نتیجه را نشان می‌دهد.\n\nبرای ثبت دستی، لینک صفحه فیلم یا سریال را بفرستید و با دکمه‌های پایین ادامه دهید: «مرحله بعد»، «پیش‌نمایش» و سپس «انتشار پس از بررسی».\nاگر نام فایل روشن نبود، «اصلاح فصل و کیفیت» را بزنید. دکمه «لغو پیش‌نویس» قبل از حذف تأیید می‌گیرد. فرمان‌های قبلی هم همچنان کار می‌کنند.');
     if (d?.phase === 'publishing' && !['/confirm','/review'].includes(text)) return this.say(chat,'نتیجه انتشار هنوز قطعی نیست. ابتدا /confirm را دوباره بفرستید؛ لغو یا حذف فایل در این وضعیت مجاز نیست.');
     if (text === '/cancel') {
       if (d) await this.discard(d);
@@ -8912,6 +8973,52 @@ function bindDatabaseMaintenance () {
     }).catch(function (e) { report.textContent = e.message; }).finally(function () { busy(false); });
   });
 }
+function contentSetupHtml (status) {
+  status=status || {steps:[]};
+  return '<div class="adm-box" style="margin-top:24px"><h4>راه‌اندازی ربات مدیریت — قدم‌به‌قدم</h4>' +
+    '<p class="note">ابتدا ربات را بدون انتقال کانال‌ها راه بیندازید. اعداد 42 و -1001111111111 فقط نمونه‌اند. توکن و رمز را در چت یا کد سایت ننویسید.</p>' +
+    (status.steps || []).map(function (step) { return '<div class="note"><b>' + (step.ok ? '✅ ' : '⚠️ ') + esc(step.title) + '</b><br>' + esc(step.help) + '</div>'; }).join('') +
+    '<div class="field"><label>شناسه تلگرام همین حساب مدیر — برای CONTENT_ADMIN_IDS</label><input id="content-admin-id" readonly dir="ltr" value="' + esc(status.adminId || '') + '"></div>' +
+    '<button type="button" class="btn btn-ghost btn-sm" id="content-admin-copy">کپی شناسه مدیر</button>' +
+    '<div class="field" style="margin-top:16px"><label>ساخت رمز CONTENT_WEBHOOK_SECRET</label><input id="content-secret-value" readonly dir="ltr" autocomplete="off" placeholder="با دکمه زیر ساخته می‌شود"></div>' +
+    '<div class="adm-row"><button type="button" class="btn btn-ghost" id="content-secret-generate">ساخت رمز تصادفی</button><button type="button" class="btn btn-ghost" id="content-secret-copy">کپی رمز ساخته‌شده</button></div>' +
+    '<p class="note">این رمز فقط در مرورگر ساخته می‌شود و اینجا ذخیره نمی‌شود. در Cloudflare → Worker سایت → Settings → Variables and Secrets → Add، نام CONTENT_WEBHOOK_SECRET و نوع Secret را انتخاب و رمز را وارد کنید.</p>' +
+    '<details style="margin:18px 0"><summary>ساخت تنظیم کانال بدون نوشتن JSON</summary><p class="note">برای شروع فقط کانال منبع را وارد کنید؛ مقصد را خالی بگذارید تا انتقال غیرفعال بماند. می‌توانید لینک یک پست کانال خصوصی یا شناسه عددی -100… را وارد کنید.</p>' +
+    '<div class="field"><label>کانال منبع</label><input id="content-source-id" dir="ltr" placeholder="لینک یک پست از کانال خودتان"></div>' +
+    '<div class="field"><label>شناسه مدیر مسئول کانال</label><input id="content-rule-admin" dir="ltr" value="' + esc(status.adminId || '') + '"></div>' +
+    '<div class="field"><label>مقصدهای انتقال — اختیاری، هر خط یک کانال، حداکثر ۳ مقصد</label><textarea id="content-target-ids" dir="ltr" rows="3"></textarea></div>' +
+    '<button type="button" class="btn btn-ghost" id="content-rules-generate">ساخت تنظیم کانال</button>' +
+    '<div class="field"><label>متن آماده برای CONTENT_CHANNEL_RULES</label><textarea id="content-rules-value" dir="ltr" readonly rows="7"></textarea></div>' +
+    '<button type="button" class="btn btn-ghost btn-sm" id="content-rules-copy">کپی تنظیم کانال</button>' +
+    '<p class="note">این ابزار یک کانال می‌سازد و تنظیمات موجود را تغییر نمی‌دهد. متن خروجی را در Variable از نوع Text با نام CONTENT_CHANNEL_RULES بگذارید. اگر چند منبع دارید، خروجی را بدون ادغام جایگزین تنظیم فعلی نکنید.</p></details>' +
+    '<p class="note">پس از ذخیره تنظیمات Cloudflare، این صفحه را تازه کنید. علامت سبز فقط وجود/ساختار تنظیم را نشان می‌دهد؛ صحت توکن و مجوز کانال هنگام استفاده بررسی می‌شود.</p>' +
+    '<button type="button" class="btn btn-primary" id="content-bot-setup">اتصال ربات به سایت</button><div id="content-bot-status" class="note" aria-live="polite"></div></div>';
+}
+function setupChannelId (raw) {
+  raw=String(raw || '').trim();
+  if (/^-100[0-9]{6,20}$/.test(raw)) return raw;
+  try { var url=new URL(raw), parts=url.pathname.split('/'); if (url.protocol==='https:' && url.hostname==='t.me' && parts[1]==='c' && /^[0-9]{6,20}$/.test(parts[2]) && /^[0-9]+$/.test(parts[3]) && (parts.length===4 || (parts.length===5 && !parts[4]))) return '-100'+parts[2]; } catch(e) {}
+  throw new Error('شناسه -100… یا لینک یک پست کانال خصوصی به شکل https://t.me/c/…/… وارد کنید. لینک دعوت کانال کافی نیست.');
+}
+function buildChannelSetup (source, admin, targets) {
+  var id=setupChannelId(source), who=String(admin || '').trim();
+  if (!/^[0-9]+$/.test(who) || who==='42') throw new Error('شناسه واقعی مدیر را وارد کنید؛ 42 فقط نمونه است.');
+  var dest=String(targets || '').split(NL).map(function (x) { return x.trim(); }).filter(Boolean).map(setupChannelId);
+  dest=dest.filter(function (x,i) { return dest.indexOf(x)===i; });
+  if (dest.length>3 || dest.indexOf(id)>=0) throw new Error('حداکثر ۳ مقصد مجاز است و منبع نباید مقصد خودش باشد.');
+  var samples=['-1001111111111','-1002222222222','-1003333333333'];
+  if ([id].concat(dest).some(function (x) { return samples.indexOf(x)>=0; })) throw new Error('شناسه‌های نمونه را با کانال واقعی خودتان جایگزین کنید.');
+  var out={}; out[id]={adminId:who,publish:true,targets:dest}; return JSON.stringify(out,null,2);
+}
+function bindContentSetup () {
+  function bind(id,fn) { var b=$('#'+id); if(b) b.addEventListener('click',fn); }
+  function copy(id) { var el=$('#'+id); if(el && el.value) copyText(el.value,function () { toast('کپی شد؛ در تنظیمات Cloudflare وارد کنید.','ok'); }); else toast('ابتدا مقدار را بسازید یا وارد کنید.','err'); }
+  bind('content-admin-copy',function () { copy('content-admin-id'); });
+  bind('content-secret-generate',function () { try { var bytes=new Uint8Array(32); crypto.getRandomValues(bytes); $('#content-secret-value').value=Array.from(bytes,function (b) { return b.toString(16).padStart(2,'0'); }).join(''); } catch(e) { toast('ساخت رمز در این مرورگر ممکن نیست.','err'); } });
+  bind('content-secret-copy',function () { copy('content-secret-value'); });
+  bind('content-rules-generate',function () { try { $('#content-rules-value').value=buildChannelSetup($('#content-source-id').value,$('#content-rule-admin').value,$('#content-target-ids').value); } catch(e) { $('#content-rules-value').value=''; toast(e.message,'err'); } });
+  bind('content-rules-copy',function () { copy('content-rules-value'); });
+}
 function adminTabHtml (tab, data, q) {
   if (tab === 'overview') {
     return '<div class="adm-h">📊 نمای کلی</div><div class="stat-cards">' +
@@ -9164,7 +9271,7 @@ function adminTabHtml (tab, data, q) {
       '<div class="field"><label>لینک دکمه (https://…)</label><input id="set-ad-url" dir="ltr" value="' + esc(data.adButtonUrl || '') + '" placeholder="https://t.me/movie_shatelup"></div>' +
       '</div>' +
       '<button class="btn btn-primary btn-block" id="set-save">💾 ذخیره تنظیمات</button>' +
-      '<div class="adm-box" style="margin-top:24px"><h4>ربات مدیریت محتوا — یکپارچه با سایت</h4><p class="note">برای ورود خودکار و انتقال کانال‌ها، متغیر CONTENT_CHANNEL_RULES را مطابق راهنمای کانال تنظیم و وبهوک را دوباره ثبت کنید. کد ربات در همین worker.js است. روی همین Worker، توکن CONTENT_BOT_TOKEN، رمز CONTENT_WEBHOOK_SECRET، فهرست CONTENT_ADMIN_IDS و binding مربوط به EDITOR را تنظیم کنید؛ سپس وبهوک را ثبت کنید. توکن باید متعلق به ربات سوم باشد.</p><button type="button" class="btn btn-ghost" id="content-bot-setup">ثبت وبهوک ربات مدیریت</button><div id="content-bot-status" class="note" aria-live="polite"></div></div>' +
+      contentSetupHtml(data.contentBotSetup) +
       '<div class="adm-box" style="margin-top:24px"><h4>نگهداری پایگاه داده KV</h4>' +
       '<p class="note">فقط ارجاع‌های بدون صاحب بررسی می‌شوند؛ محتوای اصلی، کاربران، کدها و سوابق مالی حذف نمی‌شوند. ابتدا پشتیبان بگیرید و هنگام ثبت‌نام، ورود اطلاعات یا بازیابی نسخه پشتیبان پاک‌سازی نکنید. به‌دلیل تأخیر همگام‌سازی KV، پس از تغییرات چند دقیقه صبر کنید.</p>' +
       '<div class="field"><label for="db-prefix">گروه بررسی</label><select id="db-prefix">' +
@@ -9639,6 +9746,7 @@ function bindAdminTab (tab, q) {
   }
   if (tab === 'settings') {
     bindDatabaseMaintenance();
+    bindContentSetup();
     var contentSetup = $('#content-bot-setup');
     if (contentSetup) contentSetup.addEventListener('click', function () {
       var status = $('#content-bot-status');

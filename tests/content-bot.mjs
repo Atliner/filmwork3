@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const source=fs.readFileSync(new URL('../worker.js',import.meta.url),'utf8');
-const main=await import('data:text/javascript;base64,'+Buffer.from(source+'\nexport { Store, contentBotAction, ingestChannelMessage, setupContentWebhook };').toString('base64'));
+const main=await import('data:text/javascript;base64,'+Buffer.from(source+'\nexport { Store, contentBotAction, ingestChannelMessage, setupContentWebhook, contentSetupStatus };').toString('base64'));
 const {EditorSession,parseFilename,itemIdFromLink} = main;
 const bot = main.default;
 assert.deepEqual(parseFilename('Silo.S02E03.1080p.mkv'),{season:2,episode:3,quality:'1080',detectedTitle:'Silo'});
@@ -90,21 +90,23 @@ try {
   const copyCount=calls.filter(c=>c.method==='copyMessage').length;
   await message('',{document:{file_name:'Silo.S02E04.720p.mkv',file_unique_id:'new-file'}},updateId);
   assert.equal(calls.filter(c=>c.method==='copyMessage').length,copyCount); // replayed update
-  await message('/next'); assert.equal(ctx.entries.get('draft').stage,1);
+  await message('مرحله بعد'); assert.equal(ctx.entries.get('draft').stage,1);
   await message('',{document:{file_name:'Mystery.mkv',file_unique_id:'unknown-file'}});
   assert(ctx.entries.get('draft').pending);
   await message('/accept'); assert(ctx.entries.get('draft').pending); // not enough metadata
-  await message('/assign 2 5 1080');
+  await message('اصلاح فصل و کیفیت');
+  await message('۲ ۵ ۱۰۸۰');
   assert.equal(ctx.entries.get('draft').files[1].kind,'hardsub');
   assert.equal(ctx.entries.get('draft').files[1].episode,5);
   await message('/confirm'); assert(ctx.entries.get('draft')); // explicit preview required
-  await message('/review'); assert.equal(ctx.entries.get('draft').phase,'review');
+  await message('پیش‌نمایش'); assert.equal(ctx.entries.get('draft').phase,'review');
   await message('/confirm'); assert(!ctx.entries.has('draft'));
   assert.equal(data.get('it:i_abc').seasons[0].episodes.find(e=>e.n===4).variants.dub['720'].files.length,1);
   assert.equal(data.get('it:i_abc').seasons[0].episodes.find(e=>e.n===5).variants.sub['1080'].files.length,1);
   await message('https://site.test/#/item/i_abc');
   await message('',{document:{file_name:'Silo.S02E06.480p.mkv',file_unique_id:'cancel-me'}});
-  await message('/cancel'); assert(!ctx.entries.has('draft'));
+  await message('لغو پیش‌نویس'); assert(ctx.entries.has('draft'));
+  await message('تأیید لغو'); assert(!ctx.entries.has('draft'));
   assert(calls.some(c=>c.method==='deleteMessages'));
   // Pending publication must survive expiration; no potentially published media is removed.
   await ctx.storage.put('draft',{phase:'publishing',touchedAt:0,files:[],chat:42});
@@ -113,3 +115,14 @@ try {
   assert.equal((await call('whoami',{actorId:'42'})).status,403);
 } finally {globalThis.fetch=originalFetch;}
 console.log('PASS: integrated editorial filename parsing, role checks, validation, series grouping, replay safety, private draft workflow, manual assignment, review gate, cancellation and pending-publication protection.');
+
+const missing=await main.contentSetupStatus(new main.Store(kv,{}),{tgId:'42'});
+assert.equal(missing.ready,false);
+assert(missing.steps.some(x=>!x.ok && x.title.includes('حافظه')));
+const configured=await main.contentSetupStatus(new main.Store(kv,{...mainEnv,KV:kv,EDITOR:{},CONTENT_WEBHOOK_SECRET:'w'.repeat(48),SITE_PUBLIC_ORIGIN:'https://site.test'}),{tgId:'42'});
+assert(configured.ready);
+assert.equal(configured.adminId,'42');
+assert(!JSON.stringify(configured).includes('w'.repeat(48)));
+const sampleConfig=await main.contentSetupStatus(new main.Store(kv,{...mainEnv,CONTENT_CHANNEL_RULES:JSON.stringify({'-1001111111111':{adminId:'42',targets:[]}})}));
+assert(sampleConfig.steps.some(x=>!x.ok && x.help.includes('نمونه')));
+console.log('PASS: Persian menu actions, cancellation confirmation, setup readiness, secret redaction and sample channel warnings.');

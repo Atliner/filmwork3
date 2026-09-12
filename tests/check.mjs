@@ -188,3 +188,13 @@ await deliveryCtx.fulfillDownload(dlStore,{},'token',1,dl,{});
 assert.deepEqual(deliveries,['63','64','64']); assert(dl.used);
 assert.deepEqual(timers,['63','64']); assert(writes.at(-1).used);
 console.log('PASS: Multi-link versions; full validation; source traversal; editor round-trip; ordered delivery, per-file deletion and partial-failure resume.');
+
+const setupCode=mod.APP_HTML.slice(mod.APP_HTML.indexOf('function setupChannelId'),mod.APP_HTML.indexOf('function bindContentSetup'));
+const setupCtx=vm.createContext({URL,NL:'\n'}); vm.runInContext(setupCode,setupCtx);
+const rules=JSON.parse(setupCtx.buildChannelSetup('https://t.me/c/4458209353/63','123456789',''));
+assert.deepEqual(rules,{'-1004458209353':{adminId:'123456789',publish:true,targets:[]}});
+assert.throws(()=>setupCtx.buildChannelSetup('-1001111111111','123456789',''));
+assert.throws(()=>setupCtx.buildChannelSetup('-1004458209353','42',''));
+assert.throws(()=>setupCtx.buildChannelSetup('-1004458209353','123456789','-1004458209353'));
+assert.throws(()=>setupCtx.setupChannelId('https://t.me/+invite'));
+console.log('PASS: no-JSON setup builder accepts real post links and rejects placeholders, invite links and self-relays.');
