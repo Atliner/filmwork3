@@ -19,6 +19,11 @@
  *     اگر کانال بن شد و فایل‌ها را با همان ترتیب فوروارد کردید:
  *       Variable: VAULT_REWRITE = xvcdn:newcdn
  *     فقط یوزرنیم/آیدی کانال عوض می‌شود؛ شماره پیام (مثلاً /62) ثابت می‌ماند.
+ *     ربات مدیریت محتوا (اختیاری، کد در همین فایل):
+ *       Secret: CONTENT_BOT_TOKEN / CONTENT_WEBHOOK_SECRET
+ *       Variable: CONTENT_ADMIN_IDS (شناسه عددی مدیران)
+ *       Durable Object binding: EDITOR → EditorSession (نیاز به migration)
+ *     راهنمای نصب: docs/CONTENT-BOT.md / نمونه: wrangler.example.toml
  *  4) Login Widget: BotFather → Bot Settings → Domain / Login Widget
  *     Enter URL = فقط دامنهٔ سایت بدون https (مثال: xxx.workers.dev)
  *  5) اولین کسی که با تلگرام وارد شود مدیر است.
@@ -80,6 +85,7 @@ const CONFIG = {
 
 const ECONOMY_DEFAULTS = {
   walletUnitName: 'سکه',
+  signupBonus: CONFIG.SIGNUP_BONUS,
   sub1m: 100,
   sub3m: 250,
   sub6m: 450,
@@ -179,7 +185,7 @@ function round2(n) {
 }
 
 /*
- * ── کش فرایندی برای کاهش فراخوانی KV (مهم برای پلن رایگان: ۱۰۰ read/day) ──
+ * ── کش فرایندی برای کاهش فراخوانی KV (کاهش خواندن‌های تکراری در همان Worker) ──
  */
 const memItem = new Map();
 const memRes = new Map();
@@ -197,10 +203,43 @@ async function getUser(store, username) {
   return user;
 }
 function bustUser(username) { memUser.delete(username); }
+function userIndexKeys(user) {
+  if (!user) return [];
+  return [user.tgId && 'tg:' + user.tgId, user.phone && 'ph:' + user.phone,
+    user.tgUsername && 'tgu:' + normTgUser(user.tgUsername), user.refCode && 'refcode:' + user.refCode].filter(Boolean);
+}
+async function deleteOwnedIndexes(store, keys, owner) {
+  for (const key of new Set(keys)) if (await store.get(key) === owner) await store.del(key);
+}
 async function saveUser(store, user) {
+  const old = await store.get('u:' + user.username);
+  const before = userIndexKeys(old), after = userIndexKeys(user);
   await store.set('u:' + user.username, user);
   bustUser(user.username);
-  await indexUserHandles(store, user);
+  await deleteOwnedIndexes(store, before.filter(function (key) { return !after.includes(key); }), user.username);
+  for (const key of after) if (!before.includes(key)) await store.set(key, user.username);
+}
+function itemSourceKeys(item) {
+  const keys = new Set();
+  if (item) walkSources(item, function (src) {
+    if (!src || !src.msgId) return;
+    if (src.chatId) keys.add('src:c:' + normalizeChannelId(src.chatId) + '/' + src.msgId);
+    if (src.user) keys.add('src:' + src.user + '/' + src.msgId);
+  });
+  return [...keys];
+}
+async function saveItemRecord(store, item) {
+  const old = await store.get('it:' + item.id);
+  await store.set('it:' + item.id, item);
+  bustItem(item.id);
+  if (!old) return;
+  const keep = new Set(itemSourceKeys(item));
+  await deleteOwnedIndexes(store, itemSourceKeys(old).filter(function (key) { return !keep.has(key); }), item.id);
+  const subs = new Set((item.subs || []).map(function (sub) { return sub.id; }));
+  for (const sub of old.subs || []) if (!subs.has(sub.id)) {
+    const rec = await store.get('sub:' + sub.id);
+    if (rec && rec.itemId === item.id) await store.del('sub:' + sub.id);
+  }
 }
 
 async function getItem(store, id) {
@@ -562,25 +601,56 @@ async function verifyTgInitData(initData, botToken) {
 
 const memFallback = new Map();
 class Store {
-  constructor(kv, env) { this.kv = kv || null; this.env = env || {}; }
+  constructor(kv, env) { this.kv = kv || null; this.env = env || {}; this.reads = new Map(); }
   async get(k) {
-    if (this.kv) { try { return await this.kv.get(k, 'json'); } catch (e) { return null; } }
-    const v = memFallback.get(k);
-    return v == null ? null : JSON.parse(v);
+    // One upstream read per key per request; callers cannot mutate the cached snapshot.
+    if (!this.reads.has(k)) {
+      const read = this.kv
+        ? this.kv.get(k, /^(tick:|tg:|tgstate:|u:|ph:)/.test(k) ? { type: 'json', cacheTtl: 30 } : 'json')
+        : Promise.resolve().then(function () {
+          const entry = memFallback.get(k);
+          if (!entry) return null;
+          if (entry.expiresAt && entry.expiresAt <= Date.now()) { memFallback.delete(k); return null; }
+          return JSON.parse(entry.value);
+        });
+      this.reads.set(k, Promise.resolve(read).then(function (v) { return v == null ? null : JSON.stringify(v); }));
+    }
+    try { const value = await this.reads.get(k); return value == null ? null : JSON.parse(value); }
+    catch (e) { this.reads.delete(k); throw e; }
   }
   async set(k, v, ttl) {
-    if (this.kv) { try { await this.kv.put(k, JSON.stringify(v), ttl ? { expirationTtl: ttl } : undefined); } catch (e) { } }
-    else memFallback.set(k, JSON.stringify(v));
+    const value = JSON.stringify(v);
+    // TTL writes must still refresh expiration, even if the value is unchanged.
+    if (!ttl && this.reads.has(k) && await this.reads.get(k) === value) return;
+    if (this.kv) await this.kv.put(k, value, ttl ? { expirationTtl: Math.max(60, Math.ceil(ttl)) } : undefined);
+    else memFallback.set(k, { value: value, expiresAt: ttl ? Date.now() + ttl * 1000 : 0 });
+    this.reads.set(k, Promise.resolve(value));
   }
   async del(k) {
-    if (this.kv) { try { await this.kv.delete(k); } catch (e) { } }
+    if (this.kv) await this.kv.delete(k);
     else memFallback.delete(k);
+    this.reads.set(k, Promise.resolve(null));
+  }
+  async listPage(prefix, cursor, limit) {
+    limit = Math.max(1, Math.min(1000, Number(limit) || 1000));
+    if (this.kv) {
+      const r = await this.kv.list({ prefix: prefix, limit: limit, ...(cursor ? { cursor: cursor } : {}) });
+      return { keys: r.keys.map(function (k) { return k.name; }), cursor: r.list_complete ? '' : r.cursor };
+    }
+    const keys = [];
+    for (const [key, entry] of memFallback) {
+      if (entry.expiresAt && entry.expiresAt <= Date.now()) { memFallback.delete(key); continue; }
+      if (key.startsWith(prefix) && (!cursor || key > cursor)) keys.push(key);
+    }
+    keys.sort();
+    const page = keys.slice(0, limit);
+    return { keys: page, cursor: keys.length > limit ? page[page.length - 1] : '' };
   }
   async list(prefix) {
-    if (this.kv) { try { const r = await this.kv.list({ prefix: prefix }); return r.keys.map(function (k) { return k.name; }); } catch (e) { return []; } }
-    const out = [];
-    for (const k of memFallback.keys()) if (k.startsWith(prefix)) out.push(k);
-    return out;
+    const keys = [];
+    let cursor = '';
+    do { const page = await this.listPage(prefix, cursor, 1000); keys.push(...page.keys); cursor = page.cursor; } while (cursor);
+    return keys;
   }
 }
 
@@ -630,7 +700,9 @@ function normalizeChannelId(v) {
   return s;
 }
 function extractVaultChatId(raw) {
-  let s = String(raw || '').trim().replace(/^[—–•\-]+\s*/, '');
+  let s = String(raw || '').trim();
+  if (/^-100\d{6,20}$/.test(s)) return s;
+  s = s.replace(/^[—–•\-]+\s*/, '');
   if (!s) return '';
   const parsed = parseTmeLink(s);
   if (parsed && parsed.chatId) return normalizeChannelId(parsed.chatId);
@@ -662,6 +734,23 @@ function defaultVaultChatId(set) {
     }
   }
   return '';
+}
+function parseVersionLinks(raw) {
+  const links = String(raw || '').split(/[,،;\n\r]+/).map(function (x) { return x.trim(); }).filter(Boolean);
+  if (!links.length || links.length > 10) throw new Error('برای هر نسخه بین ۱ تا ۱۰ لینک تلگرام وارد کنید');
+  const seen = new Set(), parsed = [];
+  for (let i = 0; i < links.length; i++) {
+    // parseTmeLink is permissive for imported captions; this input must be a whole URL.
+    if (!/^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/(?:c\/\d+|[A-Za-z0-9_]+)\/\d+\/?(?:\?[^\s,،;]*)?$/.test(links[i])) throw new Error('لینک شماره ' + (i + 1) + ' معتبر نیست');
+    const p = parseTmeLink(links[i]);
+    if (!p) throw new Error('لینک شماره ' + (i + 1) + ' معتبر نیست');
+    const key = (p.chatId || String(p.user).toLowerCase()) + '/' + p.msgId;
+    if (!seen.has(key)) { seen.add(key); parsed.push(p); }
+  }
+  return parsed;
+}
+function versionSources(source) {
+  return source && Array.isArray(source.parts) && source.parts.length ? source.parts : (source ? [source] : []);
 }
 function hydrateSource(source, set) {
   if (!source) return source;
@@ -775,6 +864,95 @@ function rewriteSource(source, set) {
     }
   }
   return out;
+}
+async function resolveMirrorSource(store, source, set) {
+  const original=hydrateSource(source,{...set,vaultRewrite:'',vaultRewriteEnv:''});
+  const rewritten=hydrateSource(source,set);
+  if (!original || !rewritten) return rewritten;
+  if (String(original.chatId || original.user)===String(rewritten.chatId || rewritten.user)) {
+    const from=String(original.chatId || original.user);
+    const overrides={...parseRewriteMap(set?.vaultRewrite),...parseRewriteMap(set?.vaultRewriteEnv)};
+    if (!overrides[normVaultKey(from)]) {
+      const active=await store.get('mirror-active:'+from);
+      if (active?.chatId) {
+        const mapped=await store.get('mirror:'+from+'/'+original.msgId+'/'+active.chatId);
+        if (validMirrorRecord(mapped,active.chatId)) return mirrorRecordSource(original,mapped);
+      }
+    }
+    return rewritten;
+  }
+  const from=String(original.chatId || original.user), to=String(rewritten.chatId || rewritten.user);
+  const record=await store.get('mirror:'+from+'/'+original.msgId+'/'+to);
+  if (record && String(record.chatId)===to && Number.isSafeInteger(record.msgId) && record.msgId>0)
+    return {...rewritten,chatId:to,user:'',msgId:String(record.msgId),fileId:'',tmeUrl:'https://t.me/c/'+to.replace(/^-100/,'')+'/'+record.msgId};
+  let configured=false;
+  try { configured=!!contentChannelRules(store.env || {})[from]; } catch {}
+  const managed=configured || await store.get('mirror-pair:'+from+'/'+to) || (await store.listPage('mirror-pair:'+from+'/','',1)).keys.length>0;
+  if (managed) throw new Error('نگاشت این فایل در مخزن پشتیبان ثبت نشده است؛ شماره پیام منبع در مقصد حدس زده نمی‌شود');
+  // Legacy, manually synchronized archives retain their existing rewrite behavior.
+  return rewritten;
+}
+function validMirrorRecord(record,chatId) {
+  return record && /^-100\d{6,20}$/.test(String(record.chatId)) && String(record.chatId)===String(chatId) && Number.isSafeInteger(record.msgId) && record.msgId>0;
+}
+function mirrorRecordSource(source,record) {
+  return {...source,chatId:String(record.chatId),user:'',msgId:String(record.msgId),fileId:'',
+    tmeUrl:'https://t.me/c/'+String(record.chatId).replace(/^-100/,'')+'/'+record.msgId};
+}
+function mirrorFailureEligible(result) {
+  const text=String(result?.description || '');
+  if (result?.ok || /too many requests|retry after|timed? ?out|network|fetch failed|blocked by the user|user is deactivated|unauthorized/i.test(text)) return false;
+  return /message to (copy|forward) not found|message (can't|cannot) be copied|chat not found|channel_private|channel_invalid|message_id_invalid|bot is not a member of the channel chat|protected content/i.test(text);
+}
+async function deliverWithMirrorFallback(store,token,chatId,source,caption,extra) {
+  const set=extra?.set || {}, cleanSet={...set,vaultRewrite:'',vaultRewriteEnv:''};
+  const original=hydrateSource(source,cleanSet);
+  const attempts=new Set();
+  const attempt=async src=>{
+    const id=JSON.stringify([src.chatId || src.user,src.msgId,src.fileId || '']);
+    if (attempts.has(id)) return null;
+    attempts.add(id);
+    return deliverMedia(token,chatId,src,caption,{...extra,set:cleanSet});
+  };
+  let result;
+  try {
+    const preferred=await resolveMirrorSource(store,source,set);
+    result=await attempt(preferred);
+    if (result?.ok || !mirrorFailureEligible(result)) return result;
+  } catch(e) {
+    // A transport failure may have delivered the file: don't send another copy.
+    if (!String(e.message).startsWith('نگاشت این فایل')) throw e;
+    result={ok:false,description:e.message};
+  }
+  if (!original?.chatId || !original.msgId) return result;
+  // Discover persisted copies, independently of today's ingestion rules.
+  const prefix='mirror:'+original.chatId+'/'+original.msgId+'/';
+  const page=await store.listPage(prefix,'',20);
+  const records=[];
+  for (const key of page.keys) {
+    const dest=key.slice(prefix.length), record=await store.get(key);
+    if (validMirrorRecord(record,dest)) records.push(record);
+  }
+  let order=[];
+  try { order=contentChannelRules(store.env || {})[String(original.chatId)]?.targets || []; } catch {}
+  records.sort((a,b)=>(order.includes(a.chatId)?order.indexOf(a.chatId):100)-(order.includes(b.chatId)?order.indexOf(b.chatId):100));
+  // Retry the original too when an explicitly selected backup has failed.
+  const candidates=[original,...records.map(record=>mirrorRecordSource(original,record))];
+  for (const candidate of candidates) {
+    const next=await attempt(candidate);
+    if (!next) continue;
+    result=next;
+    if (result.ok) {
+      if (String(candidate.chatId)===String(original.chatId)) {
+        try { if (await store.get('mirror-active:'+original.chatId)) await store.del('mirror-active:'+original.chatId); } catch {}
+      } else {
+        try { await store.set('mirror-active:'+original.chatId,{chatId:String(candidate.chatId)}); } catch {} // Routing hint only; delivery already succeeded.
+      }
+      return result;
+    }
+    if (!mirrorFailureEligible(result)) return result;
+  }
+  return result;
 }
 function fileBotToken(set) {
   return (set && set.deliveryBotToken) || (set && set.botToken) || '';
@@ -1033,7 +1211,7 @@ function upsertVariantFile(bag, track, quality, opts) {
   if (!q) return '';
   const prev = v[t][q] || {};
   let files = variantFilesOf(prev);
-  const title = String(opts.title || '').trim().slice(0, 80);
+  const title = String(opts.title || '').trim().slice(0, 220);
   const fileId = String(opts.fileId || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 20);
   if (opts.remove) {
     files = files.filter(function (f) { return f.id !== fileId; });
@@ -1042,10 +1220,10 @@ function upsertVariantFile(bag, track, quality, opts) {
     files = files.map(function (f) {
       if (f.id !== fileId) return f;
       found = true;
-      return { id: f.id, title: title || f.title || '', source: opts.source || f.source, sizeBytes: opts.sizeBytes != null ? opts.sizeBytes : f.sizeBytes };
+      return { ...f, ...(opts.contentIdentity ? {contentIdentity:opts.contentIdentity} : {}), id: f.id, title: title || f.title || '', source: opts.source || f.source, sizeBytes: opts.sizeBytes != null ? opts.sizeBytes : f.sizeBytes };
     });
     if (!found && opts.source) {
-      files.push({ id: fileId || ('f_' + randomHex(3)), title: title, source: opts.source, sizeBytes: opts.sizeBytes || null });
+      files.push({ ...(opts.contentIdentity ? {contentIdentity:opts.contentIdentity} : {}), id: fileId || ('f_' + randomHex(3)), title: title, source: opts.source, sizeBytes: opts.sizeBytes || null });
     }
   } else if (opts.source) {
     files.push({ id: 'f_' + randomHex(3), title: title, source: opts.source, sizeBytes: opts.sizeBytes || null });
@@ -1233,6 +1411,8 @@ function pickDownloadSource(item, opts) {
   return { error: 'فایل این کیفیت موجود نیست' };
 }
 function walkSources(item, cb) {
+  const visit = cb;
+  cb = function (source) { versionSources(source).forEach(visit); };
   if (item.source) cb(item.source);
   function walkBag(bag) {
     if (bag.source) cb(bag.source);
@@ -1670,6 +1850,31 @@ function digitsOnly(s) {
 function formatCardNumber(s) {
   const d = digitsOnly(s).slice(0, 16);
   return d.replace(/(\d{4})(?=\d)/g, '$1 ');
+}
+// Validate the complete list: never silently drop a mistyped price.
+function parseStarPacks(value) {
+  let rows = value;
+  if (typeof value === 'string') {
+    rows = value.split('\n').map(function (line) { return line.trim(); }).filter(Boolean).map(function (line) {
+      const parts = line.split('|');
+      if (parts.length !== 2) throw new Error('هر خط بسته استارز باید به صورت «استارز | سکه» باشد');
+      return { stars: parts[0], units: parts[1] };
+    });
+  }
+  if (!Array.isArray(rows) || rows.length < 1 || rows.length > 8) throw new Error('بین ۱ تا ۸ بسته استارز وارد کنید؛ برای توقف فروش، شارژ با استارز را غیرفعال کنید');
+  function positiveInteger(value) {
+    if (typeof value !== 'string' && typeof value !== 'number') return NaN;
+    const text = toEnDigits(value).trim();
+    if (!/^[0-9]+$/.test(text)) return NaN;
+    const n = Number(text);
+    return Number.isSafeInteger(n) && n > 0 ? n : NaN;
+  }
+  return rows.map(function (row, i) {
+    const stars = positiveInteger(row && row.stars);
+    const units = positiveInteger(row && row.units);
+    if (!Number.isFinite(stars) || !Number.isFinite(units) || stars > 10000) throw new Error('بسته ' + (i + 1) + ': استارز باید عدد صحیح ۱ تا ۱۰۰۰۰ و سکه عدد صحیح مثبت باشد');
+    return { stars: stars, units: units };
+  });
 }
 function parseK2kPacksText(text) {
   return String(text || '').split('\n').map(function (line) {
@@ -2117,6 +2322,15 @@ async function ensureTgAdmin(store, user) {
   return user;
 }
 
+function signupBonusOf(set) {
+  const value = set && set.signupBonus;
+  if (value == null || value === '') return CONFIG.SIGNUP_BONUS;
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n >= 0 ? n : CONFIG.SIGNUP_BONUS;
+}
+function telegramDisplayName(from) {
+  return [from.first_name, from.last_name].filter(Boolean).join(' ').trim() || from.username || ('کاربر ' + from.id);
+}
 async function createTgUser(store, opts) {
   const existing = await findUserByTg(store, opts.tgId);
   if (existing) return existing;
@@ -2147,7 +2361,8 @@ async function createTgUser(store, opts) {
     txs: [],
   };
   // Credit the welcome gift only when a new account is created, independently of referral rewards.
-  await creditWallet(store, user, CONFIG.SIGNUP_BONUS, 'signup_bonus', 'هدیهٔ اولین ثبت‌نام');
+  user.signupBonusGranted = signupBonusOf(await getSettings(store));
+  if (user.signupBonusGranted > 0) await creditWallet(store, user, user.signupBonusGranted, 'signup_bonus', 'هدیهٔ اولین ثبت‌نام');
   await store.set('tg:' + user.tgId, user.username);
   await store.set('refcode:' + refCode, user.username);
   if (user.phone) await store.set('ph:' + user.phone, user.username);
@@ -2161,6 +2376,11 @@ async function createTgUser(store, opts) {
 async function ingestChannelMessage(store, msg, log) {
   if (!msg || !msg.chat) return;
   const set = await getSettings(store);
+  // Editorial uploads are drafts until confirmed, not standalone catalogue posts.
+  if (store.env.CONTENT_BOT_TOKEN) {
+    const channels = contentChannelRules(store.env), chatId = String(msg.chat.id);
+    if (chatId === String(defaultVaultChatId(set)) || channels[chatId] || Object.values(channels).some(rule=>rule.targets.includes(chatId))) return { skipped: true };
+  }
   const chat = msg.chat;
   const id = msg.message_id;
   const media = msg.video || msg.document || msg.audio || null;
@@ -2203,7 +2423,7 @@ async function ingestChannelMessage(store, msg, log) {
   }
   if (media && media.file_size) item.media = { sizeBytes: media.file_size, width: media.width || null, height: media.height || null, kind: src.mediaType || 'video' };
   if (media && media.width) item.quality = item.quality || guessQuality(media.width);
-  await store.set('it:' + item.id, item);
+  await saveItemRecord(store, item);
   await store.set(srcKey, item.id);
   await idxUpsert(store, item);
   if (log) log.push('➕ ' + cleanTitle);
@@ -2877,10 +3097,9 @@ async function apiItem(store, id, request) {
   const canPlay = allowed(user, item, set);
   item.views = (item.views || 0) + 1;
   const lastV = viewsThrottle.get(item.id) || 0;
-  if (Date.now() - lastV > 60000) {
+  if (Date.now() - lastV > 300000) {
     viewsThrottle.set(item.id, Date.now());
     await store.set('it:' + item.id, item);
-    await idxUpsert(store, item);
   }
   const views = item.views;
   let out;
@@ -3001,7 +3220,7 @@ async function apiAuthStart(store, body, request) {
 
 async function apiAuthTicket(store, id) {
   const rec = await store.get('tick:' + String(id || ''));
-  if (!rec) return json({ status: 'missing' }, 404);
+  if (!rec || Date.now() - rec.createdAt > CONFIG.TICKET_TTL * 1000) return json({ status: 'missing' }, 404);
   if (rec.status === 'ready') return json({ status: 'ready', token: rec.token, user: rec.user });
   return json({ status: rec.status || 'pending' });
 }
@@ -3120,17 +3339,17 @@ function contactKeyboard() {
 }
 function phoneAskText(set) {
   const name = (set && set.siteName) || 'سایت';
-  return 'برای ورود / ثبت‌نام در ' + name + '، روی دکمه زیر بزن تا شماره‌ات ارسال بشه:';
+  return 'برای ورود / ثبت‌نام در ' + name + '، روی دکمه زیر بزن تا شماره‌ات ارسال بشه:\n\nاین اطلاعات نزد ما محفوظ می‌ماند و صرفاً برای تکمیل حساب کاربری شما دریافت می‌شود.';
 }
 async function askOwnPhone(token, chatId, set, extraLine) {
   const text = (extraLine ? extraLine + '\n\n' : '') + phoneAskText(set);
   return tgSend(token, chatId, text, { reply_markup: contactKeyboard() });
 }
-async function sendMiniAppReturn(token, chatId, isNew, isAdmin) {
+async function sendMiniAppReturn(token, chatId, isNew, isAdmin, signupBonus) {
   let text = isNew
     ? ('✅ ثبت‌نام انجام شد' + (isAdmin ? ' — شما مدیر سایت هستید' : '') + '.')
     : '✅ ورود انجام شد.';
-  if (isNew) text += '\n🎁 ' + CONFIG.SIGNUP_BONUS.toLocaleString('fa-IR') + ' سکه هدیهٔ اولین ثبت‌نام به کیف پول شما اضافه شد.';
+  if (isNew && signupBonus > 0) text += '\n🎁 ' + signupBonus.toLocaleString('fa-IR') + ' سکه هدیهٔ اولین ثبت‌نام به کیف پول شما اضافه شد.';
   text += '\nبرای ادامه، روی دکمهٔ «ورود به مینی‌اپ» بزنید.';
   return tgSend(token, chatId, text, {
     reply_markup: { inline_keyboard: [[{ text: 'ورود به مینی‌اپ', url: CONFIG.MINI_APP_URL }]] },
@@ -3223,19 +3442,27 @@ async function fulfillDownload(store, ctx, token, chatId, dl, set) {
   const sec = Number(set.vanishSec) || CONFIG.VANISH_SEC;
   const cap = buildMediaCaption(set, item);
   const kb = adKeyboard(set);
-  const src = hydrateSource(picked.source, set);
-  const r = await deliverMedia(token, chatId, src, cap, { reply_markup: kb || undefined, set: set });
-  if (!r.ok) {
-    const dbg = 'chatId=' + (src.chatId || '-') + ' msg=' + (src.msgId || '-') + ' user=' + (src.user || '-') + ' vault=' + (defaultVaultChatId(set) || '-');
-    await tgSend(token, chatId, '❌ ارسال فایل ناموفق بود:\n' + (r.description || 'خطا') + '\n<code>' + dbg + '</code>');
-    return;
+  const sources = versionSources(picked.source);
+  dl.sentParts = dl.sentParts || [];
+  for (let i = 0; i < sources.length; i++) {
+    // Resume identity is the original file, not whichever mirror delivered it.
+    const identity=hydrateSource(sources[i],{...set,vaultRewrite:'',vaultRewriteEnv:''});
+    const partKey=JSON.stringify([identity.chatId || identity.user || '',identity.msgId || '',identity.fileId || '']);
+    if (dl.sentParts.includes(partKey)) continue;
+    const r=await deliverWithMirrorFallback(store,token,chatId,sources[i],cap,{reply_markup:kb || undefined,set});
+    if (!r.ok) {
+      await tgSend(token, chatId, '❌ ارسال فایل ' + (i + 1) + ' از ' + sources.length + ' ناموفق بود.\n' + htmlEscape(r.description || 'خطا') + '\nبرای ادامه، همان لینک دریافت را دوباره باز کنید؛ فایل‌های ارسال‌شده در این درخواست تکرار نمی‌شوند.');
+      return;
+    }
+    const sentId = r.result && r.result.message_id;
+    if (sentId) await vanishLater(ctx, token, chatId, sentId, sec);
+    dl.sentParts.push(partKey);
+    if (i === sources.length - 1) { dl.used = true; dl.usedAt = Date.now(); }
+    await store.set('dl:' + dl.id, dl, 3600);
   }
-  dl.used = true;
-  dl.usedAt = Date.now();
-  await store.set('dl:' + dl.id, dl, 3600);
-  const sentId = r.result && r.result.message_id;
-  if (sentId) await vanishLater(ctx, token, chatId, sentId, sec);
-  await tgSend(token, chatId, '✅ فایل ارسال شد.\n⏱ دقیقاً ' + sec + ' ثانیه فرصت دارید آن را Forward کنید؛ بعد از آن ربات پیام را پاک می‌کند.');
+  if (!dl.used) { dl.used = true; dl.usedAt = Date.now(); await store.set('dl:' + dl.id, dl, 3600); }
+  await tgSend(token, chatId, '✅ ' + sources.length + ' فایل این نسخه ارسال شد.\n⏱ هر فایل ' + sec + ' ثانیه پس از ارسال پاک می‌شود؛ به‌موقع آن را Forward کنید.');
+
 }
 
 async function handleStartPayload(store, ctx, set, from, chatId, payload, token) {
@@ -3378,7 +3605,7 @@ async function finishNewUserFromState(store, set, from, chatId, state, phone, na
   }
   await completeTicket(store, ticket, user);
   await store.del('tgstate:' + tgId);
-  await sendMiniAppReturn(token, chatId, isNew, user.role === 'admin');
+  await sendMiniAppReturn(token, chatId, isNew, user.role === 'admin', user.signupBonusGranted);
   return user;
 }
 
@@ -3456,10 +3683,11 @@ async function handleTgUpdate(store, update, ctx, request, opts) {
     }
     const phone = normPhone(msg.contact.phone_number);
     const st = state || { mode: 'wait_contact', ticket: '', refCode: '' };
-    st.phone = phone;
-    st.mode = 'wait_name';
-    await store.set('tgstate:' + tgId, st, 1800);
-    await tgSend(token, chatId, '👤 لطفاً نام و نام خانوادگی خود را وارد کنید:', { reply_markup: { remove_keyboard: true } });
+    const user = await finishNewUserFromState(store, set, from, chatId, st, phone, telegramDisplayName(from));
+    if (st.pendingDl && user) {
+      const dl = await store.get('dl:' + st.pendingDl);
+      if (dl && !dl.used) await fulfillDownload(store, ctx, token, chatId, dl, set);
+    }
     return json({ ok: true });
   }
 
@@ -3469,16 +3697,12 @@ async function handleTgUpdate(store, update, ctx, request, opts) {
   }
 
   if (state && state.mode === 'wait_name') {
-    const name = text.replace(/[<>]/g, '').slice(0, 40);
-    if (/^[0-9+\s()-]{8,}$/.test(name)) {
-      await tgSend(token, chatId, '👤 لطفاً نام و نام خانوادگی خود را وارد کنید:');
+    // Complete registrations started before the name step was removed.
+    if (!state.phone) {
+      await askOwnPhone(token, chatId, set);
       return json({ ok: true });
     }
-    if (name.length < 2) {
-      await tgSend(token, chatId, '👤 لطفاً نام و نام خانوادگی خود را وارد کنید:');
-      return json({ ok: true });
-    }
-    const user = await finishNewUserFromState(store, set, from, chatId, state, state.phone, name);
+    const user = await finishNewUserFromState(store, set, from, chatId, state, state.phone, telegramDisplayName(from));
     if (state.pendingDl && user) {
       const dl = await store.get('dl:' + state.pendingDl);
       if (dl && !dl.used) await fulfillDownload(store, ctx, token, chatId, dl, set);
@@ -4361,7 +4585,7 @@ async function adminUpsertItem(store, set, body, existing) {
     }
   }
   item.updatedAt = Date.now();
-  await store.set('it:' + item.id, item);
+  await saveItemRecord(store, item);
   bustItem(item.id);
   await idxUpsert(store, item);
   return { item: item };
@@ -4406,16 +4630,110 @@ async function maybeSetWebhook(store, set, origin) {
   }
 }
 
+const MAINTENANCE_PREFIXES = ['src:', 'views:', 'sub:', 'tg:', 'ph:', 'tgu:', 'refcode:', 'adstat:', 'k2k:track:'];
+async function orphanReason(store, key) {
+  if (!MAINTENANCE_PREFIXES.some(function (p) { return key.startsWith(p); })) return '';
+  const value = await store.get(key);
+  if (value == null) return '';
+  if (key.startsWith('src:')) {
+    if (typeof value !== 'string' || !/^i_[a-z0-9]+$/.test(value)) return '';
+    return await store.get('it:' + value) ? '' : 'ارجاع به محتوای حذف‌شده';
+  }
+  if (key.startsWith('views:')) return await store.get('it:' + key.slice(6)) ? '' : 'آمار محتوای حذف‌شده';
+  if (key.startsWith('sub:')) {
+    if (!value.itemId) return '';
+    return await store.get('it:' + value.itemId) ? '' : 'زیرنویس محتوای حذف‌شده';
+  }
+  if (key.startsWith('adstat:')) {
+    const ads = await store.get('ads');
+    return Array.isArray(ads) && !ads.some(function (ad) { return 'adstat:' + ad.id === key; }) ? 'آمار تبلیغ حذف‌شده' : '';
+  }
+  if (key.startsWith('k2k:track:')) {
+    if (typeof value !== 'string') return '';
+    return await store.get('k2k:' + value) ? '' : 'کد پیگیری فاکتور حذف‌شده یا منقضی';
+  }
+  if (typeof value !== 'string' || !/^[a-z0-9_]+$/.test(value)) return '';
+  return await store.get('u:' + value) ? '' : 'ارجاع به کاربر حذف‌شده';
+}
+async function maintenanceBatch(store, body) {
+  if (body.action === 'delete') {
+    if (body.confirm !== 'DELETE_ORPHANS' || !Array.isArray(body.keys) || body.keys.length > 10) return json({error:'درخواست پاک‌سازی نامعتبر'}, 400);
+    let deleted = 0, skipped = 0;
+    for (const key of new Set(body.keys)) {
+      if (typeof key !== 'string' || key.length > 512) return json({error:'کلید نامعتبر'}, 400);
+      // Re-check every dependency in this new request, never trust the preview.
+      if (await orphanReason(store, key)) { await store.del(key); deleted++; } else skipped++;
+    }
+    return json({deleted:deleted, skipped:skipped});
+  }
+  const prefix = body.prefix || 'src:';
+  if (!MAINTENANCE_PREFIXES.includes(prefix)) return json({error:'گروه نامعتبر'}, 400);
+  const page = await store.listPage(prefix, String(body.cursor || '').slice(0, 2048), 10);
+  const candidates = [];
+  for (const key of page.keys) {
+    const reason = await orphanReason(store, key);
+    if (reason) candidates.push({key:key, reason:reason});
+  }
+  return json({scanned:page.keys.length, candidates:candidates, cursor:page.cursor});
+}
+async function contentSetupStatus(store, admin) {
+  const env=store.env, settings=await getSettings(store);
+  const token=String(env.CONTENT_BOT_TOKEN || '');
+  const independent=!!token && token!==settings.botToken && token!==fileBotToken(settings);
+  const adminIds=String(env.CONTENT_ADMIN_IDS || '').split(',').map(x=>x.trim()).filter(Boolean);
+  let channelMessage='اختیاری: هنوز کانالی تنظیم نشده؛ گفتگوی خصوصی ربات قابل استفاده است.', channelsOk=true;
+  try {
+    const rules=contentChannelRules(env), ids=Object.keys(rules);
+    const samples=['-1001111111111','-1002222222222','-1003333333333'];
+    if (ids.some(id=>samples.includes(id) || rules[id].targets.some(t=>samples.includes(t)))) {
+      channelsOk=false; channelMessage='شناسه‌های کانال نمونه هنوز در تنظیمات هستند. آن‌ها را با شناسه واقعی کانال خودتان جایگزین کنید.';
+    } else if (ids.length) channelMessage=ids.length+' کانال تعریف شده؛ عضویت و مجوز ادمین ربات در تلگرام باید جداگانه بررسی شود.';
+  } catch(e) { channelsOk=false; channelMessage=e.message; }
+  let origin=''; try { origin=await contentSiteOrigin(env); } catch {}
+  const steps=[
+    {ok:independent,title:'۱. توکن ربات مدیریت',help:!token?'در Cloudflare همین Worker، CONTENT_BOT_TOKEN را با نوع Secret اضافه کنید.':!independent?'توکن باید متعلق به ربات سوم باشد، نه ربات ورود یا دانلود.':'توکن تنظیم شده است. برنامه نمی‌تواند تشخیص دهد آن را Text گذاشته‌اید یا Secret؛ در پنل Cloudflare نوع Secret را انتخاب کنید.'},
+    {ok:/^[A-Za-z0-9_-]{32,256}$/.test(String(env.CONTENT_WEBHOOK_SECRET || '')),title:'۲. رمز اتصال ربات',help:'CONTENT_WEBHOOK_SECRET یک رمز تصادفی جدا از توکن است. با دکمه زیر بسازید و در Cloudflare با نوع Secret ذخیره کنید.'},
+    {ok:/^\d+(?:\s*,\s*\d+)*$/.test(String(env.CONTENT_ADMIN_IDS || '').trim()) && (!admin?.tgId || adminIds.includes(String(admin.tgId))),title:'۳. شناسه مدیر',help:'CONTENT_ADMIN_IDS باید شناسه عددی تلگرام حساب مدیر باشد؛ نام کاربری یا عدد نمونه 42 نیست.'},
+    {ok:!!env.EDITOR,title:'۴. حافظه گفتگوی ربات',help:'EDITOR متغیر متنی نیست. برای نصب خودکار، کل پروژه را دانلود و Extract کنید و INSTALL-EDITOR.cmd را اجرا کنید. Node.js LTS لازم است؛ سپس ورود مرورگری Cloudflare و تأیید نام Worker. نصب‌کننده کد همین پوشه را منتشر و حافظه را متصل می‌کند.'},
+    {ok:!!env.KV && !!origin && !!defaultVaultChatId(settings),title:'۵. سایت، مخزن و دیتابیس',help:!origin?'دامنه HTTPS سایت را در تنظیمات سایت یا SITE_PUBLIC_ORIGIN مشخص کنید.':!defaultVaultChatId(settings)?'کانال مخزن فعلی را در تنظیمات سایت مشخص کنید.':'از KV و مخزن فعلی سایت استفاده می‌شود؛ دیتابیس جدید نسازید.'},
+    {ok:channelsOk,title:'۶. کانال‌ها (اختیاری)',help:channelMessage}
+  ];
+  return {steps,ready:steps.every(x=>x.ok),adminId:String(admin?.tgId || ''),origin};
+}
+
+async function setupContentWebhook(store, request) {
+  const env = store.env, settings = await getSettings(store);
+  const checklist = await contentSetupStatus(store);
+  if (!checklist.ready) return json({error:checklist.steps.filter(step=>!step.ok).map(step=>step.title+': '+step.help).join('\n')},400);
+  if (!env.CONTENT_BOT_TOKEN || !env.EDITOR || !env.KV) return json({error:'CONTENT_BOT_TOKEN و bindingهای EDITOR و KV را روی همین Worker تنظیم کنید'},400);
+  if (!/^[A-Za-z0-9_-]{32,256}$/.test(String(env.CONTENT_WEBHOOK_SECRET || ''))) return json({error:'CONTENT_WEBHOOK_SECRET باید ۳۲ تا ۲۵۶ کاراکتر معتبر داشته باشد'},400);
+  if (!/^\d+(?:\s*,\s*\d+)*$/.test(String(env.CONTENT_ADMIN_IDS || '').trim())) return json({error:'CONTENT_ADMIN_IDS باید شناسه عددی مدیران باشد'},400);
+  if (env.CONTENT_BOT_TOKEN === settings.botToken || env.CONTENT_BOT_TOKEN === fileBotToken(settings)) return json({error:'توکن ربات مدیریت باید با ربات ورود و ارسال فایل متفاوت باشد'},400);
+  let origin;
+  try { contentChannelRules(env); origin = await contentSiteOrigin(env); } catch (e) { return json({error:e.message},400); }
+  const url = origin + '/api/tg/content-webhook';
+  const result = await botApi(env.CONTENT_BOT_TOKEN, 'setWebhook', {
+    url:url, secret_token:env.CONTENT_WEBHOOK_SECRET, allowed_updates:['message','channel_post'],max_connections:1,drop_pending_updates:false
+  });
+  if (!result.ok) return json({error:'ثبت وبهوک در تلگرام ناموفق بود؛ توکن، دامنه و دسترسی Worker را بررسی کنید'},502);
+  return json({ok:true,url:url});
+}
+
 async function handleAdmin(store, url, request, adminUser) {
   const set = await getSettings(store);
   const p = url.pathname.replace(/^\/api\/admin\//, '');
   const m = request.method;
+
+  if (p === 'content-bot/setup' && m === 'POST') return setupContentWebhook(store, request);
+
+  if (p === 'maintenance' && m === 'POST') return maintenanceBatch(store, await readBody(request, 16 * 1024));
 
   if (p === 'overview' && m === 'GET') {
     const users = await store.list('u:');
     const items = (await store.get('idx')) || [];
     return json({
       items: items.length, users: users.length,
+      contentBotSetup: await contentSetupStatus(store, adminUser),
       lastSyncAt: set.lastSyncAt, lastSyncLog: set.lastSyncLog,
       botSet: !!set.botToken, botFromEnv: !!set.botFromEnv, botUserFromEnv: !!set.botUserFromEnv, autoSync: !!set.autoSync,
       deliverySet: !!set.deliveryBotToken, deliveryFromEnv: !!set.deliveryFromEnv, deliveryUserFromEnv: !!set.deliveryUserFromEnv,
@@ -4440,6 +4758,7 @@ async function handleAdmin(store, url, request, adminUser) {
       zarinpalMerchant: set.zarinpalMerchant ? maskToken(set.zarinpalMerchant) : '',
       starsEnabled: set.starsEnabled !== false,
       walletUnitName: set.walletUnitName,
+      signupBonus: signupBonusOf(set),
       sub1m: set.sub1m, sub3m: set.sub3m, sub6m: set.sub6m, sub1y: set.sub1y,
       dlClickPrice: set.dlClickPrice, refSignupBonus: set.refSignupBonus, refPurchasePercent: set.refPurchasePercent,
       vanishSec: set.vanishSec,
@@ -4461,6 +4780,11 @@ async function handleAdmin(store, url, request, adminUser) {
 
   if (p === 'settings' && m === 'POST') {
     const body = await readBody(request, 50 * 1024);
+    let starPacks;
+    if (body.starPacksText !== undefined || body.starPacks !== undefined) {
+      try { starPacks = parseStarPacks(body.starPacksText !== undefined ? body.starPacksText : body.starPacks); }
+      catch (e) { return json({ error: e.message }, 400); }
+    }
     if (body.siteName !== undefined) set.siteName = String(body.siteName).slice(0, 60) || set.siteName;
     if (body.tagline !== undefined) set.tagline = String(body.tagline).slice(0, 140) || '';
     if (body.autoSync !== undefined) set.autoSync = !!body.autoSync;
@@ -4488,6 +4812,11 @@ async function handleAdmin(store, url, request, adminUser) {
       if (wsl >= 0) wd = wd.slice(0, wsl);
       set.widgetDomain = wd.slice(0, 80);
     }
+    if (body.signupBonus !== undefined) {
+      const n = Number(body.signupBonus);
+      if (body.signupBonus === '' || body.signupBonus === null || typeof body.signupBonus === 'boolean' || !Number.isSafeInteger(n) || n < 0) return json({ error: 'هدیه ثبت‌نام باید عدد صحیح صفر یا بیشتر باشد' }, 400);
+      set.signupBonus = n;
+    }
     if (body.walletUnitName !== undefined) set.walletUnitName = String(body.walletUnitName).slice(0, 20) || set.walletUnitName;
     ['sub1m', 'sub3m', 'sub6m', 'sub1y', 'dlClickPrice', 'refSignupBonus', 'refPurchasePercent', 'vanishSec'].forEach(function (k) {
       if (body[k] !== undefined) {
@@ -4511,9 +4840,7 @@ async function handleAdmin(store, url, request, adminUser) {
       const z = String(body.zarinpalMerchant).trim();
       if (z) set.zarinpalMerchant = z;
     }
-    if (Array.isArray(body.starPacks)) set.starPacks = body.starPacks.slice(0, 8).map(function (p) {
-      return { stars: Number(p.stars) || 0, units: Number(p.units) || 0 };
-    }).filter(function (p) { return p.stars > 0 && p.units > 0; });
+    if (starPacks !== undefined) set.starPacks = starPacks;
     if (body.starShopsText !== undefined) {
       set.starShops = String(body.starShopsText).split('\n').map(function (line) {
         const p = String(line || '').split('|').map(function (x) { return x.trim(); });
@@ -4717,14 +5044,14 @@ async function handleAdmin(store, url, request, adminUser) {
   if (mm && m === 'DELETE') {
     const item = await getItem(store, mm[1]);
     if (!item) return json({ error: 'یافته نشد' }, 404);
-    await store.del('it:' + item.id);
+    await deleteOwnedIndexes(store, itemSourceKeys(item), item.id);
+    for (const sub of item.subs || []) {
+      const rec = await store.get('sub:' + sub.id);
+      if (rec && rec.itemId === item.id) await store.del('sub:' + sub.id);
+    }
     await store.del('views:' + item.id);
+    await store.del('it:' + item.id);
     bustItem(item.id);
-    const dels = [];
-    walkSources(item, function (src) {
-      if (src && src.user && src.msgId) dels.push(store.del('src:' + src.user + '/' + src.msgId));
-    });
-    await Promise.all(dels);
     const idx = await getIdx(store);
     await store.set('idx', idx.filter(function (x) { return x.id !== item.id; }));
     bustIdx();
@@ -4741,7 +5068,7 @@ async function handleAdmin(store, url, request, adminUser) {
       if (!epFlag) return json({ error: 'قسمت پیدا نشد' }, 404);
       epFlag.premium = !!body.premium;
       item.updatedAt = Date.now();
-      await store.set('it:' + item.id, item);
+      await saveItemRecord(store, item);
       bustItem(item.id);
       await idxUpsert(store, item);
       return json({ item: item });
@@ -4783,7 +5110,7 @@ async function handleAdmin(store, url, request, adminUser) {
     if (!item.source || !(item.source.chatId || item.source.user || item.source.tmeUrl)) item.source = src;
     syncEpisodesFromSeasons(item);
     item.updatedAt = Date.now();
-    await store.set('it:' + item.id, item);
+    await saveItemRecord(store, item);
     bustItem(item.id);
     await store.set('src:' + parsed.user + '/' + parsed.msgId, item.id);
     await idxUpsert(store, item);
@@ -4798,14 +5125,9 @@ async function handleAdmin(store, url, request, adminUser) {
     (item.seasons || []).forEach(function (s) {
       s.episodes = (s.episodes || []).filter(function (x) { return x.id !== mm[2]; });
     });
-    if (ep) {
-      walkSources({ source: ep.source, variants: ep.variants, episodes: [], seasons: [] }, function (src) {
-        if (src && src.user && src.msgId) store.del('src:' + src.user + '/' + src.msgId);
-      });
-    }
     syncEpisodesFromSeasons(item);
     item.updatedAt = Date.now();
-    await store.set('it:' + item.id, item);
+    await saveItemRecord(store, item);
     bustItem(item.id);
     await idxUpsert(store, item);
     return json({ item: item });
@@ -4820,7 +5142,7 @@ async function handleAdmin(store, url, request, adminUser) {
     item.type = 'series';
     syncEpisodesFromSeasons(item);
     item.updatedAt = Date.now();
-    await store.set('it:' + item.id, item);
+    await saveItemRecord(store, item);
     bustItem(item.id);
     await idxUpsert(store, item);
     return json({ item: item });
@@ -4853,7 +5175,7 @@ async function handleAdmin(store, url, request, adminUser) {
       delete vv[track][qk];
       syncEpisodesFromSeasons(item);
       item.updatedAt = Date.now();
-      await store.set('it:' + item.id, item);
+      await saveItemRecord(store, item);
       bustItem(item.id);
       await idxUpsert(store, item);
       return json({ item: item });
@@ -4863,19 +5185,23 @@ async function handleAdmin(store, url, request, adminUser) {
     const fileId = String(body.fileId || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 20);
     const addFile = !!body.addFile;
     const removeFile = !!body.removeFile || (fileId && hasUrl && !raw);
+    const pendingIndexes = [];
     async function parseSrc(link) {
-      const parsed = parseTmeLink(link);
-      if (!parsed) return { error: 'لینک تلگرام معتبر نیست. برای کانال خصوصی: https://t.me/c/آیدی/شماره' };
-      let res = { kind: '', tmeUrl: '', sizeBytes: null };
-      if (!parsed.private) {
-        res = await resolvePost(store, parsed.user, parsed.msgId, true);
+      let parsedLinks;
+      try { parsedLinks = parseVersionLinks(link); }
+      catch (e) { return {error:e.message}; }
+      const parts = [];
+      let size = 0, sizeKnown = true, kind = '';
+      for (const parsed of parsedLinks) {
+        let res = {kind:'', tmeUrl:'', sizeBytes:null};
+        if (!parsed.private) res = await resolvePost(store, parsed.user, parsed.msgId, true);
+        parts.push(sourceFromParsed(parsed, res));
+        if (res.sizeBytes) size += res.sizeBytes; else sizeKnown = false;
+        kind = kind || res.kind || '';
+        pendingIndexes.push(parsed.private ? 'src:c:' + parsed.chatId + '/' + parsed.msgId : 'src:' + parsed.user + '/' + parsed.msgId);
       }
-      const src = sourceFromParsed(parsed, res);
-      const srcKey = parsed.private
-        ? ('src:c:' + parsed.chatId + '/' + parsed.msgId)
-        : ('src:' + parsed.user + '/' + parsed.msgId);
-      await store.set(srcKey, item.id);
-      return { src: src, res: res };
+      const src = parts.length === 1 ? parts[0] : Object.assign({}, parts[0], {parts:parts});
+      return {src:src, res:{sizeBytes:sizeKnown ? size : null, kind:kind}};
     }
     if (removeFile && fileId) {
       upsertVariantFile(bag, track, qk, { fileId: fileId, remove: true });
@@ -4932,7 +5258,8 @@ async function handleAdmin(store, url, request, adminUser) {
     }
     syncEpisodesFromSeasons(item);
     item.updatedAt = Date.now();
-    await store.set('it:' + item.id, item);
+    await saveItemRecord(store, item);
+    for (const key of pendingIndexes) await store.set(key, item.id);
     bustItem(item.id);
     await idxUpsert(store, item);
     return json({ item: item });
@@ -4949,7 +5276,7 @@ async function handleAdmin(store, url, request, adminUser) {
     for (const id of order) if (map[id]) { next.push(map[id]); delete map[id]; }
     for (const k in map) next.push(map[k]);
     item.episodes = next;
-    await store.set('it:' + item.id, item);
+    await saveItemRecord(store, item);
     bustItem(item.id);
     await idxUpsert(store, item);
     return json({ item: item });
@@ -4968,7 +5295,7 @@ async function handleAdmin(store, url, request, adminUser) {
     item.subs = item.subs || [];
     item.subs.push({ id: subId, name: String(body.name || 'زیرنویس'), lang: String(body.lang || 'fa') });
     item.updatedAt = Date.now();
-    await store.set('it:' + item.id, item);
+    await saveItemRecord(store, item);
     bustItem(item.id);
     return json({ item: item });
   }
@@ -4978,7 +5305,7 @@ async function handleAdmin(store, url, request, adminUser) {
     if (!item) return json({ error: 'یافته نشد' }, 404);
     await store.del('sub:' + mm[2]);
     item.subs = (item.subs || []).filter(function (x) { return x.id !== mm[2]; });
-    await store.set('it:' + item.id, item);
+    await saveItemRecord(store, item);
     bustItem(item.id);
     return json({ item: item });
   }
@@ -5028,10 +5355,8 @@ async function handleAdmin(store, url, request, adminUser) {
     if (mm[1] === adminUser.username) return json({ error: 'نمی‌توانید خودتان را حذف کنید' }, 400);
     const u = await getUser(store, mm[1]);
     if (!u) return json({ error: 'یافته نشد' }, 404);
-    if (u.tgId) await store.del('tg:' + u.tgId);
-    if (u.phone) await store.del('ph:' + u.phone);
-    if (u.tgUsername) await store.del('tgu:' + normTgUser(u.tgUsername));
-    if (u.refCode) await store.del('refcode:' + u.refCode);
+    await deleteOwnedIndexes(store, userIndexKeys(u), u.username);
+    if (u.tgId) await store.del('tgstate:' + u.tgId);
     await store.del('u:' + mm[1]);
     bustUser(mm[1]);
     return json({ ok: true });
@@ -5216,10 +5541,804 @@ async function apiRedeemCode(store, body, request) {
 
 /* ═══════════════════════ مسیریابی API ═══════════════════════ */
 
+/* Internal editorial actions: never exposed as a public HTTP API. */
+async function contentBotAction(store, body, action) {
+  const actorId = String(body.actorId || '');
+  const allowed = String(store.env.CONTENT_ADMIN_IDS || '').split(',').map(function (v) { return v.trim(); });
+  if (!allowed.includes(actorId)) return json({error:'دسترسی ربات مدیریت مجاز نیست'}, 403);
+  const username = await store.get('tg:' + actorId);
+  const admin = username && await store.get('u:' + username);
+  if (!admin || admin.role !== 'admin' || String(admin.tgId) !== actorId) return json({error:'حساب مدیر سایت یافت نشد'}, 403);
+  const set = await getSettings(store);
+  const vault = defaultVaultChatId(set);
+  if (!vault) return json({error:'کانال مخزن سایت تنظیم نشده'}, 400);
+  if (action === 'whoami') return json({ok:true, vault:vault});
+  if (!/^i_[a-z0-9]+$/.test(String(body.itemId || ''))) return json({error:'شناسه اثر نامعتبر'}, 400);
+  const item = await store.get('it:' + body.itemId);
+  if (!item) return json({error:'اثر حذف شده یا یافت نشد'}, 404);
+  if (action === 'item') return json({item:{id:item.id, title:item.title, type:item.type, year:item.year, description:item.description || '', updatedAt:item.updatedAt || 0}, vault:vault});
+  if (action !== 'publish') return json({error:'not found'},404);
+  const files = body.files;
+  if (!/^[a-f0-9]{32}$/.test(String(body.jobId || '')) || !Array.isArray(files) || !files.length || files.length > 20) return json({error:'پیش‌نویس نامعتبر؛ حداکثر ۲۰ فایل'},400);
+  const digest = bytesToHex(await sha256Bytes(JSON.stringify(files)));
+  const receipt = (item.contentBotReceipts || []).find(function (r) { return r.id === body.jobId; });
+  if (receipt && receipt.digest !== digest) return json({error:'شناسه پیش‌نویس با محتوای متفاوت تکرار شده'},409);
+  const automatic = body.channelAutomatic === true && files.every(f => f?.channelImport && contentChannelRules(store.env)[String(f.chatId)]?.adminId === actorId);
+  if (!receipt && !automatic && Number(body.expectedUpdatedAt) !== Number(item.updatedAt || 0)) return json({error:'اثر در سایت تغییر کرده؛ مشخصات را تازه کنید و دوباره پیش‌نمایش بگیرید'},409);
+  if (files.some(f=>f?.attachment)) {
+    if (!automatic || files.length!==1) return json({error:'زیرنویس جدا فقط از الگوی کانال مجاز است'},400);
+    return attachEditorSubtitle(store,item,files[0],body,receipt,digest);
+  }
+  // Validate the entire batch before touching the item or any index.
+  for (const file of files) {
+    if (!file || !['dub','hardsub','softsub','original'].includes(file.kind) || !['480','720','1080','4k'].includes(file.quality) ||
+        !/^[a-f0-9]{16}$/.test(String(file.key || '')) || !(String(file.chatId) === String(vault) || contentChannelRules(store.env)[String(file.chatId)]?.adminId === actorId) ||
+        !Number.isSafeInteger(file.msgId) || file.msgId < 1 ||
+        (item.type === 'series' && (!Number.isInteger(file.season) || file.season < 1 || file.season > 200 || !Number.isInteger(file.episode) || file.episode < 1 || file.episode > 10000))) return json({error:'اطلاعات فصل، قسمت، کیفیت یا مخزن نامعتبر'},400);
+    const owner = await store.get('src:c:' + file.chatId + '/' + file.msgId);
+    if (owner && owner !== item.id) return json({error:'یکی از فایل‌ها قبلاً به اثر دیگری متصل است'},409);
+  }
+  if (!receipt) {
+    // Migrate legacy flat episodes only in memory; keep their original IDs and files.
+    if (item.type === 'series' && !(item.seasons || []).length && (item.episodes || []).length) item.seasons = [{n:1,title:'فصل ۱',episodes:item.episodes}];
+    for (const file of files) {
+      let bag = item;
+      if (item.type === 'series') {
+        const season = ensureSeason(item, file.season);
+        let ep = season.episodes.find(function (e) { return Number(e.n) === file.episode; });
+        if (!ep) { ep = {id:'e_' + randomHex(4),n:file.episode,title:'قسمت ' + file.episode,variants:{sub:{},dub:{}}}; season.episodes.push(ep); }
+        season.episodes.sort(function (a,b) { return a.n - b.n; });
+        bag = ep;
+      }
+      const src = {chatId:String(file.chatId),msgId:String(file.msgId),user:'',tmeUrl:'https://t.me/c/' + String(file.chatId).replace(/^-100/,'') + '/' + file.msgId,mediaType:'document'};
+      const existing=variantFilesOf(bag.variants?.[file.kind==='dub'?'dub':'sub']?.[file.quality]).find(f=>f.id==='f_'+file.key);
+      const previousParts=versionSources(existing?.source);
+      if (previousParts.length>1 && String(previousParts[0].chatId)===src.chatId && String(previousParts[0].msgId)===src.msgId)
+        src.parts=previousParts; // A replay must not detach subtitles added later.
+      const label = {dub:'دوبله فارسی',hardsub:'هاردساب',softsub:'سافت‌ساب',original:'زبان اصلی'}[file.kind];
+      upsertVariantFile(bag, file.kind === 'dub' ? 'dub' : 'sub', file.quality, {
+        contentIdentity:file.channelImport ? file.contentIdentity : undefined,
+        fileId:'f_' + file.key, title:(file.channelImport || file.formattedTitle) ? String(file.title || label).slice(0,220) : label + (file.title ? ' — ' + String(file.title).slice(0,100) : ''), source:src,
+        sizeBytes:Number.isSafeInteger(file.sizeBytes) && file.sizeBytes > 0 ? file.sizeBytes : null
+      });
+      if (!bag.source) bag.source = src;
+      if (!item.source) item.source = src;
+      if (file.kind === 'dub') item.dubbed = true;
+      if (file.kind === 'hardsub' || file.kind === 'softsub') item.subtitled = true;
+    }
+    syncEpisodesFromSeasons(item);
+    item.updatedAt = Math.max(Date.now(), Number(item.updatedAt || 0)+1);
+    item.contentBotReceipts = [{id:body.jobId,digest:digest,at:Date.now()}, ...(item.contentBotReceipts || [])].slice(0,16);
+    await saveItemRecord(store,item);
+  }
+  // Also repair indexes on a retry after the primary write succeeded.
+  for (const file of files) await store.set('src:c:' + file.chatId + '/' + file.msgId,item.id);
+  await idxUpsert(store,item);
+  return json({ok:true,itemId:item.id,count:files.length,replayed:!!receipt});
+}
+
+/* Explicit channel allowlist; targets cannot be sources (prevents relay loops). */
+function contentChannelRules(env) {
+  const raw = String(env.CONTENT_CHANNEL_RULES || '').trim();
+  if (!raw) return {};
+  let rules;
+  try { rules = JSON.parse(raw); } catch { throw new Error('CONTENT_CHANNEL_RULES باید JSON معتبر باشد'); }
+  if (!rules || Array.isArray(rules) || typeof rules !== 'object' || Object.keys(rules).length > 10) throw new Error('حداکثر ۱۰ کانال منبع مجاز است');
+  const ids = Object.keys(rules);
+  const out = {};
+  for (const id of ids) {
+    const r = rules[id];
+    if (!/^-100\d{6,20}$/.test(id) || !r || !adminAllowed(env,r.adminId) || !Array.isArray(r.targets || []) || (r.targets || []).length > 3) throw new Error('شناسه کانال، مدیر یا مقصدهای انتقال نامعتبر است');
+    const targets = [...new Set((r.targets || []).map(String))];
+    if (targets.some(t=>! /^-100\d{6,20}$/.test(t) || ids.includes(t))) throw new Error('مقصد انتقال نباید هیچ‌یک از کانال‌های منبع باشد');
+    out[id] = {adminId:String(r.adminId),targets,publish:r.publish !== false};
+  }
+  return out;
+}
+function parseChannelHeader(text, previous, origin) {
+  const lines = String(text || '').trim().split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  if (!lines.some(l=>/^#(?:اثر|نسخه|نوع|نام|پایان|زیرنویس)(?:\s|$)/.test(l))) return null;
+  if (lines.length===1 && lines[0]==='#پایان') return {stopped:true};
+  const fields = {};
+  for (const line of lines) {
+    const m=/^#(اثر|نسخه|نوع|نام|زیرنویس)\s+(.+)$/.exec(line);
+    if (!m || fields[m[1]]) throw new Error('سربرگ نامعتبر است؛ از الگوی #اثر، #نسخه، #نوع و #نام استفاده کنید');
+    fields[m[1]]=m[2].trim();
+  }
+  const fresh = !!fields['اثر'];
+  const ctx = fresh ? {} : {...(previous || {})};
+  if (fresh) {
+    ctx.itemId = /^i_[a-z0-9]+$/.test(fields['اثر']) ? fields['اثر'] : itemIdFromLink(fields['اثر'],origin);
+    if (!ctx.itemId) throw new Error('لینک یا شناسه #اثر معتبر نیست');
+  }
+  const kinds = {'دوبله':'dub','هاردساب':'hardsub','سافت‌ساب':'softsub','سافتساب':'softsub','زبان اصلی':'original',dub:'dub',hardsub:'hardsub',softsub:'softsub',original:'original'};
+  if (fields['نسخه']) { ctx.externalSubtitles=false; ctx.version = fields['نسخه'].slice(0,64); if (!fields['نوع']) ctx.kind = null; }
+  if (fields['نوع']) ctx.kind = kinds[fields['نوع']];
+  if (fields['نام']) ctx.alias = fields['نام'].slice(0,120);
+  if (!ctx.itemId || !ctx.version || !ctx.kind) throw new Error('ابتدا #اثر، #نسخه و #نوع را کامل کنید؛ با تغییر نسخه، نوع را نیز بنویسید. «زیرنویس» مبهم است؛ هاردساب یا سافتساب را مشخص کنید');
+  if (fields['زیرنویس']) {
+    if (!['جدا','داخلی','ندارد'].includes(fields['زیرنویس'])) throw new Error('#زیرنویس باید جدا، داخلی یا ندارد باشد');
+    ctx.externalSubtitles=fields['زیرنویس']==='جدا';
+  }
+  if (ctx.externalSubtitles && ctx.kind!=='softsub') throw new Error('#زیرنویس جدا فقط همراه #نوع سافتساب مجاز است');
+  ctx.stopped=false;
+  return ctx;
+}
+function channelFileDetails(media, context, item) {
+  if (editorSubtitleFile(media)) throw new Error('فایل زیرنویس ویدئو نیست؛ الگوی #زیرنویس جدا را فعال کنید');
+  const name = String(media.file_name || '');
+  const parsed = parseFilename(name);
+  if (!parsed.quality || (item.type==='series' && (!parsed.season || !parsed.episode))) throw new Error('فصل، قسمت یا کیفیت نام فایل روشن نیست: '+name);
+  const qpos = name.search(/(?:^|[._ -])(?:2160|1080|720|480)p?(?=[._ -])|(?:^|[._ -])4k(?=[._ -])/i);
+  const detected = item.type==='series' ? parsed.detectedTitle : (qpos>=0 ? name.slice(0,qpos).replace(/\b(?:19|20)\d{2}\b/g,'') : '');
+  const alias = context.alias || item.title.split('|').find(t=>/[a-z]{2}/i.test(t));
+  const norm = v=>String(v || '').toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]/g,'');
+  if (!alias || norm(detected)!==norm(alias)) throw new Error('نام فایل با اثر فعال یکسان نیست؛ #نام را برابر نام سریال/فیلم قبل از SxxExx قرار دهید: '+name);
+  const lower = name.toLowerCase();
+  const tagged = /hardsub/.test(lower) ? 'hardsub' : /softsub/.test(lower) ? 'softsub' : /dubbed|duble/.test(lower) ? 'dub' : '';
+  if (tagged && tagged!==context.kind) throw new Error('نوع فایل با #نوع فعال تعارض دارد: '+name);
+  return {...parsed,season:item.type==='series'?parsed.season:1,episode:item.type==='series'?parsed.episode:1,
+    title:editorVersionTitle(media,context.version,parsed.quality),sizeBytes:media.file_size || null,
+    contentIdentity:{version:context.version,stem:editorMediaStem(name),externalSubtitles:!!context.externalSubtitles,kind:context.kind}};
+}
+function editorSubtitleFile(media) {
+  return /\.(srt|ass|ssa|vtt|sub|idx)$/i.test(String(media?.file_name || '').trim());
+}
+function editorMediaStem(name) {
+  return String(name || '').trim().replace(/\.(mkv|mp4|avi|mov|m4v|webm|srt|ass|ssa|vtt|sub|idx)$/i,'')
+    .toLowerCase().replace(/[ _]+/g,'.');
+}
+async function attachEditorSubtitle(store,item,file,body,receipt,digest) {
+  if (file.kind!=='softsub' || !Number.isSafeInteger(file.msgId) || file.msgId<1 ||
+      !/^[a-f0-9]{16}$/.test(String(file.key || '')) || !editorSubtitleFile({file_name:file.fileName}) ||
+      !String(file.version || '').trim() || (file.replyMessageId!=null && (!Number.isSafeInteger(file.replyMessageId) || file.replyMessageId<1)))
+    return json({error:'اطلاعات فایل زیرنویس نامعتبر است'},400);
+  const owner=await store.get('src:c:'+file.chatId+'/'+file.msgId);
+  if (owner && owner!==item.id) return json({error:'زیرنویس قبلاً به اثر دیگری متصل است'},409);
+  if (!receipt) {
+    const bags=item.type==='series' ? ((item.seasons || []).length ? item.seasons : [{n:1,episodes:item.episodes || []}])
+      .flatMap(season=>(season.episodes || []).map(ep=>({bag:ep,season:season.n,episode:ep.n}))) : [{bag:item,season:1,episode:1}];
+    const stem=editorMediaStem(file.fileName), candidates=[];
+    for (const entry of bags) for (const [quality,cell] of Object.entries(entry.bag.variants?.sub || {})) {
+      for (const variant of variantFilesOf(cell)) {
+        const identity=variant.contentIdentity, primary=versionSources(variant.source)[0];
+        if (!identity?.externalSubtitles || identity.kind!=='softsub' || identity.version!==file.version ||
+            String(primary?.chatId)!==String(file.chatId) || String(primary?.msgId)!==String(identity.msgId)) continue;
+        const matches=file.replyMessageId ? String(primary.msgId)===String(file.replyMessageId) :
+          (identity.stem===stem || identity.stem===stem.replace(/\.(fa|en|farsi|persian)$/i,''));
+        if (matches) candidates.push({...entry,quality,variant});
+      }
+    }
+    if (candidates.length!==1) return json({error:candidates.length ?
+      'چند ویدئوی هم‌نام پیدا شد؛ زیرنویس را در پاسخ به پیام ویدئوی دقیق بفرستید' :
+      'ویدئوی زیرنویس پیدا نشد؛ ابتدا ویدئو را با #زیرنویس جدا ثبت کنید، سپس زیرنویس هم‌نام یا پاسخ به همان ویدئو را بفرستید'},400);
+    const target=candidates[0], parsed=parseFilename(file.fileName);
+    const videoParsed=parseFilename(target.variant.contentIdentity.stem);
+    const normTitle=v=>String(v || '').toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]/g,'');
+    if (item.type==='series' && parsed.season && normTitle(parsed.detectedTitle)!==normTitle(videoParsed.detectedTitle))
+      return json({error:'نام سریال در زیرنویس با ویدئوی پاسخ‌داده‌شده یکسان نیست'},400);
+    if ((parsed.quality && parsed.quality!==target.quality) || (item.type==='series' &&
+        ((parsed.season && parsed.season!==Number(target.season)) || (parsed.episode && parsed.episode!==Number(target.episode)))))
+      return json({error:'نام زیرنویس با کیفیت یا قسمت ویدئوی پاسخ‌داده‌شده تعارض دارد'},400);
+    const parts=versionSources(target.variant.source).map(p=>({...p}));
+    const present=parts.some(p=>String(p.chatId)===String(file.chatId) && String(p.msgId)===String(file.msgId));
+    if (!present && parts.length>=10) return json({error:'هر نسخه حداکثر یک ویدئو و ۹ فایل همراه دارد'},400);
+    if (!present) parts.push({chatId:String(file.chatId),msgId:String(file.msgId),user:'',mediaType:'document',
+      tmeUrl:'https://t.me/c/'+String(file.chatId).replace(/^-100/,'')+'/'+file.msgId});
+    // Reuse the existing multi-link delivery path: video first, subtitles after it.
+    upsertVariantFile(target.bag,'sub',target.quality,{fileId:target.variant.id,title:target.variant.title,
+      source:{...parts[0],parts},sizeBytes:target.variant.sizeBytes});
+    syncEpisodesFromSeasons(item);
+    item.updatedAt=Math.max(Date.now(),Number(item.updatedAt || 0)+1);
+    item.contentBotReceipts=[{id:body.jobId,digest,at:Date.now()},...(item.contentBotReceipts || [])].slice(0,16);
+    await saveItemRecord(store,item);
+  }
+  await store.set('src:c:'+file.chatId+'/'+file.msgId,item.id);
+  await idxUpsert(store,item);
+  return json({ok:true,itemId:item.id,count:1,replayed:!!receipt,attachment:true});
+}
+function editorVersionTitle(media, version, quality) {
+  // Stop at the media extension: forwarded captions may have a bot signature after it.
+  const name=String(media.file_name || '').split(/\.(?:mkv|mp4|avi|mov|m4v|webm)(?:\b|$)/i)[0];
+  const qpos=name.search(/(?:^|[._ -])(?:2160|1080|720|480)p?(?=[._ -]|$)|(?:^|[._ -])4k(?=[._ -]|$)/i);
+  const specs=(qpos>=0?name.slice(qpos):(quality || 'کیفیت نامشخص')+(quality?'p':''))
+    .split(/[._ ]+/).filter(Boolean).filter(x=>!/^(farsi|persian|dubbed|duble|hardsub|softsub)$/i.test(x)).join('.');
+  const size=Number.isSafeInteger(media.file_size)&&media.file_size>0 ? (media.file_size/1048576).toFixed(1).replace(/\.0$/,'')+' MB' : 'حجم نامشخص';
+  return String(version || 'نسخه نامشخص').slice(0,64)+' | '+specs.slice(0,128)+' | '+size;
+}
+
+/* Integrated editorial bot. Telegram copies media; this Worker never downloads movie files. */
+const STAGES = ['dub', 'hardsub', 'softsub', 'original'];
+const LABELS = {dub:'دوبله فارسی',hardsub:'زیرنویس چسبیده (هاردساب)',softsub:'زیرنویس سافت‌ساب',original:'زبان اصلی بدون زیرنویس'};
+const DAY = 86400000;
+export function parseFilename(name) {
+  const text = String(name || '').replace(/[۰-۹]/g,c=>String('۰۱۲۳۴۵۶۷۸۹'.indexOf(c)));
+  const match = text.match(/(?:^|[ ._\-])s(\d{1,3})[ ._\-]*e(\d{1,4})(?!\d)/i) || text.match(/(?:^|[ ._\-])(\d{1,3})x(\d{1,4})(?!\d)/i);
+  const q = text.match(/(?:^|[ ._\-\[(])(2160|1080|720|480)p?(?=$|[ ._\-\])])/i) || text.match(/(?:^|[ ._\-])(4k)(?=$|[ ._\-])/i);
+  // Multi-episode packs must be assigned explicitly; never guess one episode.
+  const multi = /e\d+(?:e\d+|[- ]e?\d+)/i.test(text);
+  return {season:match && !multi ? Number(match[1]) : null,episode:match && !multi ? Number(match[2]) : null,
+    quality:q ? (/2160|4k/i.test(q[1]) ? '4k' : q[1]) : null,
+    detectedTitle:match ? text.slice(0,match.index).replace(/[._]/g,' ').trim() : text.replace(/\.(mkv|mp4|avi)$/i,'')};
+}
+export function itemIdFromLink(text, origin) {
+  try {
+    const u = new URL(text.trim());
+    if (u.origin !== new URL(origin).origin) return '';
+    return /^#\/item\/(i_[a-z0-9]+)$/.exec(u.hash)?.[1] || '';
+  } catch { return ''; }
+}
+function sourceLink(text) {
+  const m = /^https:\/\/t\.me\/(?:c\/(\d+)|([a-zA-Z0-9_]+))\/(\d+)\/?$/.exec(text.trim());
+  return m ? {chatId:m[1] ? '-100'+m[1] : '@'+m[2],msgId:Number(m[3])} : null;
+}
+const hex = bytes=>Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');
+async function keyFor(text) { return hex(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))).slice(0,16); }
+const randomJob = ()=>hex(crypto.getRandomValues(new Uint8Array(16)));
+async function tg(env, method, body) {
+  const r = await fetch('https://api.telegram.org/bot'+env.CONTENT_BOT_TOKEN+'/'+method, {
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(10000)
+  });
+  const data = await r.json();
+  if (!r.ok || !data.ok) throw new Error(data.description || 'ارتباط با تلگرام ناموفق بود');
+  return data.result;
+}
+async function site(env, action, body) {
+  const r = await contentBotAction(new Store(env.KV, env), body, action);
+  const data = await r.json();
+  if (!r.ok) { const e = new Error(data.error || 'خطای سایت'); e.status = r.status; throw e; }
+  return data;
+}
+async function contentSiteOrigin(env) {
+  const settings = await getSettings(new Store(env.KV, env));
+  const raw = env.SITE_PUBLIC_ORIGIN || settings.publicUrl || '';
+  try { const url = new URL(raw); if (url.protocol === 'https:') return url.origin; } catch {}
+  throw new Error('دامنه عمومی سایت را در تنظیمات یا SITE_PUBLIC_ORIGIN مشخص کنید');
+}
+function adminAllowed(env,id) { return String(env.CONTENT_ADMIN_IDS || '').split(',').map(x=>x.trim()).includes(String(id)); }
+const contentBotWebhook = {
+  async fetch(request,env) {
+    const path = new URL(request.url).pathname;
+    if (path !== '/api/tg/content-webhook' || request.method !== 'POST') return new Response('Not found',{status:404});
+    if (!env.CONTENT_WEBHOOK_SECRET || request.headers.get('x-telegram-bot-api-secret-token') !== env.CONTENT_WEBHOOK_SECRET) return new Response('Forbidden',{status:403});
+    if (!env.CONTENT_BOT_TOKEN || !env.EDITOR || !env.KV) return Response.json({error:'Editorial bot bindings are not configured'},{status:503});
+    const raw = await request.text();
+    if (raw.length > 128*1024) return new Response('Too large',{status:413});
+    let update; try { update=JSON.parse(raw); } catch { return new Response('Invalid JSON',{status:400}); }
+    if (update.channel_post) {
+      const post = update.channel_post;
+      let rules;
+      try { rules=contentChannelRules(env); } catch { return new Response('Invalid channel configuration',{status:503}); }
+      if (post.chat?.type!=='channel' || !rules[String(post.chat.id)]) return Response.json({ok:true});
+      const channel = env.EDITOR.get(env.EDITOR.idFromName('channel:'+post.chat.id));
+      return channel.fetch(new Request('https://editor.internal/channel-enqueue',{method:'POST',body:JSON.stringify(post)}));
+    }
+    const msg = update.message;
+    // Only private messages from allowlisted admins can change a private draft.
+    if (!msg || msg.chat?.type !== 'private' || msg.from?.is_bot || !adminAllowed(env,msg.from?.id)) return Response.json({ok:true});
+    const stub = env.EDITOR.get(env.EDITOR.idFromName('admin:'+msg.from.id));
+    return stub.fetch(new Request('https://editor.internal/update',{method:'POST',body:JSON.stringify(update)}));
+  }
+};
+export class EditorSession {
+  constructor(ctx,env) { this.ctx=ctx; this.env=env; this.tail=Promise.resolve(); }
+  fetch(request) {
+    // Serialize messages across all awaits; concurrent Telegram deliveries must not lose draft files.
+    const result = this.tail.then(()=>this.dispatch(request));
+    this.tail = result.catch(()=>{});
+    return result;
+  }
+  async dispatch(request) {
+    if (new URL(request.url).pathname.startsWith('/channel-')) return this.channelRequest(request);
+    // All publications from this bot are routed through a single durable coordinator.
+    if (new URL(request.url).pathname === '/publish') {
+      const data = await request.json();
+      try { return await this.publishCoordinated(data); }
+      catch(e) { return Response.json({error:e.message},{status:e.status || 502}); }
+    }
+    const update=await request.json(), msg=update.message, actor=String(msg.from.id);
+    const seen=await this.ctx.storage.get('seen') || [];
+    if (seen.includes(update.update_id)) return Response.json({ok:true});
+    try {
+      await site(this.env,'whoami',{actorId:actor}); // Check current site role, not just an allowlist.
+      await this.process(msg,actor);
+      await this.ctx.storage.put('seen',[...seen,update.update_id].slice(-100));
+    } catch(e) {
+      // Do not log tokens or Telegram message payloads.
+      try { await this.say(msg.chat.id,'⚠️ '+e.message+'\nبرای راهنما /help را بفرستید.'); } catch { return new Response('Retry',{status:503}); }
+    }
+    return Response.json({ok:true});
+  }
+  async publishCoordinated(data) {
+    // KV is eventually consistent across isolates. Keep the last editorial item in
+    // durable storage and journal writes so a failed KV put can be retried safely.
+    const storage=this.ctx.storage, kv=this.env.KV;
+    const pending=await storage.get('pending-item');
+    if (pending) { await storage.put('latest:'+pending.key,JSON.parse(pending.value)); await kv.put(pending.key,pending.value); await storage.delete('pending-item'); }
+    const bridge={
+      get:async(key,options)=>{
+        const remote=await kv.get(key,options);
+        if (!key.startsWith('it:') || !remote) return remote;
+        const local=await storage.get('latest:'+key);
+        return local && Number(local.updatedAt)>Number(remote.updatedAt || 0) ? local : remote;
+      },
+      put:async(key,value,options)=>{
+        const paced=key.startsWith('it:') || key==='idx';
+        if (paced) {
+          const last=await storage.get('write-at:'+key) || 0;
+          if (last+1100>Date.now()) await sleep(last+1100-Date.now());
+        }
+        if (key.startsWith('it:')) {
+          await storage.put('pending-item',{key,value});
+          await storage.put('latest:'+key,JSON.parse(value));
+        }
+        await kv.put(key,value,options);
+        if (paced) await storage.put('write-at:'+key,Date.now());
+        if (key.startsWith('it:')) await storage.delete('pending-item');
+      },
+      delete:(...args)=>kv.delete(...args), list:(...args)=>kv.list(...args)
+    };
+    return contentBotAction(new Store(bridge,this.env),data,'publish');
+  }
+  async channelRequest(request) {
+    const path=new URL(request.url).pathname, body=await request.json();
+    if (path==='/channel-relay') {
+      const channel=String(body.channel), rule=contentChannelRules(this.env)[channel];
+      if (!rule || !adminAllowed(this.env,body.actorId) || !Array.isArray(body.files) || body.files.length>20)
+        return new Response('Forbidden',{status:403});
+      await this.ctx.storage.put('channel-id',channel);
+      for (const file of body.files) {
+        if (String(file.chatId)!==channel || !Number.isSafeInteger(file.msgId) || file.msgId<1) return new Response('Invalid file',{status:400});
+        const id=String(file.msgId).padStart(16,'0'),key='queue:'+id;
+        if (await this.ctx.storage.get('relay-done:'+id) || await this.ctx.storage.get(key)) continue;
+        await this.ctx.storage.put(key,{post:{message_id:file.msgId,chat:{id:channel}},copies:[],attempts:0,importDone:true,privateRelay:true});
+      }
+      await this.ctx.storage.setAlarm(Date.now()+1000);
+      return Response.json({ok:true});
+    }
+    if (path==='/channel-enqueue') {
+      if (!Number.isSafeInteger(body.message_id) || body.message_id<1) return new Response('Bad message',{status:400});
+      const channel=String(body.chat?.id || '');
+      if (!contentChannelRules(this.env)[channel]) return new Response('Forbidden',{status:403});
+      await this.ctx.storage.put('channel-id',channel);
+      const meta=await this.ctx.storage.get('channel-meta') || {};
+      if (body.message_id <= (meta.lastId || 0)) return Response.json({ok:true,ignoredOld:true});
+      const key='queue:'+String(body.message_id).padStart(16,'0');
+      if (await this.ctx.storage.get(key)) return Response.json({ok:true});
+      const backlog=await this.ctx.storage.list({prefix:'queue:',limit:501});
+      if (backlog.size>=500) return new Response('Queue full; retry',{status:503});
+      await this.ctx.storage.put(key,{post:body,copies:[],attempts:0});
+      if (body.media_group_id) await this.ctx.storage.put('album-seen:'+body.media_group_id,Date.now());
+      if (!await this.ctx.storage.getAlarm()) await this.ctx.storage.setAlarm(Date.now()+1500);
+      return Response.json({ok:true});
+    }
+    const channel=await this.ctx.storage.get('channel-id');
+    await this.recoverChannelConflicts();
+    const meta=await this.ctx.storage.get('channel-meta') || {};
+    if (path==='/channel-status') {
+      const pending=await this.ctx.storage.list({prefix:'queue:',limit:501});
+      const failed=await this.ctx.storage.list({prefix:'failed:',limit:20});
+      return Response.json({message:'کانال '+(channel || 'بدون پست دریافتی')+'\nاثر فعال: '+(meta.context?.title || 'متوقف')+'\nنسخه: '+(meta.context?.version || '—')+'\nآخرین پیام پردازش‌شده: '+(meta.lastId || 0)+'\nثبت موفق: '+(meta.imported || 0)+'\nدر صف: '+pending.size+'\nآخرین خطا: '+(meta.lastError || 'ندارد')+'\nفایل‌های نیازمند بررسی: '+[...failed.values()].map(e=>e.post.message_id).join(', ')+'\nبرای تلاش دوباره: /retry '+channel+' شماره‌پیام'});
+    }
+    if (path==='/channel-skip-relay') {
+      const rule=contentChannelRules(this.env)[channel];
+      const entry=await this.ctx.storage.list({prefix:'queue:',limit:1});
+      if (!rule || !entry.size || [...entry.values()][0].post.message_id!==body.id) return Response.json({error:'شماره پیام باید اولین پیام متوقف‌شده صف باشد'}, {status:400});
+      const [key,event]=[...entry.entries()][0];
+      const members=event.post.media_group_id ? [...await this.ctx.storage.list({prefix:'queue:',limit:100})].filter(([,e])=>e.post.media_group_id===event.post.media_group_id) : [[key,event]];
+      for (const [memberKey,member] of members) {
+        member.copies=[...rule.targets]; member.relaySkipped=true;
+        await this.ctx.storage.put(memberKey,member);
+      }
+      await this.ctx.storage.setAlarm(Date.now()+1000);
+      return Response.json({message:'انتقال این پیام به مقصدهای باقی‌مانده رد شد. صف ادامه پیدا می‌کند؛ پیام منبع حذف نشده است.'});
+    }
+    if (path==='/channel-retry') {
+      if (!Number.isSafeInteger(body.id) || body.id<1) return Response.json({error:'شماره پیام معتبر وارد کنید'}, {status:400});
+      const key=String(body.id).padStart(16,'0');
+      const event=await this.ctx.storage.get('failed:'+key);
+      if (!event) return Response.json({error:'این پیام در فهرست خطاهای اخیر نیست؛ وضعیت کانال را بررسی کنید'}, {status:404});
+      event.retry=true; event.importDone=false; event.error=''; event.attempts=0;
+      if (event.importJob) {
+        const item=await site(this.env,'item',{actorId:event.importJob.actorId,itemId:event.importJob.itemId});
+        event.importJob.expectedUpdatedAt=item.item.updatedAt;
+      } else event.context=meta.context;
+      await this.ctx.storage.put('queue:'+key,event);
+      await this.ctx.storage.setAlarm(Date.now()+1000);
+      return Response.json({message:'پیام برای بررسی مجدد در صف قرار گرفت. فایل اصلی در کانال حذف یا دوباره کپی نمی‌شود.'});
+    }
+    return new Response('Not found',{status:404});
+  }
+  async relayChannelEvent(channel,rule,key,event) {
+    const storage=this.ctx.storage;
+    let entries=[[key,event]];
+    if (event.post.media_group_id) {
+      const queued=await storage.list({prefix:'queue:',limit:100});
+      entries=[...queued].filter(([,e])=>e.post.media_group_id===event.post.media_group_id).slice(0,10);
+      entries=entries.map(([k,e])=>[k,k===key?event:e]);
+    }
+    const ids=entries.map(([,e])=>e.post.message_id);
+    for (const target of rule.targets) {
+      if (entries.every(([,e])=>e.copies.includes(target))) continue;
+      // A completed Telegram response is durable before any KV/progress writes.
+      const receiptKey='mirror-result:'+target+':'+ids.join(',');
+      let receipt=await storage.get(receiptKey);
+      if (!receipt) {
+        if (entries.some(([,e])=>e.copies.includes(target))) throw new Error('آلبوم بخشی منتقل شده؛ برای جلوگیری از تکرار نیاز به بررسی دارد');
+        const result=ids.length>1 ? await tg(this.env,'copyMessages',{chat_id:target,from_chat_id:channel,message_ids:ids}) :
+          [await tg(this.env,'copyMessage',{chat_id:target,from_chat_id:channel,message_id:ids[0]})];
+        receipt={ids,result};
+        await storage.put(receiptKey,receipt);
+      }
+      if (!Array.isArray(receipt.result) || receipt.result.length!==ids.length ||
+          receipt.result.some(r=>!Number.isSafeInteger(r?.message_id) || r.message_id<1))
+        throw new Error('تلگرام همه اعضای آلبوم را کپی نکرد؛ نگاشت نامطمئن ثبت نمی‌شود. مقصد را بررسی کنید');
+      const pair='mirror-pair:'+channel+'/'+target;
+      if (!await storage.get(pair)) {
+        await this.env.KV.put(pair,JSON.stringify(true)); await storage.put(pair,true);
+      }
+      for (let i=0;i<entries.length;i++) {
+        const [k,e]=entries[i];
+        if (e.copies.includes(target)) continue;
+        await this.env.KV.put('mirror:'+channel+'/'+ids[i]+'/'+target,JSON.stringify({chatId:target,msgId:receipt.result[i].message_id}));
+        e.copies.push(target);
+        await storage.put(k,e);
+      }
+    }
+  }
+  async recoverChannelConflicts() {
+    // Recover retained failures from older deployments; never retry filename or
+    // ownership errors by guessing. Original relay progress is preserved.
+    const failures=await this.ctx.storage.list({prefix:'failed:',limit:1000});
+    let recovered=false;
+    for (const [key,event] of failures) {
+      if (!event.importJob || !String(event.error || '').startsWith('اثر در سایت تغییر کرده')) continue;
+      const queued='queue:'+key.slice('failed:'.length);
+      if (await this.ctx.storage.get(queued)) continue;
+      event.importDone=false; event.error=''; event.retry=true; event.attempts=0;
+      event.importJob.channelAutomatic=true;
+      await this.ctx.storage.put(queued,event); recovered=true;
+    }
+    if (recovered) await this.ctx.storage.setAlarm(Date.now()+1000);
+  }
+  async drainChannel() {
+    const channel=await this.ctx.storage.get('channel-id');
+    const rule=contentChannelRules(this.env)[channel];
+    if (!rule) return; // Removing a source from configuration stops its pending work.
+    await this.recoverChannelConflicts();
+    const queue=await this.ctx.storage.list({prefix:'queue:',limit:1});
+    if (!queue.size) return;
+    const [key,event]=[...queue.entries()][0], post=event.post;
+    if (post.media_group_id) {
+      const seen=await this.ctx.storage.get('album-seen:'+post.media_group_id) || 0;
+      if (Date.now()<seen+2500) { await this.ctx.storage.setAlarm(seen+2500); return; }
+    }
+    const meta=await this.ctx.storage.get('channel-meta') || {};
+    const media=post.document || post.video || post.audio;
+    try {
+      await site(this.env,'whoami',{actorId:rule.adminId});
+      if (!event.importDone && rule.publish) {
+        if (!event.importJob) {
+          try {
+            if (!media) {
+              const header=parseChannelHeader(post.text || '',meta.context,await contentSiteOrigin(this.env));
+              if (header?.stopped) meta.context=null;
+              else if (header) {
+                const target=await site(this.env,'item',{actorId:rule.adminId,itemId:header.itemId});
+                meta.context={...header,title:target.item.title};
+              } else if (String(post.text || '').trim()) {
+                meta.context=null;
+                throw new Error('متن بدون الگو دریافت شد؛ ورود خودکار متوقف شد. سربرگ #اثر، #نسخه و #نوع را دوباره بفرستید.');
+              }
+              event.importDone=true;
+            } else {
+              const context=event.context || meta.context;
+              if (!context || context.stopped) throw new Error('سربرگ فعال وجود ندارد؛ ابتدا #اثر، #نسخه و #نوع را مشخص کنید.');
+              const target=await site(this.env,'item',{actorId:rule.adminId,itemId:context.itemId});
+              const subtitle=editorSubtitleFile(media);
+              if (subtitle && (!context.externalSubtitles || context.kind!=='softsub')) throw new Error('برای زیرنویس جدا، #نوع سافتساب و #زیرنویس جدا را در سربرگ بنویسید');
+              if (subtitle && post.reply_to_message?.chat && String(post.reply_to_message.chat.id)!==channel) throw new Error('پاسخ زیرنویس باید به ویدئویی در همین کانال باشد');
+              const details=subtitle ? {attachment:true,fileName:media.file_name,version:context.version,replyMessageId:post.reply_to_message?.message_id || null} :
+                channelFileDetails({...media,file_name:media.file_name || String(post.caption || '').split('\n')[0]},context,target.item);
+              event.context=context;
+              const file={...details,key:await keyFor(channel+':'+post.message_id),kind:context.kind,quality:details.quality,season:details.season,episode:details.episode,
+                title:details.title,sizeBytes:details.sizeBytes,chatId:channel,msgId:post.message_id,channelImport:true};
+              if (file.contentIdentity) file.contentIdentity.msgId=post.message_id;
+              const jobId=hex(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode('channel:'+channel+':'+post.message_id)))).slice(0,32);
+              event.importJob={channelAutomatic:true,actorId:rule.adminId,itemId:context.itemId,expectedUpdatedAt:target.item.updatedAt,jobId,files:[file]};
+              // Coalesce contiguous media under the same header into ONE item write.
+              // Never cross a header, a retry context, or an invalid filename.
+              const batch=[[key,event]];
+              const waiting=await this.ctx.storage.list({prefix:'queue:',limit:20});
+              for (const [otherKey,other] of waiting) {
+                if (subtitle) break;
+                if (otherKey===key) continue;
+                const m=other.post.document || other.post.video || other.post.audio;
+                if (!m || other.importJob || other.importDone || other.retry || other.context) break;
+                let detail;
+                try { detail=channelFileDetails({...m,file_name:m.file_name || String(other.post.caption || '').split('\n')[0]},context,target.item); }
+                catch { break; }
+                const f={...detail,key:await keyFor(channel+':'+other.post.message_id),kind:context.kind,chatId:channel,msgId:other.post.message_id,channelImport:true};
+                if (f.contentIdentity) f.contentIdentity.msgId=other.post.message_id;
+                event.importJob.files.push(f); batch.push([otherKey,other]);
+              }
+              if (batch.length>1) event.importJob.jobId=hex(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode('batch:'+channel+':'+batch.map(([,e])=>e.post.message_id).join(','))))).slice(0,32);
+              for (const [batchKey,queued] of batch) {
+                queued.context=context; queued.importJob=event.importJob;
+                await this.ctx.storage.put(batchKey,queued);
+              } // Receipt identity and full batch survive network failures.
+            }
+          } catch(e) {
+            if (event.importJob || (e.status && e.status>=500)) throw e;
+            if (!media) meta.context=null;
+            event.error=e.message; event.importDone=true;
+          }
+        }
+        if (event.importJob && !event.importDone) {
+          const coordinator=this.env.EDITOR.get(this.env.EDITOR.idFromName('publication-coordinator'));
+          const response=await coordinator.fetch(new Request('https://editor.internal/publish',{method:'POST',body:JSON.stringify({...event.importJob,channelAutomatic:true})}));
+          const result=await response.json();
+          if (response.status>=500) throw new Error(result.error || 'انتشار موقتاً ناموفق بود');
+          if (!response.ok && event.importJob.files.length>1) {
+            const sharedJob=event.importJob;
+            for (const file of sharedJob.files) {
+              const batchKey='queue:'+String(file.msgId).padStart(16,'0');
+              const queued=await this.ctx.storage.get(batchKey);
+              if (!queued || queued.importJob?.jobId!==sharedJob.jobId) continue;
+              queued.importJob={...sharedJob,files:[file],jobId:hex(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode('channel:'+channel+':'+file.msgId)))).slice(0,32)};
+              await this.ctx.storage.put(batchKey,queued);
+              if (batchKey===key) event.importJob=queued.importJob;
+            }
+            throw new Error('دسته برای بررسی جداگانه و خودکار فایل‌ها دوباره در صف قرار گرفت');
+          }
+          if (!response.ok) event.error=result.error || 'انتشار ناموفق';
+          else {
+            event.published=true; event.error='';
+            for (const file of event.importJob.files) {
+              const batchKey='queue:'+String(file.msgId).padStart(16,'0');
+              if (batchKey===key) continue;
+              const queued=await this.ctx.storage.get(batchKey);
+              if (queued?.importJob?.jobId===event.importJob.jobId) {
+                queued.importDone=true; queued.published=true; queued.error='';
+                await this.ctx.storage.put(batchKey,queued);
+              }
+            }
+          }
+          event.importDone=true;
+        }
+      }
+      if (!rule.publish) event.importDone=true;
+      await this.ctx.storage.put('channel-meta',meta);
+      await this.ctx.storage.put(key,event);
+      await this.relayChannelEvent(channel,rule,key,event);
+      if (event.error) {
+        meta.lastError='پیام '+post.message_id+': '+event.error;
+        if (media) {
+          await this.ctx.storage.put('failed:'+String(post.message_id).padStart(16,'0'),event);
+          const failures=await this.ctx.storage.list({prefix:'failed:',limit:100});
+          for (const stale of [...failures.keys()].slice(0,Math.max(0,failures.size-20))) await this.ctx.storage.delete(stale);
+        }
+        try { await this.say(rule.adminId,'⚠️ کانال '+channel+'، پیام '+post.message_id+'\n'+event.error+'\nوضعیت: /channel '+channel); } catch {}
+      } else if (media) await this.ctx.storage.delete('failed:'+String(post.message_id).padStart(16,'0'));
+      if (event.published) meta.imported=(meta.imported || 0)+1;
+      meta.lastId=Math.max(meta.lastId || 0,post.message_id);
+      await this.ctx.storage.put('channel-meta',meta);
+      if (event.privateRelay) await this.ctx.storage.put('relay-done:'+String(post.message_id).padStart(16,'0'),true);
+      await this.ctx.storage.delete(key);
+      const next=await this.ctx.storage.list({prefix:'queue:',limit:1});
+      if (next.size) await this.ctx.storage.setAlarm(Date.now()+1000);
+      return true;
+    } catch(e) {
+      event.attempts=(event.attempts || 0)+1;
+      meta.lastError='صف در پیام '+post.message_id+' متوقف است: '+e.message;
+      await this.ctx.storage.put(key,event);
+      await this.ctx.storage.put('channel-meta',meta);
+      await this.ctx.storage.setAlarm(Date.now()+Math.min(300000,5000*2**Math.min(event.attempts,6)));
+      if (event.attempts===1) { try { await this.say(rule.adminId,'⚠️ '+meta.lastError+'\nپس از اصلاح دسترسی/تنظیمات، تلاش مجدد خودکار است.'); } catch {} }
+    }
+  }
+  say(chat,text) { return tg(this.env,'sendMessage',{chat_id:chat,text,reply_markup:{resize_keyboard:true,keyboard:[
+    ['راهنما','وضعیت کانال‌ها'],['مرحله بعد','پیش‌نمایش'],['انتشار پس از بررسی','تازه‌کردن مشخصات'],
+    ['تأیید فایل منتظر','ردکردن فایل منتظر'],['اصلاح فصل و کیفیت','لغو پیش‌نویس']
+  ]}}); }
+  async save(draft) {
+    draft.touchedAt=Date.now();
+    await this.ctx.storage.put('draft',draft);
+    await this.ctx.storage.setAlarm(Date.now()+DAY);
+  }
+  stageText(d) {
+    return 'اثر: '+d.item.title+'\nاکنون فایل‌های '+LABELS[STAGES[d.stage]]+' را بفرستید (خود فایل یا فوروارد). قبل از فایل‌ها بنویسید «نسخه Rubixfa» یا در کپشن «#نسخه Rubixfa». نام نسخه حدس زده نمی‌شود؛ بدون آن «نسخه نامشخص» ثبت می‌شود. کیفیت و حجم از خود فایل خوانده می‌شوند.\nدکمه «مرحله بعد» برای ردکردن این دسته؛ «پیش‌نمایش» برای بررسی فایل‌ها؛ «لغو پیش‌نویس» برای انصراف';
+  }
+  async process(msg,actor) {
+    let text=String(msg.text || '').trim(); const chat=msg.chat.id;
+    const buttons={'راهنما':'/help','مرحله بعد':'/next','پیش‌نمایش':'/review','انتشار پس از بررسی':'/confirm','تأیید فایل منتظر':'/accept','ردکردن فایل منتظر':'/skip','تازه‌کردن مشخصات':'/refresh'};
+    text=buttons[text] || text;
+    const publicOrigin = await contentSiteOrigin(this.env);
+    const control = /^\/(channel|retry|skiprelay) (-100\d{6,20})(?: (\d+))?$/.exec(text);
+    if (control) {
+      const rule=contentChannelRules(this.env)[control[2]];
+      if (!rule || rule.adminId!==actor) return this.say(chat,'این کانال به حساب مدیریت شما متصل نیست.');
+      const target=this.env.EDITOR.get(this.env.EDITOR.idFromName('channel:'+control[2]));
+      const r=await target.fetch(new Request('https://editor.internal/channel-'+(control[1]==='retry'?'retry':control[1]==='skiprelay'?'skip-relay':'status'),{method:'POST',body:JSON.stringify({id:Number(control[3] || 0)})}));
+      const result=await r.json();
+      return this.say(chat,result.message || result.error || 'درخواست انجام شد.');
+    }
+    let d=await this.ctx.storage.get('draft');
+    if (text==='وضعیت کانال‌ها') {
+      const rules=contentChannelRules(this.env), ids=Object.keys(rules).filter(id=>rules[id].adminId===actor);
+      if (!ids.length) return this.say(chat,'هنوز کانالی برای شما تنظیم نشده. در پنل سایت، بخش راه‌اندازی ربات، تنظیم کانال را بسازید. شناسه تلگرام شما: '+actor);
+      for (const id of ids) {
+        const target=this.env.EDITOR.get(this.env.EDITOR.idFromName('channel:'+id));
+        const r=await target.fetch(new Request('https://editor.internal/channel-status',{method:'POST',body:'{}'}));
+        const report=await r.json(); await this.say(chat,report.message || 'وضعیت در دسترس نیست.');
+      }
+      return;
+    }
+    if (text==='لغو پیش‌نویس' && d?.phase!=='publishing') {
+      if (!d) return this.say(chat,'پیش‌نویس فعالی ندارید.');
+      d.cancelRequested=true; await this.save(d);
+      return tg(this.env,'sendMessage',{chat_id:chat,text:'فایل‌های منتشرنشده این پیش‌نویس از مخزن پاک شوند؟',reply_markup:{resize_keyboard:true,keyboard:[['تأیید لغو','ادامه کار']]}});
+    }
+    if (text==='تأیید لغو') {
+      if (!d?.cancelRequested) return this.say(chat,'درخواست لغو فعالی ندارید.');
+      text='/cancel';
+    } else if (d?.cancelRequested) { delete d.cancelRequested; await this.save(d); }
+    if (text==='ادامه کار') return this.say(chat,d ? this.stageText(d) : 'لینک صفحه اثر را بفرستید.');
+    if (text==='اصلاح فصل و کیفیت') {
+      if (!d?.pending || d.phase==='publishing') return this.say(chat,'فایل منتظر اصلاح وجود ندارد.');
+      d.awaitingAssignment=true; await this.save(d);
+      return this.say(chat,'فصل، قسمت و کیفیت را با فاصله بفرستید. مثال: 2 3 1080 یعنی فصل ۲، قسمت ۳، کیفیت 1080. برای فیلم بنویسید: 1 1 1080');
+    }
+    if (d?.awaitingAssignment && /^[0-9۰-۹]+ +[0-9۰-۹]+ +(480|720|1080|2160|4k|۴۸۰|۷۲۰|۱۰۸۰|۲۱۶۰)$/.test(text)) {
+      text='/assign '+text.replace(/[۰-۹]/g,c=>String('۰۱۲۳۴۵۶۷۸۹'.indexOf(c))); delete d.awaitingAssignment;
+    }
+    if (text === '/help' || text === '/start') return this.say(chat,
+      'سلام! شناسه تلگرام شما: '+actor+'\n\nبرای ثبت خودکار، سربرگ و فایل‌ها را در کانال تنظیم‌شده بگذارید؛ لازم نیست برای هر فایل فرمانی بفرستید. دکمه «وضعیت کانال‌ها» نتیجه را نشان می‌دهد. برای سافتساب با فایل زیرنویس جدا، #زیرنویس جدا را در سربرگ بگذارید؛ اول ویدئو، بعد زیرنویس هم‌نام یا پاسخ به همان ویدئو.\n\nبرای ثبت دستی، لینک صفحه فیلم یا سریال را بفرستید و با دکمه‌های پایین ادامه دهید: «مرحله بعد»، «پیش‌نمایش» و سپس «انتشار پس از بررسی».\nاگر نام فایل روشن نبود، «اصلاح فصل و کیفیت» را بزنید. دکمه «لغو پیش‌نویس» قبل از حذف تأیید می‌گیرد. فرمان‌های قبلی هم همچنان کار می‌کنند.');
+    if (d?.phase === 'publishing' && !['/confirm','/review'].includes(text)) return this.say(chat,'نتیجه انتشار هنوز قطعی نیست. ابتدا /confirm را دوباره بفرستید؛ لغو یا حذف فایل در این وضعیت مجاز نیست.');
+    if (text === '/cancel') {
+      if (d) await this.discard(d);
+      return this.say(chat,'پیش‌نویس لغو شد. لینک اثر را بفرستید.');
+    }
+    const itemId=itemIdFromLink(text,publicOrigin);
+    if (itemId) {
+      if (d) return this.say(chat,'ابتدا پیش‌نویس فعلی را با /confirm ثبت یا با /cancel لغو کنید.');
+      const data=await site(this.env,'item',{actorId:actor,itemId});
+      if (!['movie','series'].includes(data.item.type)) return this.say(chat,'این اثر فیلم یا سریال نیست.');
+      d={actor,chat,jobId:randomJob(),item:data.item,vault:data.vault,stage:0,files:[],pending:null,phase:'collect'};
+      await this.save(d);
+      return this.say(chat,'🎬 '+data.item.title+' — '+(data.item.year || '')+'\n'+data.item.description.slice(0,700)+'\n\n'+this.stageText(d));
+    }
+    if (!d) return this.say(chat,'ابتدا لینک صفحه فیلم یا سریال در همین سایت را بفرستید.');
+    const version=/^(?:#نسخه|نسخه|\/version)\s+(.+)$/.exec(text);
+    if (version) {
+      d.version=version[1].trim().slice(0,64); await this.save(d);
+      return this.say(chat,'نسخه فایل‌های بعدی: '+d.version+'؛ اکنون فایل‌ها را بفرستید.');
+    }
+    if (text === '/refresh') {
+      const data=await site(this.env,'item',{actorId:actor,itemId:d.item.id});
+      if (data.vault !== d.vault) return this.say(chat,'مخزن تغییر کرده است؛ این پیش‌نویس را لغو و دوباره شروع کنید.');
+      d.item=data.item; d.phase='collect'; await this.save(d); return this.review(d);
+    }
+    if (text === '/skip') { d.pending=null; d.phase='collect'; await this.save(d); return this.say(chat,'فایل منتظر رد شد.\n'+this.stageText(d)); }
+    if (text === '/next') {
+      if (d.pending) return this.say(chat,'ابتدا فایل منتظر را با /assign یا /accept تعیین تکلیف کنید؛ برای ردکردن /skip.');
+      if (d.stage === STAGES.length-1) return this.review(d);
+      d.stage++; d.phase='collect'; await this.save(d); return this.say(chat,this.stageText(d));
+    }
+    if (text === '/review') return this.review(d);
+    if (text === '/confirm') {
+      if (!['review','publishing'].includes(d.phase) || d.pending || !d.files.length) return this.say(chat,'ابتدا /review را بفرستید و موارد مبهم را تکمیل کنید.');
+      const retrying = d.phase === 'publishing';
+      d.phase='publishing'; await this.save(d);
+      const coordinator=this.env.EDITOR.get(this.env.EDITOR.idFromName('publication-coordinator'));
+      const r=d.sitePublished ? Response.json({count:d.files.length}) : await coordinator.fetch(new Request('https://editor.internal/publish',{method:'POST',body:JSON.stringify({actorId:actor,itemId:d.item.id,expectedUpdatedAt:d.item.updatedAt,jobId:d.jobId,files:d.files})}));
+      const result=await r.json();
+      if (!r.ok) {
+        if (!retrying && [400,403,404,409].includes(r.status)) { d.phase='collect'; await this.save(d); }
+        throw new Error((result.error || 'انتشار ناموفق')+(r.status===409 ? '\n/refresh سپس /review و /confirm' : ''));
+      }
+      d.sitePublished=true; await this.save(d);
+      await this.ctx.storage.setAlarm(Date.now()+5000);
+      await this.finishPrivateRelay(d);
+      return this.say(chat,'✅ '+result.count+' فایل به '+d.item.title+' اضافه شد.\n'+publicOrigin+'/#/item/'+d.item.id);
+    }
+    if (/^\/remove \d+$/.test(text)) {
+      const index=Number(text.split(' ')[1])-1;
+      if (!d.files[index]) return this.say(chat,'شماره فایل در پیش‌نویس وجود ندارد.');
+      const file=d.files[index];
+      await tg(this.env,'deleteMessage',{chat_id:d.vault,message_id:file.msgId});
+      d.files.splice(index,1); d.phase='collect'; await this.save(d); return this.say(chat,'فایل از پیش‌نویس و مخزن حذف شد؛ برای خلاصه /review.');
+    }
+    if (text === '/accept' || text.startsWith('/assign ')) {
+      if (!d.pending) return this.say(chat,'فایل منتظری وجود ندارد.');
+      if (text.startsWith('/assign ')) {
+        const m=/^\/assign (\d+) (\d+) (480|720|1080|2160|4k)$/.exec(text);
+        if (!m) return this.say(chat,'مثال: /assign 2 3 1080');
+        Object.assign(d.pending,{season:Number(m[1]),episode:Number(m[2]),quality:m[3]==='2160'?'4k':m[3]});
+      }
+      return this.stageFile(d,d.pending,true);
+    }
+    if (d.pending) return this.say(chat,'یک فایل منتظر تأیید است. /accept یا /assign یا /skip را بفرستید.');
+    const media=msg.document || msg.video || msg.audio;
+    const link=sourceLink(text);
+    if (!media && !link) return this.say(chat,this.stageText(d));
+    if (d.files.length>=20) return this.say(chat,'پیش‌نویس به سقف ۲۰ فایل رسیده؛ /review را بفرستید.');
+    const parsed=parseFilename(media?.file_name || msg.caption || '');
+    const file={...parsed,kind:STAGES[d.stage],fileName:media?.file_name || msg.caption || '',version:(/^#نسخه\s+(.+)$/m.exec(msg.caption || '')?.[1] || d.version || ''),sizeBytes:media?.file_size || null,
+      inputChat:link?.chatId || chat,inputMessage:link?.msgId || msg.message_id,
+      key:await keyFor((media?.file_unique_id || (link ? link.chatId+':'+link.msgId : chat+':'+msg.message_id))+':'+STAGES[d.stage])};
+    return this.stageFile(d,file,false);
+  }
+  async finishPrivateRelay(d) {
+    // Telegram doesn't send our own copies back as channel_post updates.
+    if (contentChannelRules(this.env)[String(d.vault)]?.targets.length) {
+      const target=this.env.EDITOR.get(this.env.EDITOR.idFromName('channel:'+d.vault));
+      const relay=await target.fetch(new Request('https://editor.internal/channel-relay',{method:'POST',body:JSON.stringify({channel:d.vault,actorId:d.actor,files:d.files})}));
+      if (!relay.ok) throw new Error('ثبت سایت انجام شد؛ انتقال خودکار دوباره تلاش می‌شود.');
+    }
+    await this.ctx.storage.delete('draft'); await this.ctx.storage.deleteAlarm();
+  }
+  async stageFile(d,file,accepted) {
+    if (d.files.some(x=>x.key===file.key)) { d.pending=null; await this.save(d); return this.say(d.chat,'این فایل قبلاً در همین پیش‌نویس دریافت شده است.'); }
+    const validQuality=['480','720','1080','4k'].includes(file.quality);
+    const validEpisode=d.item.type!=='series' || (Number.isInteger(file.season)&&file.season>=1&&file.season<=200&&Number.isInteger(file.episode)&&file.episode>=1&&file.episode<=10000);
+    const norm=s=>String(s).toLowerCase().replace(/[^a-z0-9]/g,'');
+    const english=d.item.title.split('|').find(t=>/[a-z]{2}/i.test(t));
+    const uncertainName=!english || !norm(file.detectedTitle).includes(norm(english.trim()));
+    if (!validQuality || !validEpisode || (!accepted && uncertainName)) {
+      d.pending=file; d.phase='collect'; await this.save(d);
+      return this.say(d.chat,'نیاز به بررسی: '+(file.detectedTitle || 'نام نامشخص')+'\nفصل '+(file.season ?? '؟')+'، قسمت '+(file.episode ?? '؟')+'، کیفیت '+(file.quality || '؟')+'\nاثر مقصد: '+d.item.title+'\nبرای اصلاح: /assign 1 2 1080\nاگر اطلاعات درست است: /accept\nردکردن: /skip');
+    }
+    file.title=editorVersionTitle({file_name:file.fileName,file_size:file.sizeBytes},file.version,file.quality);
+    const copied=await tg(this.env,'copyMessage',{chat_id:d.vault,from_chat_id:file.inputChat,message_id:file.inputMessage});
+    d.files.push({key:file.key,kind:file.kind,title:file.title,formattedTitle:true,season:d.item.type==='series'?file.season:1,episode:d.item.type==='series'?file.episode:1,
+      quality:file.quality,sizeBytes:file.sizeBytes,chatId:d.vault,msgId:copied.message_id});
+    d.pending=null; d.phase='collect'; await this.save(d);
+    return this.say(d.chat,'📥 فایل '+d.files.length+' در پیش‌نویس: '+LABELS[file.kind]+' | '+file.quality+(d.item.type==='series'?' | S'+file.season+'E'+file.episode:'')+'\nفایل بعدی را بفرستید؛ /next یا /review. هنوز در سایت منتشر نشده است.');
+  }
+  async review(d) {
+    if (d.pending) return this.say(d.chat,'ابتدا فایل منتظر را تعیین تکلیف کنید: /assign یا /accept یا /skip.');
+    if (!d.files.length) return this.say(d.chat,'پیش‌نویس خالی است.\n'+this.stageText(d));
+    if (d.phase!=='publishing') { d.phase='review'; await this.save(d); }
+    return this.say(d.chat,'پیش‌نمایش '+d.item.title+'\n'+d.files.map((f,i)=>(i+1)+'. '+LABELS[f.kind]+' | '+f.quality+(d.item.type==='series'?' | S'+f.season+'E'+f.episode:'')+(f.title?' | '+f.title:'')).join('\n')+'\n\n/confirm تأیید و انتشار\n/remove 2 حذف فایل دوم\n/cancel لغو');
+  }
+  async discard(d) {
+    if (d.phase==='publishing') return;
+    if (d.files.length) await tg(this.env,'deleteMessages',{chat_id:d.vault,message_ids:d.files.map(f=>f.msgId)});
+    await this.ctx.storage.delete('draft'); await this.ctx.storage.deleteAlarm();
+  }
+  async alarm() {
+    const run=this.tail.then(async()=>{
+      if (await this.ctx.storage.get('channel-id')) {
+        const deadline=Date.now()+15000;
+        for (let n=0;n<20 && Date.now()<deadline;n++) if (!await this.drainChannel()) break;
+        return;
+      }
+      const d=await this.ctx.storage.get('draft');
+      if (!d) return;
+      if (d.phase==='publishing' && d.sitePublished) {
+        try { await this.finishPrivateRelay(d); }
+        catch { await this.ctx.storage.setAlarm(Date.now()+10000); }
+        return;
+      }
+      if (d.phase==='publishing') { await this.ctx.storage.setAlarm(Date.now()+DAY); return; } // Never delete possibly published files.
+      if (Date.now()-d.touchedAt<DAY) { await this.ctx.storage.setAlarm(d.touchedAt+DAY); return; }
+      await this.discard(d);
+      try { await this.say(d.chat,'پیش‌نویس بدون فعالیت پس از ۲۴ ساعت لغو شد.'); } catch {}
+    });
+    this.tail=run.catch(()=>{}); return run;
+  }
+}
+
+
 async function handleApi(request, url, store, ctx) {
   const p = url.pathname.replace(/^\/api\//, '');
   const m = request.method;
   let mm;
+
+  if (p === 'tg/content-webhook') return contentBotWebhook.fetch(request, store.env);
+  // Retired external bridge is intentionally inaccessible.
+  if (p.startsWith('content-bot/')) return json({error:'not found'},404);
 
   if ((p === 'tg/webhook' || p === 'tg/file-webhook') && m === 'POST') {
     const set = await getSettings(store);
@@ -5297,6 +6416,7 @@ function faviconSvg() {
 
 function htmlPage(settings) {
   const html = APP_HTML
+    .replace(/@@MINI_APP_URL@@/g, CONFIG.MINI_APP_URL)
     .replace(/@@SITE@@/g, htmlEscape(settings.siteName))
     .replace(/@@TAG@@/g, htmlEscape(settings.tagline || ''));
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' } });
@@ -5412,7 +6532,7 @@ img{max-width:100%}
 .hdr.hdr-float.scrolled{background:rgba(11,14,20,.72);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border-bottom:1px solid var(--glass-line)}
 .hdr.hdr-float{transition:background .25s,border-color .25s}
 .hdr-back{display:none;width:38px;height:38px;border-radius:50%;background:var(--glass);border:1px solid var(--glass-line);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);align-items:center;justify-content:center;font-size:20px;color:#fff;flex:none}
-.hdr.hdr-float .hdr-back{display:flex}
+
 main.m-full{max-width:none;padding:0}
 .logo{display:flex;align-items:center;gap:8px;font-weight:900;font-size:19px;white-space:nowrap}
 .logo-ic{font-size:22px;filter:drop-shadow(0 2px 6px rgba(255,122,26,.5))}
@@ -5521,8 +6641,8 @@ main{min-height:calc(100vh - var(--hdr-h));min-height:calc(100dvh - var(--hdr-h)
 .d-meta-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;font-weight:800;font-size:13.5px;color:#e8edf7}
 .dm{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 .dm-age{padding:1px 9px;border-radius:999px;border:1.5px solid rgba(255,255,255,.55);font-size:12px;letter-spacing:.02em;direction:ltr}
-.dm-imdb{gap:6px}
-.dm-imdb b{font-size:11px;font-weight:900;color:#f5c518;background:rgba(245,197,24,.14);border:1px solid rgba(245,197,24,.45);border-radius:6px;padding:0 6px;line-height:1.7}
+.dm-imdb{gap:7px;direction:ltr;unicode-bidi:isolate;background:#f5c518;color:#171409;border-radius:7px;padding:3px 9px;font-weight:900;white-space:nowrap}
+.dm-imdb b{font-size:11px;font-weight:900;color:inherit;border-right:1px solid #17140940;padding-right:7px;line-height:1.7}
 .dm-live{color:#ff8aa0;background:rgba(255,59,92,.16);border:1px solid rgba(255,59,92,.5);border-radius:999px;padding:2px 10px 2px 8px;font-size:12px}
 .dm-live:before{content:'';width:7px;height:7px;border-radius:50%;background:var(--live);box-shadow:0 0 0 3px rgba(255,59,92,.25);animation:pulse 1.4s infinite}
 .d-genres{display:flex;flex-wrap:wrap;gap:6px}
@@ -5977,6 +7097,37 @@ button.dp-slide{cursor:zoom-in}
   .adspec{grid-template-columns:1fr}
   .k2k-when{grid-template-columns:1fr}
 }
+
+/* Cinematic home banner; preserve portrait artwork without stretching it. */
+.hero-slide{height:clamp(400px,39vw,560px);min-height:0;isolation:isolate}
+.hero-blur{filter:blur(28px) brightness(.48) saturate(1.1)}
+.hero-poster{left:0;right:38%;background-size:contain;background-position:center}
+.hero-slide:after{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(270deg,#0a0d14 0%,rgba(10,13,20,.92) 30%,rgba(10,13,20,.15) 66%,transparent),linear-gradient(0deg,rgba(10,13,20,.65),transparent 35%);pointer-events:none}
+.hero-in{width:55%;align-self:center;padding:40px 42px 52px;background:none;gap:16px}
+.hero-title{font-size:clamp(26px,3vw,42px);line-height:1.5;text-wrap:balance}
+.hero-desc{line-height:1.9;color:#d1d5df;-webkit-line-clamp:3}
+.hero-cta{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.4);color:#fff;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);gap:24px;border-radius:12px;padding:11px 20px}
+.hero-cta:hover{background:rgba(255,255,255,.2);border-color:#fff}
+.hero-dot{width:24px;height:24px;background:radial-gradient(circle,#ffffff70 3px,transparent 4px)}
+.hero-dot.on{width:24px;background:radial-gradient(circle,var(--acc) 5px,transparent 6px)}
+.detail-posters{max-width:440px;margin:28px auto}
+.detail-posters .dp-carousel{position:relative;inset:auto;width:100%;aspect-ratio:2/3;border-radius:16px}
+@media(max-width:640px){
+.hero-wrap{border-radius:20px;margin-bottom:24px}
+.hero-slide{height:clamp(420px,125vw,580px);min-height:0}
+.hero-poster{inset:0;background-position:center top;background-size:contain}
+.hero-slide:after{background:linear-gradient(0deg,rgba(7,9,13,.96),rgba(7,9,13,.62) 20%,transparent 52%)}
+.hero-in{width:100%;align-self:flex-end;padding:20px 20px 44px;gap:9px}
+.hero-title{font-size:23px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.hero-desc{display:none}
+.hero-meta .badge:nth-child(n+3){display:none}
+.hero-meta .badge{font-size:11px;background:rgba(0,0,0,.22)}
+.hero-btns{margin-top:3px}
+.hero-cta{font-size:13px;padding:9px 16px}
+.detail-posters{max-width:360px;width:100%}
+}
+@media(prefers-reduced-motion:reduce){.hero-track{transition:none}}
+
 </style>
 </head>
 <body>
@@ -6087,6 +7238,7 @@ function fmtBytes (b) {
 function unitName () { return (APP.economy && APP.economy.unit) || 'سکه'; }
 function sourceHref (src) {
   if (!src) return '';
+  if (Array.isArray(src.parts) && src.parts.length) return src.parts.map(sourceHref).join(',');
   if (src.chatId && src.msgId) return 'https://t.me/c/' + String(src.chatId).replace(/^-100/, '') + '/' + src.msgId;
   if (src.user && src.msgId) return 'https://t.me/' + String(src.user).replace(/^@/, '') + '/' + src.msgId;
   var u = src.tmeUrl || '';
@@ -6134,7 +7286,7 @@ function showLoginWait () {
     el = document.createElement('div');
     el.id = 'login-wait';
     el.className = 'login-wait';
-    el.innerHTML = '<span class="poll-dot"></span><span>در حال ورود از ربات… چند لحظه بمانید، صفحه را نبندید</span>';
+    el.innerHTML = '<span class="poll-dot"></span><span>در انتظار تأیید تلگرام؛ ورود را در ربات تأیید کنید.</span>';
     (document.body || document.documentElement).appendChild(el);
   }
   el.style.display = 'flex';
@@ -6145,11 +7297,12 @@ function peekLoginTicket (force) {
   if (!id) { hideLoginWait(); return; }
   showLoginWait();
   var now = Date.now();
-  if (!force && __pollBusy && (now - __pollAt) < 800) return;
+  if (__pollBusy) return;
   __pollBusy = true;
   __pollAt = now;
-  api('/auth/ticket/' + id + '?t=' + now).then(function (t) {
+  api('/auth/ticket/' + id + '?t=' + now, { timeout: 8000 }).then(function (t) {
     if (__pollAt === now) __pollBusy = false;
+    if (getTick() !== id || APP.user) return;
     if (t && t.status === 'ready' && t.token) {
       stopPoll();
       setTick('');
@@ -6164,23 +7317,17 @@ function peekLoginTicket (force) {
       stopPoll();
       hideLoginWait();
     }
-  }).catch(function () {
+  }).catch(function (e) {
     if (__pollAt === now) __pollBusy = false;
+    if (getTick() !== id || APP.user) return;
+    if (e.status === 404) { setTick(''); stopPoll(); hideLoginWait(); toast('لینک ورود منقضی شده؛ دوباره ورود با تلگرام را بزنید.', 'err'); }
   });
 }
 function burstPeek () {
   if (getToken() || APP.user || !getTick()) return;
   showLoginWait();
   peekLoginTicket(true);
-  var n = 0;
-  if (__burstTimer) clearInterval(__burstTimer);
-  __burstTimer = setInterval(function () {
-    n += 1;
-    peekLoginTicket(true);
-    if (n >= 24 || APP.user || !getTick()) {
-      if (__burstTimer) { clearInterval(__burstTimer); __burstTimer = null; }
-    }
-  }, 200);
+
 }
 var __miniLoginBusy = false;
 function loginMiniApp () {
@@ -6206,14 +7353,14 @@ function startLoginWatch () {
   showLoginWait();
   burstPeek();
   if (__pollTimer) return;
-  __pollTimer = setInterval(function () { peekLoginTicket(false); }, 400);
+  __pollTimer = setInterval(function () { peekLoginTicket(false); }, 1500);
 }
 function bindLoginResume () {
   if (window.__loginResumeBound) return;
   window.__loginResumeBound = true;
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) burstPeek(); });
-  window.addEventListener('focus', function () { burstPeek(); });
-  window.addEventListener('pageshow', function () { burstPeek(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) { loginMiniApp(); burstPeek(); } });
+  window.addEventListener('focus', function () { loginMiniApp(); burstPeek(); });
+  window.addEventListener('pageshow', function () { loginMiniApp(); burstPeek(); });
   document.addEventListener('click', function () { if (getTick() && !APP.user) peekLoginTicket(true); }, true);
 }
 bindLoginResume();
@@ -6222,7 +7369,11 @@ function api (path, opts) {
   var hd = { 'Content-Type': 'application/json' };
   var t = getToken();
   if (t) hd['Authorization'] = 'Bearer ' + t;
+  var controller = new AbortController();
+  var timeout = setTimeout(function () { controller.abort(); }, opts.timeout || 15000);
   return fetch('/api' + path, {
+    signal: controller.signal,
+    cache: 'no-store',
     method: opts.method || 'GET',
     headers: hd,
     body: opts.body ? JSON.stringify(opts.body) : undefined
@@ -6231,7 +7382,10 @@ function api (path, opts) {
       if (!r.ok) { var e = new Error(j.error || ('خطا ' + r.status)); e.status = r.status; e.data = j; throw e; }
       return j;
     });
-  });
+  }).catch(function (e) {
+    if (e.name === 'AbortError') throw new Error('پاسخ سرور طول کشید؛ اتصال را بررسی و دوباره تلاش کنید.');
+    throw e;
+  }).finally(function () { clearTimeout(timeout); });
 }
 
 function qs (q) {
@@ -6248,6 +7402,36 @@ function qs (q) {
 function isTgWebHash (h) {
   h = String(h || '');
   return h.indexOf('tgWebApp') >= 0 || h.indexOf('#tgWebApp') >= 0;
+}
+function miniAppItemUrl (id) {
+  if (!/^i_[a-z0-9]+$/.test(String(id || ''))) return '';
+  return '@@MINI_APP_URL@@' + '?startapp=item_' + id;
+}
+function itemRouteFromStart (value) {
+  var match = /^item_(i_[a-z0-9]+)$/.exec(String(value || ''));
+  return match && value.length <= 512 ? '#/item/' + match[1] : '';
+}
+var __itemLaunchHandled = false;
+function applyMiniAppItemLaunch () {
+  if (__itemLaunchHandled) return;
+  var hash = location.hash || '';
+  // Only apply launch navigation at entry, never after the user has navigated.
+  if (hash && hash !== '#' && hash !== '#/' && !isTgWebHash(hash)) {
+    __itemLaunchHandled = true;
+    return;
+  }
+  var query = new URLSearchParams(location.search || '');
+  var fragment = new URLSearchParams(hash.slice(1));
+  var start = (TG && TG.initDataUnsafe && TG.initDataUnsafe.start_param) ||
+    query.get('tgWebAppStartParam') || fragment.get('tgWebAppStartParam') || '';
+  // This is a navigation hint only; authentication still verifies Telegram initData server-side.
+  var route = itemRouteFromStart(start);
+  if (route) {
+    __itemLaunchHandled = true;
+    query.delete('tgWebAppStartParam');
+    var search = query.toString();
+    history.replaceState(null, '', location.pathname + (search ? '?' + search : '') + route);
+  }
 }
 function currentRoute () {
   var h = '';
@@ -6492,9 +7676,7 @@ function headerHtml (active, opts) {
     '<a href="#/wallet" class="' + (active === 'wallet' ? 'on' : '') + '">کیف پول</a>' +
     '<a href="#/account" class="' + (active === 'account' ? 'on' : '') + '">حساب</a>' +
     (APP.user && APP.user.role === 'admin' ? '<a href="#/admin" class="' + (active === 'admin' ? 'on' : '') + '">مدیریت</a>' : '');
-  var backBtn = '<button type="button" class="hdr-back" id="hdr-back" aria-label="بازگشت"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
   return '<header class="hdr' + (opts.float ? ' hdr-float' : '') + '">' +
-    backBtn +
     '<a class="logo" href="#/"><span class="logo-ic">🎬</span><span class="logo-tx">' + esc(APP.siteName) + '</span></a>' +
     '<nav class="hdr-nav">' + desktopNav + '</nav>' +
     '<div class="hdr-actions">' + walletPart + admBtn + userPart + '</div>' +
@@ -6515,8 +7697,6 @@ function syncFloatHeader () {
   if (y > 30) h.classList.add('scrolled'); else h.classList.remove('scrolled');
 }
 function bindHeader () {
-  var b = $('#hdr-back');
-  if (b) b.addEventListener('click', function () { history.length > 1 ? history.back() : nav('#/'); });
   if (!__hdrScrollBound) {
     __hdrScrollBound = true;
     window.addEventListener('scroll', syncFloatHeader, { passive: true });
@@ -6551,7 +7731,7 @@ function cardHtml (it) {
   var imdb = it.imdb ? '<span class="card-imdb"><b>' + Number(it.imdb).toFixed(1) + '</b><i>IMDb</i></span>' : '';
   var live = isAiring(it) ? '<span class="card-live">در حال پخش</span>' : '';
   var inner = poster
-    ? '<div class="card-p" style="background-image:url(' + poster + ')">' + imdb + live + '<div class="card-ov"><span>📥</span></div></div>'
+    ? '<div class="card-p" style="background-image:url(' + esc(poster) + ')">' + imdb + live + '<div class="card-ov"><span>📥</span></div></div>'
     : '<div class="card-p">' + imdb + live + '<div class="card-ov"><span>📥</span></div></div>';
   var yl = yearLabel(it);
   var sub = isAiring(it) && it.airingSeason ? ('فصل ' + faNum(it.airingSeason)) : typeLabel(it.type);
@@ -6580,22 +7760,21 @@ function adminEmptyGuide () {
 
 function heroSlideHtml (it) {
   var poster = it.poster || '';
-  var blur = poster ? '<div class="hero-blur" style="background-image:url(' + poster + ')"></div>' : '';
-  var fit = poster ? '<div class="hero-poster" style="background-image:url(' + poster + ')"></div>' : '';
+  var blur = poster ? '<div class="hero-blur" style="background-image:url(' + esc(poster) + ')"></div>' : '';
+  var fit = poster ? '<div class="hero-poster" style="background-image:url(' + esc(poster) + ')"></div>' : '';
   return '<div class="hero-slide">' + blur + fit + '<div class="hero-in">' +
     '<h1 class="hero-title">' + esc(it.title) + '</h1>' +
     '<div class="hero-meta">' + (isAiring(it) ? '<span class="badge live">' + esc(airingLabel(it)) + '</span>' : '') +
     '<span class="badge">' + typeLabel(it.type) + (yearLabel(it) ? ' • ' + yearLabel(it) : '') + '</span>' +
     (it.genres && it.genres.length ? it.genres.slice(0, 4).map(function (g) { return '<span class="badge">' + esc(g) + '</span>'; }).join('') : '') + '</div>' +
     (it.desc ? '<div class="hero-desc">' + esc(it.desc) + '</div>' : '') +
-    '<div class="hero-btns"><a class="btn btn-primary" href="#/item/' + it.id + '">📥 دریافت از ربات</a>' +
-    '<a class="btn btn-ghost" href="#/item/' + it.id + '">جزئیات</a></div>' +
+    '<div class="hero-btns"><a class="btn hero-cta" href="#/item/' + it.id + '">مشاهده و دریافت <span aria-hidden="true">↗</span></a></div>' +
     '</div></div>';
 }
 function heroHtml (items) {
   if (!items || !items.length) return '';
   var dots = items.map(function (_, i) {
-    return '<button type="button" class="hero-dot' + (i === 0 ? ' on' : '') + '" data-hi="' + i + '"></button>';
+    return '<button type="button" class="hero-dot' + (i === 0 ? ' on' : '') + '" aria-label="نمایش اسلاید ' + faNum(i + 1) + '" data-hi="' + i + '"></button>';
   }).join('');
   return '<div class="hero-wrap" id="hero-wrap" dir="rtl">' +
     '<div class="hero-track" id="hero-track">' + items.map(heroSlideHtml).join('') + '</div>' +
@@ -6617,8 +7796,8 @@ function bindHero () {
   var x0 = 0;
   function go (n) {
     i = (n + slides.length) % slides.length;
-    var w = wrap.clientWidth || 0;
-    track.style.transform = 'translateX(' + (-i * w) + 'px)';
+    track.style.transform = 'translateX(' + (-i * 100) + '%)';
+    slides.forEach(function (slide, k) { slide.inert = k !== i; slide.setAttribute('aria-hidden', k !== i ? 'true' : 'false'); });
     dots.forEach(function (d, k) {
       d.className = 'hero-dot' + (k === i ? ' on' : '');
     });
@@ -6638,8 +7817,8 @@ function bindHero () {
     else if (dx < -48) go(i + 1);
   }, { passive: true });
   go(0);
-  if (slides.length > 1) {
-    __heroTimer = setInterval(function () { go(i + 1); }, 5000);
+  if (slides.length > 1 && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    __heroTimer = setInterval(function () { if (!document.hidden && !wrap.matches(':hover') && !wrap.contains(document.activeElement)) go(i + 1); }, 6500);
   }
 }
 function viewHome (c) {
@@ -7118,7 +8297,6 @@ function viewItem (data, id) {
   var it = data.item;
   var canPlay = data.canPlay;
   var posterHtml = posterCarouselHtml(it);
-  var lockOverlay = '';
   var mainPoster = '';
   try { mainPoster = (posterSlidesForView(it)[0] || {}).url || ''; } catch (e) { mainPoster = ''; }
   var isSeries = it.type === 'series';
@@ -7172,7 +8350,7 @@ function viewItem (data, id) {
     (mainPoster ? '<div class="dhero-bg" style="background-image:url(' + esc(mainPoster) + ')"></div><div class="dhero-img" style="background-image:url(' + esc(mainPoster) + ')"></div>' : '') +
     '<div class="dhero-fade"></div>' +
     '<div class="dhero-in">' +
-    '<div class="d-poster">' + posterHtml + lockOverlay + '</div>' +
+    '<div class="d-poster">' + (mainPoster ? '<img class="dp-img" src="' + esc(mainPoster) + '" alt="' + esc(it.title) + '">' : '') + '</div>' +
     '<div class="d-head">' +
     '<h1 class="d-title">' + esc(tFa) + '</h1>' +
     (tEn ? '<div class="d-title-en">' + esc(tEn) + '</div>' : '') +
@@ -7240,7 +8418,7 @@ function viewItem (data, id) {
     related = rowHtml('🎯 مرتبط با این اثر', relItems);
   }
   return hero + '<div class="d-body">' +
-    lockNote + dlPanel + note + infoCard + castSec + crewSec + galleryHtml(it) + related + footerHtml() +
+    lockNote + dlPanel + note + infoCard + '<section class="d-sec detail-posters" aria-label="گالری پوسترها"><h2 class="d-sec-h">گالری پوسترها</h2>' + posterHtml + '</section>' + castSec + crewSec + related + footerHtml() +
     '</div>';
 }
 
@@ -7574,9 +8752,21 @@ function bindItem (it, data) {
   else bindMovieDl(it);
 }
 function shareOrCopy (it) {
-  var origin = '';
-  try { origin = location.origin; } catch (e) { origin = ''; }
-  sharePage(it.title, origin + '/#/item/' + it.id);
+  var siteUrl = location.origin + '/#/item/' + it.id;
+  var miniUrl = miniAppItemUrl(it.id);
+  var html = '<p class="note">لینک مینی‌اپ، تلگرام را روی صفحه همین فیلم یا سریال باز می‌کند. لینک سایت در مرورگر باز می‌شود.</p>' +
+    '<div class="field"><label for="share-mini-url">لینک مینی‌اپ تلگرام</label><input id="share-mini-url" dir="ltr" readonly value="' + esc(miniUrl) + '"></div>' +
+    '<div class="adm-row"><button type="button" class="btn btn-primary" id="share-mini-copy">کپی لینک مینی‌اپ</button><button type="button" class="btn btn-ghost" id="share-mini-send">اشتراک در تلگرام</button></div>' +
+    '<div class="field" style="margin-top:20px"><label for="share-site-url">لینک سایت</label><input id="share-site-url" dir="ltr" readonly value="' + esc(siteUrl) + '"></div>' +
+    '<button type="button" class="btn btn-ghost" id="share-site-copy">کپی لینک سایت</button>';
+  openModal('اشتراک‌گذاری ' + (it.title || ''), html, function (wrap) {
+    $('#share-mini-copy', wrap).addEventListener('click', function () { copyText(miniUrl, function () { toast('لینک مینی‌اپ کپی شد', 'ok'); }); });
+    $('#share-site-copy', wrap).addEventListener('click', function () { copyText(siteUrl, function () { toast('لینک سایت کپی شد', 'ok'); }); });
+    $('#share-mini-send', wrap).addEventListener('click', function () {
+      openBot('https://t.me/share/url?url=' + encodeURIComponent(miniUrl) + '&text=' + encodeURIComponent(it.title || ''));
+    });
+    $all('input[readonly]', wrap).forEach(function (input) { input.addEventListener('click', function () { input.select(); }); });
+  });
 }
 
 /* ═══════════ ورود با تلگرام ═══════════ */
@@ -8107,6 +9297,75 @@ function loadAdminTab (tab, q) {
   promise.then(function (data) { pane.innerHTML = adminTabHtml(tab, data, q); bindAdminTab(tab, q); })
     .catch(function (e) { pane.innerHTML = emptyHtml('⚠️', 'خطا', e.message); });
 }
+function bindDatabaseMaintenance () {
+  var scan = $('#db-scan'), clean = $('#db-clean'), group = $('#db-prefix'), report = $('#db-report');
+  if (!scan || !clean || !group) return;
+  var cursor = '', candidates = [], done = false;
+  group.addEventListener('change', function () { cursor = ''; candidates = []; done = false; clean.disabled = true; scan.textContent = 'بررسی ۱۰ کلید'; report.textContent = 'گروه جدید آماده بررسی است.'; });
+  function busy(on) { scan.disabled = on; group.disabled = on; clean.disabled = on || !candidates.length; }
+  scan.addEventListener('click', function () {
+    busy(true);
+    api('/admin/maintenance', {method:'POST', body:{prefix:group.value, cursor:done ? '' : cursor}}).then(function (r) {
+      cursor = r.cursor || ''; done = !cursor; candidates = r.candidates || [];
+      report.textContent = 'بررسی‌شده: ' + faNum(r.scanned) + '؛ قابل پاک‌سازی: ' + faNum(candidates.length) + (done ? '؛ پایان این گروه.' : '؛ برای ادامه، بررسی بعدی را بزنید.');
+      candidates.forEach(function (entry) { var line = document.createElement('div'); line.textContent = entry.key + ' — ' + entry.reason; report.appendChild(line); });
+      scan.textContent = done ? 'بررسی دوباره از ابتدا' : 'بررسی ۱۰ کلید بعدی';
+    }).catch(function (e) { candidates = []; report.textContent = e.message; }).finally(function () { busy(false); });
+  });
+  clean.addEventListener('click', function () {
+    if (!candidates.length || !confirm('پس از تهیه پشتیبان، ' + faNum(candidates.length) + ' ارجاع بدون صاحب حذف شود؟ این عملیات برگشت‌پذیر نیست.')) return;
+    busy(true);
+    api('/admin/maintenance', {method:'POST', body:{action:'delete', confirm:'DELETE_ORPHANS', keys:candidates.map(function (x) { return x.key; })}}).then(function (r) {
+      candidates = []; report.textContent = 'حذف‌شده: ' + faNum(r.deleted) + '؛ حفظ‌شده پس از بررسی مجدد: ' + faNum(r.skipped);
+    }).catch(function (e) { report.textContent = e.message; }).finally(function () { busy(false); });
+  });
+}
+function contentSetupHtml (status) {
+  status=status || {steps:[]};
+  return '<div class="adm-box" style="margin-top:24px"><h4>راه‌اندازی ربات مدیریت — قدم‌به‌قدم</h4>' +
+    '<p class="note">ابتدا ربات را بدون انتقال کانال‌ها راه بیندازید. اعداد 42 و -1001111111111 فقط نمونه‌اند. توکن و رمز را در چت یا کد سایت ننویسید.</p>' +
+    (status.steps || []).map(function (step) { return '<div class="note"><b>' + (step.ok ? '✅ ' : '⚠️ ') + esc(step.title) + '</b><br>' + esc(step.help) + '</div>'; }).join('') +
+    '<div class="field"><label>شناسه تلگرام همین حساب مدیر — برای CONTENT_ADMIN_IDS</label><input id="content-admin-id" readonly dir="ltr" value="' + esc(status.adminId || '') + '"></div>' +
+    '<button type="button" class="btn btn-ghost btn-sm" id="content-admin-copy">کپی شناسه مدیر</button>' +
+    '<div class="field" style="margin-top:16px"><label>ساخت رمز CONTENT_WEBHOOK_SECRET</label><input id="content-secret-value" readonly dir="ltr" autocomplete="off" placeholder="با دکمه زیر ساخته می‌شود"></div>' +
+    '<div class="adm-row"><button type="button" class="btn btn-ghost" id="content-secret-generate">ساخت رمز تصادفی</button><button type="button" class="btn btn-ghost" id="content-secret-copy">کپی رمز ساخته‌شده</button></div>' +
+    '<p class="note">این رمز فقط در مرورگر ساخته می‌شود و اینجا ذخیره نمی‌شود. در Cloudflare → Worker سایت → Settings → Variables and Secrets → Add، نام CONTENT_WEBHOOK_SECRET و نوع Secret را انتخاب و رمز را وارد کنید.</p>' +
+    '<details style="margin:18px 0"><summary>ساخت تنظیم کانال بدون نوشتن JSON</summary><p class="note">برای شروع فقط کانال منبع را وارد کنید؛ مقصد را خالی بگذارید تا انتقال غیرفعال بماند. می‌توانید لینک یک پست کانال خصوصی یا شناسه عددی -100… را وارد کنید.</p>' +
+    '<div class="field"><label>کانال منبع</label><input id="content-source-id" dir="ltr" placeholder="لینک یک پست از کانال خودتان"></div>' +
+    '<div class="field"><label>شناسه مدیر مسئول کانال</label><input id="content-rule-admin" dir="ltr" value="' + esc(status.adminId || '') + '"></div>' +
+    '<div class="field"><label>مقصدهای انتقال — اختیاری، هر خط یک کانال، حداکثر ۳ مقصد</label><textarea id="content-target-ids" dir="ltr" rows="3"></textarea></div>' +
+    '<button type="button" class="btn btn-ghost" id="content-rules-generate">ساخت تنظیم کانال</button>' +
+    '<div class="field"><label>متن آماده برای CONTENT_CHANNEL_RULES</label><textarea id="content-rules-value" dir="ltr" readonly rows="7"></textarea></div>' +
+    '<button type="button" class="btn btn-ghost btn-sm" id="content-rules-copy">کپی تنظیم کانال</button>' +
+    '<p class="note">این ابزار یک کانال می‌سازد و تنظیمات موجود را تغییر نمی‌دهد. متن خروجی را در Variable از نوع Text با نام CONTENT_CHANNEL_RULES بگذارید. اگر چند منبع دارید، خروجی را بدون ادغام جایگزین تنظیم فعلی نکنید.</p></details>' +
+    '<p class="note">پس از ذخیره تنظیمات Cloudflare، این صفحه را تازه کنید. علامت سبز فقط وجود/ساختار تنظیم را نشان می‌دهد؛ صحت توکن و مجوز کانال هنگام استفاده بررسی می‌شود.</p>' +
+    '<button type="button" class="btn btn-primary" id="content-bot-setup">اتصال ربات به سایت</button><div id="content-bot-status" class="note" aria-live="polite"></div></div>';
+}
+function setupChannelId (raw) {
+  raw=String(raw || '').trim();
+  if (/^-100[0-9]{6,20}$/.test(raw)) return raw;
+  try { var url=new URL(raw), parts=url.pathname.split('/'); if (url.protocol==='https:' && url.hostname==='t.me' && parts[1]==='c' && /^[0-9]{6,20}$/.test(parts[2]) && /^[0-9]+$/.test(parts[3]) && (parts.length===4 || (parts.length===5 && !parts[4]))) return '-100'+parts[2]; } catch(e) {}
+  throw new Error('شناسه -100… یا لینک یک پست کانال خصوصی به شکل https://t.me/c/…/… وارد کنید. لینک دعوت کانال کافی نیست.');
+}
+function buildChannelSetup (source, admin, targets) {
+  var id=setupChannelId(source), who=String(admin || '').trim();
+  if (!/^[0-9]+$/.test(who) || who==='42') throw new Error('شناسه واقعی مدیر را وارد کنید؛ 42 فقط نمونه است.');
+  var dest=String(targets || '').split(NL).map(function (x) { return x.trim(); }).filter(Boolean).map(setupChannelId);
+  dest=dest.filter(function (x,i) { return dest.indexOf(x)===i; });
+  if (dest.length>3 || dest.indexOf(id)>=0) throw new Error('حداکثر ۳ مقصد مجاز است و منبع نباید مقصد خودش باشد.');
+  var samples=['-1001111111111','-1002222222222','-1003333333333'];
+  if ([id].concat(dest).some(function (x) { return samples.indexOf(x)>=0; })) throw new Error('شناسه‌های نمونه را با کانال واقعی خودتان جایگزین کنید.');
+  var out={}; out[id]={adminId:who,publish:true,targets:dest}; return JSON.stringify(out,null,2);
+}
+function bindContentSetup () {
+  function bind(id,fn) { var b=$('#'+id); if(b) b.addEventListener('click',fn); }
+  function copy(id) { var el=$('#'+id); if(el && el.value) copyText(el.value,function () { toast('کپی شد؛ در تنظیمات Cloudflare وارد کنید.','ok'); }); else toast('ابتدا مقدار را بسازید یا وارد کنید.','err'); }
+  bind('content-admin-copy',function () { copy('content-admin-id'); });
+  bind('content-secret-generate',function () { try { var bytes=new Uint8Array(32); crypto.getRandomValues(bytes); $('#content-secret-value').value=Array.from(bytes,function (b) { return b.toString(16).padStart(2,'0'); }).join(''); } catch(e) { toast('ساخت رمز در این مرورگر ممکن نیست.','err'); } });
+  bind('content-secret-copy',function () { copy('content-secret-value'); });
+  bind('content-rules-generate',function () { try { $('#content-rules-value').value=buildChannelSetup($('#content-source-id').value,$('#content-rule-admin').value,$('#content-target-ids').value); } catch(e) { $('#content-rules-value').value=''; toast(e.message,'err'); } });
+  bind('content-rules-copy',function () { copy('content-rules-value'); });
+}
 function adminTabHtml (tab, data, q) {
   if (tab === 'overview') {
     return '<div class="adm-h">📊 نمای کلی</div><div class="stat-cards">' +
@@ -8304,16 +9563,17 @@ function adminTabHtml (tab, data, q) {
         : '<div class="field"><label>یوزرنیم ربات ارسال (بدون @)</label><input id="set-fbotun" value="' + esc(data.deliveryBotUsername || '') + '" placeholder="FileBot"></div>') +
       (data.vaultChatFromEnv
         ? '<div class="note">کانال مخزن از env است: <b dir="ltr">' + esc(data.vaultChatId || '') + '</b></div>'
-        : '<div class="field"><label>لینک یا آیدی کانال مخزن (خصوصی)</label><input id="set-vaultid" dir="ltr" value="' + esc(data.vaultChatId || '') + '" placeholder="https://t.me/c/4458209353/62"></div>') +
+        : '<div class="field"><label>مخزن ثبت فایل‌های جدید (خصوصی؛ تغییرش فایل‌های قدیمی را جابه‌جا نمی‌کند)</label><input id="set-vaultid" dir="ltr" value="' + esc(data.vaultChatId || '') + '" placeholder="https://t.me/c/4458209353/62"></div>') +
       (data.vaultRewriteFromEnv
         ? '<div class="note">جایگزینی کانال از env (<code>VAULT_REWRITE</code>): <b dir="ltr">' + esc(data.vaultRewrite || '') + '</b></div>'
-        : '<div class="field"><label>جایگزینی فقط اگر کانال عوض شد — هر خط: قدیم جدید</label><textarea id="set-vault" rows="2" placeholder="xvcdn newcdn">' + esc(data.vaultRewrite || '') + '</textarea></div>') +
+        : '<div class="field"><label>انتخاب دستی مخزن جایگزین (اختیاری) — هر خط: شناسه عددی قدیم جدید</label><textarea id="set-vault" rows="2" placeholder="-1001234567890 -1008888888888">' + esc(data.vaultRewrite || '') + '</textarea><small>پشتیبان‌های ثبت‌شده هنگام خطای دسترسی به فایل، خودکار امتحان می‌شوند. این فیلد فقط اولویت دستی است؛ تغییر کانال مخزن، لینک فایل‌های قدیمی را عوض نمی‌کند. شماره فایل مقصد از نگاشت واقعی خوانده می‌شود.</small></div>') +
       '<div class="adm-row"><button class="btn btn-ghost btn-sm" id="set-vault-test">🧪 تست مخزن</button><span id="set-vault-out" class="badge" style="display:none"></span></div>' +
       '<div class="note">در تلگرام «Restrict saving content / محافظت از محتوا» را خاموش کنید وگرنه ربات حتی به‌عنوان ادمین هم نمی‌تواند فایل را کپی کند.</div>' +
       '</div>' +
       '<div class="adm-box"><h4>اقتصاد و اشتراک</h4>' +
       '<div class="form-2col">' +
       '<div class="field"><label>نام واحد کیف پول</label><input id="set-unit" value="' + esc(data.walletUnitName || 'سکه') + '"></div>' +
+      '<div class="field"><label>هدیه سکه اولین ثبت‌نام (صفر = بدون هدیه)</label><input id="set-signup-bonus" type="number" min="0" step="1" value="' + esc(data.signupBonus) + '"><small>فقط برای حساب‌های جدید؛ مستقل از پاداش دعوت.</small></div>' +
       '<div class="field"><label>قیمت هر دانلود (فقط کاربر بدون اشتراک)</label><input id="set-dlp" type="number" value="' + esc(data.dlClickPrice) + '"></div>' +
       '<div class="field"><label>اشتراک ۱ ماهه</label><input id="set-s1" type="number" value="' + esc(data.sub1m) + '"></div>' +
       '<div class="field"><label>اشتراک ۳ ماهه</label><input id="set-s3" type="number" value="' + esc(data.sub3m) + '"></div>' +
@@ -8324,6 +9584,9 @@ function adminTabHtml (tab, data, q) {
       '<div class="field"><label>ثانیه تا حذف فایل در ربات</label><input id="set-van" type="number" min="3" max="25" value="' + esc(data.vanishSec || 10) + '"></div>' +
       '</div>' +
       '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-top:8px"><input type="checkbox" id="set-stars" style="width:auto"' + (data.starsEnabled !== false ? ' checked' : '') + '> شارژ با استارز تلگرام (فاکتور رسمی)</label>' +
+      '<div class="field" style="margin-top:10px"><label for="set-star-packs">بسته‌های شارژ استارز (هر خط: استارز | سکه)</label><textarea id="set-star-packs" rows="4" dir="ltr" aria-describedby="star-packs-help">' +
+      (data.starPacks || []).map(function (x) { return esc(x.stars + ' | ' + x.units); }).join('&#10;') +
+      '</textarea><small id="star-packs-help">مثال: 50 | 500 یعنی پرداخت ۵۰ استارز و دریافت ۵۰۰ سکه. بین ۱ تا ۸ بسته؛ استارز عدد صحیح ۱ تا ۱۰۰۰۰ و سکه عدد صحیح مثبت. برای حذف یک بسته، خط آن را پاک کنید.</small></div>' +
       '<div class="field" style="margin-top:10px"><label>سایت‌ها و ربات‌های خرید استارز با کارت شتاب (هر خط: عنوان | لینک | توضیح)</label><textarea id="set-shops" rows="8" dir="ltr">' +
       (data.starShops || []).map(function (x) {
         return esc((x.title || '') + ' | ' + (x.url || '') + (x.note ? (' | ' + x.note) : ''));
@@ -8354,7 +9617,13 @@ function adminTabHtml (tab, data, q) {
       '<div class="field"><label>متن دکمهٔ تبلیغ</label><input id="set-ad-txt" value="' + esc(data.adButtonText || '') + '" placeholder="🎭 جدیدترین اخبار سینما"></div>' +
       '<div class="field"><label>لینک دکمه (https://…)</label><input id="set-ad-url" dir="ltr" value="' + esc(data.adButtonUrl || '') + '" placeholder="https://t.me/movie_shatelup"></div>' +
       '</div>' +
-      '<button class="btn btn-primary btn-block" id="set-save">💾 ذخیره تنظیمات</button>';
+      '<button class="btn btn-primary btn-block" id="set-save">💾 ذخیره تنظیمات</button>' +
+      contentSetupHtml(data.contentBotSetup) +
+      '<div class="adm-box" style="margin-top:24px"><h4>نگهداری پایگاه داده KV</h4>' +
+      '<p class="note">فقط ارجاع‌های بدون صاحب بررسی می‌شوند؛ محتوای اصلی، کاربران، کدها و سوابق مالی حذف نمی‌شوند. ابتدا پشتیبان بگیرید و هنگام ثبت‌نام، ورود اطلاعات یا بازیابی نسخه پشتیبان پاک‌سازی نکنید. به‌دلیل تأخیر همگام‌سازی KV، پس از تغییرات چند دقیقه صبر کنید.</p>' +
+      '<div class="field"><label for="db-prefix">گروه بررسی</label><select id="db-prefix">' +
+      [['src:', 'ارجاع منابع فیلم و سریال'], ['views:', 'آمار قدیمی محتوا'], ['sub:', 'زیرنویس‌ها'], ['tg:', 'شناسه تلگرام'], ['ph:', 'ارجاع شماره'], ['tgu:', 'نام تلگرام'], ['refcode:', 'ارجاع دعوت'], ['adstat:', 'آمار تبلیغات'], ['k2k:track:', 'ارجاع پیگیری پرداخت']].map(function (p) { return '<option value="' + p[0] + '">' + p[1] + '</option>'; }).join('') +
+      '</select></div><div class="adm-row"><button type="button" class="btn btn-ghost" id="db-scan">بررسی ۱۰ کلید</button><button type="button" class="btn btn-danger" id="db-clean" disabled>حذف موارد گزارش‌شده</button></div><div id="db-report" class="note" aria-live="polite">بررسی فقط با درخواست شما انجام می‌شود.</div></div>';
   }
   return '';
 }
@@ -8823,6 +10092,16 @@ function bindAdminTab (tab, q) {
     });
   }
   if (tab === 'settings') {
+    bindDatabaseMaintenance();
+    bindContentSetup();
+    var contentSetup = $('#content-bot-setup');
+    if (contentSetup) contentSetup.addEventListener('click', function () {
+      var status = $('#content-bot-status');
+      contentSetup.disabled = true; status.textContent = 'در حال ثبت وبهوک…';
+      api('/admin/content-bot/setup', {method:'POST',body:{}}).then(function (r) {
+        status.textContent = 'وبهوک ثبت شد: ' + r.url;
+      }).catch(function (e) { status.textContent = e.message; }).finally(function () { contentSetup.disabled = false; });
+    });
     $('#set-save').addEventListener('click', function () {
       var body = {
         siteName: $('#set-name').value.trim(),
@@ -8833,11 +10112,13 @@ function bindAdminTab (tab, q) {
         vaultRewrite: ($('#set-vault') && $('#set-vault').value) || undefined,
         vaultChatId: ($('#set-vaultid') && $('#set-vaultid').value.trim()) || undefined,
         walletUnitName: $('#set-unit').value.trim(),
+        signupBonus: $('#set-signup-bonus').value,
         dlClickPrice: $('#set-dlp').value,
         sub1m: $('#set-s1').value, sub3m: $('#set-s3').value, sub6m: $('#set-s6').value, sub1y: $('#set-s12').value,
         refSignupBonus: $('#set-refb').value, refPurchasePercent: $('#set-refp').value,
         vanishSec: $('#set-van').value,
         starsEnabled: $('#set-stars').checked,
+        starPacksText: $('#set-star-packs').value,
         k2kEnabled: !!( $('#set-k2k') && $('#set-k2k').checked ),
         k2kCardNumber: ($('#set-k2k-card') && $('#set-k2k-card').value) || '',
         k2kCardHolder: ($('#set-k2k-holder') && $('#set-k2k-holder').value) || '',
@@ -8950,7 +10231,7 @@ function openItemEditor (it, prefillUrl) {
         var extraHtml = extras.map(function (f) {
           return '<div class="var-extra">' +
             '<input data-vt="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="عنوان نسخه" value="' + esc(f.title || '') + '">' +
-            '<input data-vu2="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="https://t.me/kanal/123" value="' + esc(sourceHref(f.source) || '') + '" dir="ltr">' +
+            '<input data-vu2="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی" value="' + esc(sourceHref(f.source) || '') + '" dir="ltr">' +
             '<button type="button" class="btn btn-ghost btn-sm" data-vf="' + t.k + ':' + q + ':' + (epId || '') + ':' + esc(f.id) + '">ثبت</button>' +
             '<button type="button" class="btn btn-danger btn-sm" data-vd="' + t.k + ':' + q + ':' + (epId || '') + ':' + esc(f.id) + '">حذف</button></div>';
         }).join('');
@@ -8960,7 +10241,7 @@ function openItemEditor (it, prefillUrl) {
           '<button type="button" class="btn btn-ghost btn-sm star-btn' + (prem ? ' on' : '') + '" data-vp="' + t.k + ':' + q + ':' + (epId || '') + '" data-on="' + (prem ? '1' : '0') + '" title="فقط اشتراک">⭐</button>' +
           '<button type="button" class="btn btn-danger btn-sm" data-vq="' + t.k + ':' + q + ':' + (epId || '') + '" title="حذف این کیفیت">🗑</button></div>' +
           extraHtml +
-          '<button type="button" class="btn btn-ghost btn-sm var-add" data-va="' + t.k + ':' + q + ':' + (epId || '') + '">＋ نسخه دیگر (عنوان + لینک)</button>' +
+          '<button type="button" class="btn btn-ghost btn-sm var-add" data-va="' + t.k + ':' + q + ':' + (epId || '') + '">＋ نسخه دیگر (عنوان + لینک‌ها)</button>' +
           '</div>';
       }).join('');
       return '<div class="var-block"><h5>' + t.l + '</h5>' +
@@ -8973,7 +10254,7 @@ function openItemEditor (it, prefillUrl) {
   var html =
     '<div class="adm-box" style="margin-bottom:14px"><h4>پر کردن از پست کانال</h4>' +
     '<p style="font-size:12.5px;color:var(--tx3);margin-bottom:8px">لینک پیامی را بگذارید که مشخصات فیلم یا سریال در متن/کپشن آن است. فیلدها خودکار پر می‌شوند.</p>' +
-    '<div class="adm-row"><input id="e-info-url" dir="ltr" placeholder="https://t.me/kanal/123" style="flex:1;min-width:180px">' +
+    '<div class="adm-row"><input id="e-info-url" dir="ltr" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی" style="flex:1;min-width:180px">' +
     '<button type="button" class="btn btn-primary btn-sm" id="e-info-fill">پر کردن فیلدها</button></div></div>' +
     '<div class="field"><label>عنوان</label><input id="e-title" value="' + esc(it.title || '') + '"></div>' +
     '<div class="form-2col">' +
@@ -9016,7 +10297,7 @@ function openItemEditor (it, prefillUrl) {
       '<div class="d-sec-h">فصل‌ها و قسمت‌ها</div>' +
       '<p style="font-size:12px;color:var(--tx3);margin-bottom:8px">ستاره روی قسمت کل قسمت را قفل اشتراک می‌کند؛ ستاره کنار کیفیت همان فایل را.</p>' +
       '<div class="adm-row"><input id="e-sn" type="number" placeholder="شماره فصل" style="width:110px" value="' + ((seasonsOf(it).length || 0) + 1) + '"><input id="e-st" placeholder="عنوان فصل" style="flex:1;min-width:120px"><button class="btn btn-ghost btn-sm" id="e-s-add">➕ فصل</button></div>' +
-      '<div class="adm-row" style="margin-top:8px"><select id="e-ep-s" class="sel" style="width:120px"></select><input id="e-ep-title" placeholder="عنوان قسمت" style="width:140px"><input id="e-ep-url" placeholder="https://t.me/kanal/123" style="flex:1;min-width:140px" dir="ltr">' +
+      '<div class="adm-row" style="margin-top:8px"><select id="e-ep-s" class="sel" style="width:120px"></select><input id="e-ep-title" placeholder="عنوان قسمت" style="width:140px"><input id="e-ep-url" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی" style="flex:1;min-width:140px" dir="ltr">' +
       '<select id="e-ep-track" class="sel"><option value="sub">زیرنویس</option><option value="dub">دوبله</option></select>' +
       '<input id="e-ep-q" placeholder="عنوان کیفیت مثلاً 1080p WEB-DL" style="width:160px" value="1080p">' +
       '<button class="btn btn-ghost btn-sm" id="e-ep-add">افزودن</button></div>' +
@@ -9181,7 +10462,7 @@ function openItemEditor (it, prefillUrl) {
           var row = document.createElement('div');
           row.className = 'var-extra';
           row.innerHTML = '<input class="vf-new-t" placeholder="عنوان نسخه مثلاً دوبله دوم">' +
-            '<input class="vf-new-u" placeholder="https://t.me/kanal/123" dir="ltr">' +
+            '<input class="vf-new-u" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی" dir="ltr">' +
             '<button type="button" class="btn btn-primary btn-sm vf-new-go">ثبت</button>' +
             '<button type="button" class="btn btn-ghost btn-sm vf-new-x">انصراف</button>';
           b.parentNode.insertBefore(row, b);
@@ -9492,6 +10773,7 @@ function initTg (webapp) {
   } catch (e) { }
   if (TG_READY) return;
   TG_READY = true;
+  applyMiniAppItemLaunch();
   try {
     if (isTgWebHash(location.hash)) {
       history.replaceState(null, '', location.pathname + location.search + '#/');
@@ -9503,7 +10785,7 @@ function initTg (webapp) {
       window.__tgActBound = true;
       /* در بازگشت به اپ، دوباره تمام‌صفحه بماند (مثل BatFather) */
       TG.onEvent('activated', function () { loginMiniApp(); burstPeek(); try { TG.expand(); } catch (e5) { } });
-      TG.onEvent('viewportChanged', function () { burstPeek(); });
+      TG.onEvent('viewportChanged', function () { loginMiniApp(); burstPeek(); });
     }
   } catch (eAct) { }
   try { render(); } catch (e4) { }
@@ -9528,6 +10810,7 @@ function loadTgScript () {
 
 function boot () {
   try {
+    applyMiniAppItemLaunch();
     if (TG && !TG_READY) initTg(TG);
     loadTgScript();
     var rq = currentRoute();
