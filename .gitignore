@@ -1,0 +1,9 @@
+# Local deployment state and credentials; never commit these.
+node_modules/
+.wrangler/
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+wrangler.toml
+*.log
