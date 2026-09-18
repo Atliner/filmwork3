@@ -1,0 +1,14 @@
+# Local deployment state and credentials; never commit these.
+node_modules/
+.wrangler/
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+wrangler.toml
+*.log
+
+# Database exports can contain users and secrets
+filmwork-kv-backup*.json
+*.sqlite
+*.sqlite3
