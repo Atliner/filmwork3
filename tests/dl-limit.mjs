@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-const mod = await import('data:text/javascript;base64,' + Buffer.from(source + '\nexport { Store, createTgUser, makeToken, saveItemRecord, apiDlRequest, getSettings, tlrDayStamp, dlCounterRead, dlCounterBump, dlLimitOf, dlExempt, bustSettings, saveUser };').toString('base64'));
+const mod = await import('data:text/javascript;base64,' + Buffer.from(source + '\nexport { Store, createTgUser, makeToken, saveItemRecord, apiDlRequest, getSettings, tlrDayStamp, dlCounterRead, dlCounterBump, dlLimitOf, dlExempt, bustSettings, saveUser, handleAdmin };').toString('base64'));
 
-const { Store, createTgUser, makeToken, saveItemRecord, apiDlRequest, getSettings, tlrDayStamp, dlCounterRead, dlCounterBump, dlLimitOf, dlExempt, bustSettings, saveUser } = mod;
+const { Store, createTgUser, makeToken, saveItemRecord, apiDlRequest, getSettings, tlrDayStamp, dlCounterRead, dlCounterBump, dlLimitOf, dlExempt, bustSettings, saveUser, handleAdmin } = mod;
 
 function req(token) {
   return new Request('http://localhost/api/dl/request', { method: 'POST', headers: { authorization: 'Bearer ' + token } });
@@ -158,4 +158,54 @@ let envStore = null;
   assert.equal(set.dlDailyLimitBot, 0);
 }
 
-console.log('PASS: Tehran day stamp; per-user counters; user daily cap; per-user isolation; global bot cap; admin/premium exemption; unlimited mode; defaults (20/0).');
+// ── ۱۰. کنترل از پنل ادمین (GET overview / POST settings) ──
+{
+  const store = new Store(null, {});
+  bustSettings(store);
+  await store.del('set');
+  const admin = await createTgUser(store, { tgId: '7770001' });
+  // اولین کاربر ماژول ممکن است مدیر شده باشد؛ در هر صورت برای تست ادمین می‌کنیم
+  admin.role = 'admin';
+  await saveUser(store, admin);
+
+  const overview = new URL('http://localhost/api/admin/overview');
+  const settingsUrl = new URL('http://localhost/api/admin/settings');
+  const go = (u) => new Request(u, { method: 'GET' });
+  const ps = (body) => new Request(settingsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+  const g0 = await (await handleAdmin(store, overview, go(overview), admin)).json();
+  assert.equal(g0.dlDailyLimit, 20); // پیش‌فرض
+  assert.equal(g0.dlDailyLimitBot, 0);
+
+  // ذخیره از پنل
+  let r = await handleAdmin(store, settingsUrl, ps({ dlDailyLimit: '25', dlDailyLimitBot: '500' }), admin);
+  assert.equal(r.status, 200);
+  bustSettings(store);
+  let g = await (await handleAdmin(store, overview, go(overview), admin)).json();
+  assert.equal(g.dlDailyLimit, 25);
+  assert.equal(g.dlDailyLimitBot, 500);
+
+  // مقدار نامعتبر رد می‌شود و مقدار قبلی دست‌نخورده می‌ماند
+  r = await handleAdmin(store, settingsUrl, ps({ dlDailyLimit: '1.5' }), admin);
+  assert.equal(r.status, 400);
+  r = await handleAdmin(store, settingsUrl, ps({ dlDailyLimit: '-1' }), admin);
+  assert.equal(r.status, 400);
+  r = await handleAdmin(store, settingsUrl, ps({ dlDailyLimitBot: '2000000' }), admin);
+  assert.equal(r.status, 400);
+  r = await handleAdmin(store, settingsUrl, ps({ dlDailyLimit: '999999' }), admin);
+  assert.equal(r.status, 400);
+  bustSettings(store);
+  g = await (await handleAdmin(store, overview, go(overview), admin)).json();
+  assert.equal(g.dlDailyLimit, 25);
+  assert.equal(g.dlDailyLimitBot, 500);
+
+  // صفر = غیرفعال
+  r = await handleAdmin(store, settingsUrl, ps({ dlDailyLimit: '0', dlDailyLimitBot: '0' }), admin);
+  assert.equal(r.status, 200);
+  bustSettings(store);
+  g = await (await handleAdmin(store, overview, go(overview), admin)).json();
+  assert.equal(g.dlDailyLimit, 0);
+  assert.equal(g.dlDailyLimitBot, 0);
+}
+
+console.log('PASS: Tehran day stamp; per-user counters; user daily cap; per-user isolation; global bot cap; admin/premium exemption; unlimited mode; defaults (20/0); admin panel save & validation.');
