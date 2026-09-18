@@ -66,6 +66,9 @@ const seriesBranch = dlPanelSrc.slice(dlPanelSrc.indexOf('if (isSeries)'), dlPan
 const movieBranch = dlPanelSrc.slice(dlPanelSrc.indexOf('} else {'), dlPanelSrc.indexOf('var related'));
 assert.ok(seriesBranch.includes('qgLink'), 'series branch missing link');
 assert.ok(movieBranch.includes('qgLink'), 'movie branch missing link');
+// موقعیت: لینک باید بالای انتخاب کیفیت باشد (کاربر قبل از دانلود آن را ببیند)
+assert.ok(seriesBranch.indexOf('qgLink') < seriesBranch.indexOf('season-bar'), 'series: link must be above season/quality list');
+assert.ok(movieBranch.indexOf('qgLink') < movieBranch.indexOf('trackTabsHtml'), 'movie: link must be above quality tabs');
 
 // ── ۵. روت /quality در render ──
 const ri = source.indexOf('function render () {');

@@ -7610,7 +7610,7 @@ button.dp-slide{cursor:zoom-in}
 .qg-cta{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;padding:6px 0 10px}
 .qg-cta .btn{max-width:100%}
 /* ── لینک راهنما داخل باکس دانلود ── */
-.q-guide-link{margin-top:10px;padding-top:10px;border-top:1px dashed var(--glass-line)}
+.q-guide-link{margin-bottom:12px;padding-bottom:12px;border-bottom:1px dashed var(--glass-line)}
 .q-guide-link a{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:800;color:var(--acc2);padding:7px 13px;border:1px solid rgba(255,176,31,.35);border-radius:999px;background:var(--acc-soft);transition:all .15s}
 .q-guide-link a:hover{background:rgba(255,176,31,.22);transform:translateY(-1px)}
 @media(max-width:860px){
@@ -8997,9 +8997,9 @@ function viewItem (data, id) {
   var qgLink = '<div class="q-guide-link"><a href="#/quality?from=' + id + '">❓ نمی‌دونم کدوم کیفیت رو انتخاب کنم؟</a></div>';
   var dlPanel;
   if (isSeries) {
-    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 دانلود سریال' + (live ? ' <small>' + esc(liveText) + '</small>' : '') + '</div><div class="season-bar" id="season-bar"></div><div class="eps" id="ep-list"></div>' + qgLink + '</div>';
+    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 دانلود سریال' + (live ? ' <small>' + esc(liveText) + '</small>' : '') + '</div>' + qgLink + '<div class="season-bar" id="season-bar"></div><div class="eps" id="ep-list"></div></div>';
   } else {
-    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 انتخاب کیفیت دانلود</div>' + trackTabsHtml('track-tabs', 'sub') + '<div id="q-row-wrap"></div>' + qgLink + '</div>';
+    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 انتخاب کیفیت دانلود</div>' + qgLink + trackTabsHtml('track-tabs', 'sub') + '<div id="q-row-wrap"></div></div>';
   }
   var related = '';
   if (data.related && data.related.length) {
