@@ -254,6 +254,40 @@ async function getItem(store, id) {
   return item;
 }
 function bustItem(id) { memItem.delete(id); }
+/* ── نسخه عمومی محتوا (Cache API) ──
+   هر بار که اثر یا فهرست تغییر کند، catrev یک واحد جلو می‌رود و کل
+   کلیدهای کش Cache API (که catrev در نامشان است) بی‌اعتبار می‌شوند. */
+async function catRev(store) {
+  try { const v = await store.get('catrev'); return v && v.n > 0 ? v.n : 0; } catch (e) { return 0; }
+}
+async function bumpCatRev(store) {
+  try { const n = (await catRev(store)) + 1; await store.set('catrev', { n: n }, 604800); } catch (e) { }
+}
+async function publicCache() {
+  try { if (typeof caches === 'undefined' || !caches.default) return null; return caches.default; } catch (e) { return null; }
+}
+/* کش پاسخ‌های عمومی (صفحات و فهرست‌ها) با Cache API؛ فقط پاسخ 200 کش
+   می‌شود و هر خطا کش را درگیر نمی‌کند (Free-tier friendly). */
+async function cachedResponse(cache, key, ttl, gen) {
+  if (!cache) return gen();
+  try {
+    const hit = await cache.match(key);
+    if (hit) {
+      const resp = new Response(hit.body, { status: hit.status, headers: hit.headers });
+      try { resp.headers.set('x-cache', 'HIT'); } catch (e) { }
+      return resp;
+    }
+  } catch (e) { }
+  const resp = await gen();
+  if (resp && resp.status === 200) {
+    try {
+      const clone = resp.clone();
+      try { resp.headers.set('x-cache', 'MISS'); } catch (e) { }
+      cache.put(key, clone, { expirationTtl: ttl }).catch(function () { });
+    } catch (e) { }
+  }
+  return resp;
+}
 async function getIdx(store) {
   const c = memIdx.get('idx');
   if (c && Date.now() - c.t < 60000) return c.data;
@@ -296,7 +330,10 @@ function mergeSettings(s) {
     redirectMode: 'off',
     redirectSelected: '',
     widgetDomain: '',
+    /* شارد‌های D1 دور (اکانت‌های دیگر) برای تقسیم آثار؛ هر قلم: {id,url,secret} */
+    shards: [],
   }, ECONOMY_DEFAULTS, s || {});
+  if (!Array.isArray(out.shards)) out.shards = [];
   if (!Array.isArray(out.starPacks) || !out.starPacks.length) out.starPacks = ECONOMY_DEFAULTS.starPacks.slice();
   if (!Array.isArray(out.rialPacks)) out.rialPacks = [];
   if (!Array.isArray(out.starShops) || !out.starShops.length) out.starShops = (ECONOMY_DEFAULTS.starShops || []).slice();
@@ -659,12 +696,135 @@ class D1Backend {
       cursor:more?encodeURIComponent(JSON.stringify({prefix,after:page[page.length-1].key})):''};
   }
 }
-function hasDataStorage(env) { return String(env?.STORAGE_BACKEND || 'kv').toLowerCase()==='d1' ? !!env.DB?.prepare : !!env?.KV; }
+/* ═══════ معماری ذخیره‌سازی نهایی (ترکیبی / Hybrid) ═══════
+   D1 اصلی  : داده‌های ماندگار + همهٔ داده‌هایی که روزانه زیاد نوشته
+              می‌شوند: کاربران، کیف پول، تراکنش‌ها، آثار (فیلم/سریال)،
+              نسخه‌ها و لینک‌ها، شمارنده‌های روزانه، rate-limit،
+              توکن‌های موقت و آمار. (حد رایگان D1: ~۵M خوان + ۱۰۰k نوشت/روز)
+   KV        : فقط داده‌های کم‌تغییر و cache (set, res:, gallery:, ads,
+              mirrorهای قدیمی, catrev). (حد رایگان KV: ۱۰۰k خوان ولی
+              فقط ~۱k نوشت/روز — برای شمارنده و rate-limit کافی نیست!)
+   CACHE_KV  : اختیاری و جدا — فقط کش سبک؛ معماری جدید به آن نیاز ندارد
+   Durable Object: صف‌های EDITOR، retry انتشار و mirrorها (تغییرناپذیر)
+   Cache API : کش ۶۰ ثانیه‌ای صفحه/فهرست عمومی — خواندن D1 را کاهش می‌دهد
+   اگر D1 وصل نباشد یا آماده نشده باشد، همه‌چیز روی KV می‌ماند
+   (سازگاری کامل با حالت قدیم) — اگر KV نباشد، همه‌چیز روی D1. */
+const HEAVY_PREFIXES = ['u:', 'it:', 'src:', 'sub:', 'code:', 'pay:', 'refcode:', 'tg:', 'tgu:', 'ph:', 'k2k:', 'dlc:', 'bot:', 'rl:', 'views:', 'stars:', 'tick:', 'adstat:'];
+const HEAVY_KEYS = new Set(['idx']);
+function isHeavyKey (k) {
+  if (HEAVY_KEYS.has(k)) return true;
+  for (const p of HEAVY_PREFIXES) if (k.indexOf(p) === 0) return true;
+  return false;
+}
+function isHeavyPrefix (p) {
+  if (!p) return false;
+  for (const x of HEAVY_PREFIXES) if (p.indexOf(x) === 0) return true;
+  return false;
+}
+function storageMode (env) {
+  const mode = String(env?.STORAGE_BACKEND || 'kv').toLowerCase();
+  if (mode === 'd1') return 'd1';
+  if (mode === 'hybrid') return 'hybrid';
+  if (mode !== 'kv') throw storageError('STORAGE_BACKEND باید kv، hybrid یا d1 باشد');
+  return 'kv';
+}
+function hasDataStorage(env) {
+  const mode = storageMode(env);
+  if (mode === 'd1') return !!env.DB?.prepare;
+  return !!env?.KV || !!env?.DB?.prepare;
+}
 function dataBackend(env) {
-  const mode=String(env?.STORAGE_BACKEND || 'kv').toLowerCase();
-  if (mode==='d1') return new D1Backend(env.DB);
-  if (mode!=='kv') throw storageError('STORAGE_BACKEND باید kv یا d1 باشد');
+  // حالت قدیم (all-D1)؛ در حالت‌های hybrid/kv، Store خودش مسیریابی می‌کند.
+  const mode = storageMode(env);
+  if (mode === 'd1') return new D1Backend(env.DB);
   return env?.KV;
+}
+function memFallbackRead(k) {
+  return Promise.resolve().then(function () {
+    const entry = memFallback.get(k);
+    if (!entry) return null;
+    if (entry.expiresAt && entry.expiresAt <= Date.now()) { memFallback.delete(k); return null; }
+    return JSON.parse(entry.value);
+  });
+}
+
+/* ═══════ فدریشن D1: شارد‌های دور (اکانت‌های متفاوت) ═══════
+   هر شارد یک Worker کوچک «shard-proxy» روی اکانت خودش است که به یک D1
+   متصل است و رابط get/put/del/list با امضای HMAC ارائه می‌دهد.
+   آثار (it:/sub:) با hash قطعی کلید بین شارد‌ها تقسیم می‌شوند تا
+   حجم و کوته‌مردی‌های D1 اصلی پخش شوند. */
+async function sha256Hex(text) {
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text || ''));
+  return Array.from(new Uint8Array(h)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+}
+async function hmacSign(secret, method, path, bodyText, ts, nonce) {
+  const data = new TextEncoder().encode(method + '\n' + path + '\n' + (await sha256Hex(bodyText || '')) + '\n' + ts + '\n' + nonce);
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, data);
+  return Array.from(new Uint8Array(sig)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+}
+function shardHash(s) {
+  /* FNV-1a 32bit — قطعی و بدون وابستگی */
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
+  return h >>> 0;
+}
+class RemoteShard {
+  constructor(cfg) {
+    this.id = String(cfg.id || '');
+    this.url = String(cfg.url || '').replace(/\/+$/, '');
+    this.secret = String(cfg.secret || '');
+    this.fails = 0;
+    this.lastFail = 0;
+  }
+  /* شارد «سالم» است مگر اینکه ۳ شکست پشت‌سرهم در ۳۰ ثانیه اخیر داشته باشد */
+  healthy() { return this.fails < 3 || (this.lastFail && Date.now() - this.lastFail > 30000); }
+  async req(method, path, bodyObj) {
+    if (!this.url || !this.secret) throw new Error('shard-incomplete');
+    const bodyText = bodyObj ? JSON.stringify(bodyObj) : '';
+    const ts = Math.floor(Date.now() / 1000);
+    const nonce = randomHex(8);
+    const sign = await hmacSign(this.secret, method, path, bodyText, ts, nonce);
+    const controller = new AbortController();
+    const timer = setTimeout(function () { controller.abort(); }, 2500);
+    try {
+      const r = await fetch(this.url + path, {
+        method: method,
+        headers: { 'content-type': 'application/json', 'x-shard-ts': String(ts), 'x-shard-nonce': nonce, 'x-shard-sign': sign },
+        body: bodyText || undefined,
+        signal: controller.signal,
+      });
+      const j = await r.json().catch(function () { return {}; });
+      if (!r.ok) {
+        this.fails++; this.lastFail = Date.now();
+        const e = new Error(j.error || ('shard-http-' + r.status));
+        e.status = r.status;
+        throw e;
+      }
+      this.fails = 0;
+      return j;
+    } catch (e) {
+      this.fails++; this.lastFail = Date.now();
+      throw e;
+    } finally { clearTimeout(timer); }
+  }
+  async get(key) {
+    const j = await this.req('GET', '/get?k=' + encodeURIComponent(key));
+    return j.missing ? null : j.value;
+  }
+  async put(key, value, ttl) {
+    await this.req('POST', '/put', { k: key, v: typeof value === 'string' ? value : JSON.stringify(value), ttl: Math.max(0, Math.floor(Number(ttl) || 0)) });
+  }
+  async del(key) { await this.req('POST', '/del', { k: key }); }
+  async list(prefix, cursor, limit) {
+    const j = await this.req('POST', '/list', { prefix: prefix || '', cursor: cursor || '', limit: Math.max(1, Math.min(1000, Number(limit) || 1000)) });
+    return { keys: j.keys || [], cursor: j.cursor || '' };
+  }
+  async catalog() {
+    const j = await this.req('GET', '/catalog');
+    return { items: j.items || [], count: j.count || 0 };
+  }
+  async health() { return await this.req('GET', '/health'); }
 }
 async function runD1Migration(env,action) {
   if (!env.DB?.prepare || !env.KV) throw storageError('برای انتقال، هر دو اتصال KV و DB لازم‌اند');
@@ -722,19 +882,93 @@ async function runD1Migration(env,action) {
 }
 
 class Store {
-  constructor(kv, env) { this.kv = (env && kv===env.KV ? dataBackend(env) : kv) || null; this.env = env || {}; this.reads = new Map(); }
+  constructor(kv, env) {
+    this.env = env || {};
+    this.reads = new Map();
+    const mode = storageMode(this.env);
+    const sameBinding = !!(env && kv === env.KV);
+    /* حالت قدیم all-D1: همه‌چیز یک بک‌اند (D1) */
+    if (mode === 'd1') {
+      this.d1 = new D1Backend(this.env.DB);
+      this.kv = this.d1;
+      this.hybrid = false;
+      this._d1Ready = undefined;
+      this._shards = undefined;
+      return;
+    }
+    /* حالت hybrid/kv: D1 (در صورت اتصال) برای کلیدهای سنگین، KV برای بقیه.
+       اگر فراخوان بک‌اند دلخواه داده باشد (تست/مسیر legacy)، همان حفظ می‌شود. */
+    this.d1 = (this.env.DB && this.env.DB.prepare) ? new D1Backend(this.env.DB) : null;
+    this.kv = sameBinding ? this.env.KV : (kv || null);
+    this.hybrid = !!(this.d1 && this.kv);
+    this._d1Ready = undefined;
+    this._shards = undefined;
+  }
+  /* آمادگی D1 به‌صورت تنبل و یک‌بار؛ اگر انتقال D1 نهایی نشده باشد،
+     کلیدهای سنگین به KV تنزل می‌کنند (سایت نمی‌ریزد). */
+  async heavyBe() {
+    if (!this.d1) return null;
+    if (this._d1Ready === undefined) {
+      try { await this.d1.ensureReady(); this._d1Ready = true; }
+      catch (e) { this._d1Ready = false; console.warn('[storage] D1 not ready; heavy keys fall back to KV:', e && e.message); }
+    }
+    return this._d1Ready ? this.d1 : null;
+  }
+  /* بک‌اند محلی یک کلید: hybrid → D1 برای سنگین‌ها (با تنزل به KV)، بقیه KV */
+  async localBackendFor(k) {
+    if (!this.hybrid) return this.kv || null;
+    if (isHeavyKey(k)) return (await this.heavyBe()) || this.kv || null;
+    return this.kv || null;
+  }
+  /* ── فدریشن D1: کلیدهای مرتبط با آثار (it: / sub:) ممکن است روی
+     شارد دوری (D1 اکانت دیگر) باشند. مسیریابی قطعی با hash کلید؛
+     خواندن: شارد ← محلی (نسخه‌های قدیمی). نوشتن: شارد ← محلی (تنزل). */
+  async shards() {
+    if (this._shards !== undefined) return this._shards;
+    let list = [];
+    try {
+      const set = await getSettings(this);
+      list = (set.shards || [])
+        .filter(function (s) { return s && s.url && s.secret; })
+        .map(function (s) { return new RemoteShard(s); });
+    } catch (e) { list = []; }
+    this._shards = list;
+    return list;
+  }
+  shardForKey(k) {
+    if (k.indexOf('it:') !== 0 && k.indexOf('sub:') !== 0) return Promise.resolve(null);
+    return this.shards().then(function (list) { return list.length ? list[shardHash(k) % list.length] : null; });
+  }
+  async localGet(k) {
+    const be = await this.localBackendFor(k);
+    /* خواندن کلیدهای پرتکرار با cacheTtl لبه‌ای (کاهش شمارش خواندن در حد Free) */
+    return be
+      ? be.get(k, /^(tick:|tg:|tgstate:|u:|ph:)/.test(k) || k === 'set' ? { type: 'json', cacheTtl: 30 } : 'json')
+      : memFallbackRead(k);
+  }
+  async localSet(k, value, ttl) {
+    const be = await this.localBackendFor(k);
+    const opts = ttl ? { expirationTtl: Math.max(60, Math.ceil(ttl)) } : undefined;
+    if (be) await be.put(k, value, opts);
+    else memFallback.set(k, { value: value, expiresAt: ttl ? Date.now() + ttl * 1000 : 0 });
+  }
+  async localDel(k) {
+    const be = await this.localBackendFor(k);
+    if (be) await be.delete(k);
+    else memFallback.delete(k);
+  }
   async get(k) {
     // One upstream read per key per request; callers cannot mutate the cached snapshot.
     if (!this.reads.has(k)) {
-      const read = this.kv
-        ? this.kv.get(k, /^(tick:|tg:|tgstate:|u:|ph:)/.test(k) ? { type: 'json', cacheTtl: 30 } : 'json')
-        : Promise.resolve().then(function () {
-          const entry = memFallback.get(k);
-          if (!entry) return null;
-          if (entry.expiresAt && entry.expiresAt <= Date.now()) { memFallback.delete(k); return null; }
-          return JSON.parse(entry.value);
-        });
-      this.reads.set(k, Promise.resolve(read).then(function (v) { return v == null ? null : JSON.stringify(v); }));
+      const store = this;
+      const read = this.shardForKey(k).then(function (shard) {
+        if (!shard || !shard.healthy()) return store.localGet(k);
+        return shard.get(k).then(
+          function (v) { return v == null ? store.localGet(k) : v; },
+          function () { return store.localGet(k); } // شارد در دسترس نیست → نسخهٔ محلی
+        );
+      });
+      this.reads.set(k, read.then(function (v) { return v == null ? null : JSON.stringify(v); }));
     }
     try { const value = await this.reads.get(k); return value == null ? null : JSON.parse(value); }
     catch (e) { this.reads.delete(k); throw e; }
@@ -744,19 +978,23 @@ class Store {
     const value = JSON.stringify(v);
     // TTL writes must still refresh expiration, even if the value is unchanged.
     if (!ttl && this.reads.has(k) && await this.reads.get(k) === value) return;
-    if (this.kv) await this.kv.put(k, value, ttl ? { expirationTtl: Math.max(60, Math.ceil(ttl)) } : undefined);
-    else memFallback.set(k, { value: value, expiresAt: ttl ? Date.now() + ttl * 1000 : 0 });
+    const shard = await this.shardForKey(k);
+    if (shard) {
+      try { await shard.put(k, value, ttl); this.reads.set(k, Promise.resolve(value)); return; }
+      catch (e) { /* شارد در دسترس نیست → تنزل به بک‌اند اصلی */ }
+    }
+    await this.localSet(k, value, ttl);
     this.reads.set(k, Promise.resolve(value));
   }
   async del(k) {
     assertStorageWritable(this.env);
-    if (this.kv) await this.kv.delete(k);
-    else memFallback.delete(k);
+    const shard = await this.shardForKey(k);
+    if (shard) { try { await shard.del(k); } catch (e) { /* در دسترس نیست */ } }
+    await this.localDel(k);
     this.reads.set(k, Promise.resolve(null));
   }
-  async listPage(prefix, cursor, limit) {
-    limit = Math.max(1, Math.min(1000, Number(limit) || 1000));
-    if (this.kv) {
+  async kvListPage(prefix, cursor, limit) {
+    if (this.kv && this.kv.list) {
       const r = await this.kv.list({ prefix: prefix, limit: limit, ...(cursor ? { cursor: cursor } : {}) });
       return { keys: r.keys.map(function (k) { return k.name; }), cursor: r.list_complete ? '' : r.cursor };
     }
@@ -768,6 +1006,34 @@ class Store {
     keys.sort();
     const page = keys.slice(0, limit);
     return { keys: page, cursor: keys.length > limit ? page[page.length - 1] : '' };
+  }
+  async d1ListPage(prefix, cursor, limit) {
+    const be = await this.heavyBe();
+    if (!be) return { keys: [], cursor: '' };
+    const r = await be.list({ prefix: prefix, limit: limit, ...(cursor ? { cursor: cursor } : {}) });
+    return { keys: r.keys.map(function (k) { return k.name; }), cursor: r.list_complete ? '' : r.cursor };
+  }
+  async listPage(prefix, cursor, limit) {
+    limit = Math.max(1, Math.min(1000, Number(limit) || 1000));
+    if (this.hybrid) {
+      if (isHeavyPrefix(prefix)) {
+        const d1 = await this.d1ListPage(prefix, cursor, limit);
+        if (d1.keys.length || d1.cursor) return d1;
+        return await this.kvListPage(prefix, cursor, limit); // هنوز در KV است (تنزل)
+      }
+      if (prefix) return await this.kvListPage(prefix, cursor, limit); // پیشوند سبک
+      /* پیشوند خالی/مخلوط: دو فاز (اول D1، بعد KV) — cursor 'kv:' جداکننده فازها */
+      if (cursor && cursor.indexOf('kv:') === 0) return await this.kvListPage(prefix, '', limit);
+      const d1c = cursor && cursor.indexOf('d1:') === 0 ? cursor.slice(3) : '';
+      const d1 = await this.d1ListPage(prefix, d1c, limit);
+      if (!d1.cursor) {
+        if (d1.keys.length) return { keys: d1.keys, cursor: 'kv:' };
+        return await this.kvListPage(prefix, '', limit);
+      }
+      return { keys: d1.keys, cursor: 'd1:' + d1.cursor };
+    }
+    if (this.d1 && !this.kv) return await this.d1ListPage(prefix, cursor, limit);
+    return await this.kvListPage(prefix, cursor, limit);
   }
   async list(prefix) {
     const keys = [];
@@ -1785,6 +2051,7 @@ async function idxUpsert(store, item) {
   if (i >= 0) idx[i] = entry; else idx.unshift(entry);
   await store.set('idx', idx.slice(0, CONFIG.MAX_ITEMS));
   bustIdx();
+  bumpCatRev(store); // بی‌اعتبارسازی کش عمومی (Cache API)
 }
 function guessQuality(w) {
   if (!w) return '';
@@ -4981,6 +5248,74 @@ async function setupContentWebhook(store, request) {
   return json({ok:true,url:url});
 }
 
+async function handleShards(store, request, method) {
+  if (method === 'GET') {
+    const set = await getSettings(store);
+    const rows = [];
+    for (const s of set.shards || []) {
+      const sh = new RemoteShard(s);
+      let ok = false, latency = 0, error = '', count = 0;
+      try {
+        const t0 = Date.now();
+        const h = await sh.health();
+        latency = Date.now() - t0;
+        ok = !!h.ok;
+        count = h.count || 0;
+      } catch (e) { error = (e && e.message) || String(e); }
+      rows.push({ id: s.id, url: s.url, ok: ok, latency: latency, error: error, count: count, healthy: sh.healthy() });
+    }
+    return json({ shards: rows });
+  }
+  const body = await readBody(request, 16384);
+  const set = await getSettings(store);
+  if (body.action === 'test') {
+    const sh = new RemoteShard({ id: 'test', url: String(body.url || ''), secret: String(body.secret || '') });
+    try {
+      const t0 = Date.now();
+      const h = await sh.health();
+      return json({ ok: true, latency: Date.now() - t0, count: h.count || 0 });
+    } catch (e) { return json({ ok: false, error: (e && e.message) || String(e) }, 400); }
+  }
+  if (body.action === 'add') {
+    const id = String(body.id || '').trim();
+    const u = String(body.url || '').trim().replace(/\/+$/, '');
+    const secret = String(body.secret || '').trim();
+    if (!/^[a-z0-9_-]{2,24}$/.test(id)) throw Object.assign(new Error('شناسهٔ شارد: ۲ تا ۲۴ حرف کوچک انگلیسی/عدد/خط تیره'), { status: 400 });
+    if (!/^https:\/\//.test(u)) throw Object.assign(new Error('آدرس شارد باید با https:// شروع شود'), { status: 400 });
+    if (secret.length < 16 || secret.length > 256) throw Object.assign(new Error('رمز اشتراک باید بین ۱۶ تا ۲۵۶ نویسه باشد'), { status: 400 });
+    const list = (set.shards || []).filter(function (x) { return x.id !== id; });
+    if (list.length >= 8) throw Object.assign(new Error('حداکثر ۸ شارد مجاز است'), { status: 400 });
+    list.push({ id: id, url: u, secret: secret });
+    set.shards = list;
+    await writeSettings(store, set);
+    bumpCatRev(store);
+    return json({ ok: true, shards: list.map(function (x) { return { id: x.id, url: x.url }; }) });
+  }
+  if (body.action === 'remove') {
+    const id = String(body.id || '').trim();
+    const list = (set.shards || []).filter(function (x) { return x.id !== id; });
+    set.shards = list;
+    await writeSettings(store, set);
+    bumpCatRev(store);
+    return json({ ok: true, shards: list.map(function (x) { return { id: x.id, url: x.url }; }) });
+  }
+  throw Object.assign(new Error('عملیات نامعتبر'), { status: 400 });
+}
+async function storageStatus(store, set) {
+  let d1Ready = false;
+  try {
+    if (store.kv instanceof D1Backend) { await store.kv.ensureReady(); d1Ready = true; }
+    else d1Ready = !!(await store.heavyBe());
+  } catch (e) { d1Ready = false; }
+  return {
+    mode: storageMode(store.env),
+    hasD1: !!(store.d1 || (store.kv instanceof D1Backend)),
+    d1Ready: d1Ready,
+    hasKv: !!store.kv && !(store.kv instanceof D1Backend),
+    hasCacheKv: !!(store.env && store.env.CACHE_KV),
+    shards: (set.shards || []).map(function (x) { return { id: x.id, url: x.url }; }),
+  };
+}
 async function handleAdmin(store, url, request, adminUser) {
   const set = await getSettings(store);
   const p = url.pathname.replace(/^\/api\/admin\//, '');
@@ -4993,11 +5328,14 @@ async function handleAdmin(store, url, request, adminUser) {
     return maintenanceBatch(store, await readBody(request, 16 * 1024));
   }
 
+  if (p === 'shards' && (m === 'GET' || m === 'POST')) return handleShards(store, request, m);
+
   if (p === 'overview' && m === 'GET') {
     const users = await store.list('u:');
     const items = (await store.get('idx')) || [];
     return json({
       items: items.length, users: users.length,
+      storage: await storageStatus(store, set),
       contentBotSetup: await contentSetupStatus(store, adminUser),
       lastSyncAt: set.lastSyncAt, lastSyncLog: set.lastSyncLog,
       botSet: !!set.botToken, botFromEnv: !!set.botFromEnv, botUserFromEnv: !!set.botUserFromEnv, autoSync: !!set.autoSync,
@@ -5331,6 +5669,7 @@ async function handleAdmin(store, url, request, adminUser) {
     bustItem(item.id);
     const idx = await getIdx(store);
     await store.set('idx', idx.filter(function (x) { return x.id !== item.id; }));
+    bumpCatRev(store); // بی‌اعتبارسازی کش عمومی (Cache API)
     bustIdx();
     return json({ ok: true });
   }
@@ -6669,7 +7008,12 @@ async function handleApi(request, url, store, ctx) {
     });
   }
 
-  if (p === 'catalog' && m === 'GET') return await apiCatalog(store, url, request);
+  if (p === 'catalog' && m === 'GET') {
+    const cache = await publicCache();
+    const rev = await catRev(store);
+    const ckey = 'mvx:cat:' + rev + ':' + url.pathname + url.search;
+    return await cachedResponse(cache, ckey, 60, function () { return apiCatalog(store, url, request); });
+  }
 
   mm = p.match(/^item\/(i_[a-z0-9]+)$/);
   if (mm && m === 'GET') return await apiItem(store, mm[1], request);
@@ -6800,6 +7144,14 @@ export default {
         if (!set.publicUrl && origin) set.publicUrl = origin;
         const job = maybeSetWebhook(store, set, origin).then(function () { return writeSettings(store, set); });
         if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(job);
+      }
+      /* ── کش عمومی با Cache API (Free-tier friendly) ──
+         صفحهٔ HTML فقط ۶۰ ثانیه کش می‌شود و با هر تغییر محتوا (catrev)
+         بی‌اعتبار می‌شود؛ دادهٔ کاربری/پرداختی اصلاً کش نمی‌شود. */
+      if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '')) {
+        const cache = await publicCache();
+        const rev = await catRev(store);
+        return await cachedResponse(cache, 'mvx:page:' + rev, 60, function () { return htmlPage(set); });
       }
       return htmlPage(set);
     } catch (e) {
@@ -10206,6 +10558,79 @@ function bindContentSetup () {
   bind('content-rules-generate',function () { try { $('#content-rules-value').value=buildChannelSetup($('#content-source-id').value,$('#content-rule-admin').value,$('#content-target-ids').value); } catch(e) { $('#content-rules-value').value=''; toast(e.message,'err'); } });
   bind('content-rules-copy',function () { copy('content-rules-value'); });
 }
+function storageLabel (st) {
+  st = st || {};
+  var lbl = 'KV';
+  if (st.mode === 'hybrid') lbl = 'D1 + KV (ترکیبی)';
+  else if (st.mode === 'd1') lbl = 'D1';
+  lbl += st.d1Ready ? ' ✓' : (st.hasD1 ? ' (در انتظار انتقال)' : '');
+  return lbl;
+}
+function shardStatusHtml (st) {
+  st = st || {};
+  var rows = '';
+  (st.shards || []).forEach(function (s) {
+    rows += '<div class="adm-item" style="margin-top:8px"><div class="inf"><b>' + esc(s.id) + '</b><span>' +
+      '<em class="badge' + (s.ok ? ' acc' : ' red') + '">' + (s.ok ? '✓ سالم' : '✗ قطع') + '</em>' +
+      (s.latency ? '<em class="badge">' + faNum(s.latency) + 'ms</em>' : '') +
+      (s.count != null ? '<em class="badge">' + faNum(s.count) + ' رکورد</em>' : '') +
+      (s.error ? '<em class="badge red">' + esc(s.error) + '</em>' : '') +
+      '</span></div><div class="acts"><button type="button" class="btn btn-danger btn-sm" data-shard-del="' + esc(s.id) + '">حذف</button></div></div>';
+  });
+  return '<div class="adm-row" style="margin-bottom:10px;flex-wrap:wrap">' +
+    '<em class="badge">حالت: ' + esc(storageLabel(st)) + '</em>' +
+    '<em class="badge' + (st.d1Ready ? ' acc' : '') + '">D1 اصلی: ' + (st.d1Ready ? 'آماده' : (st.hasD1 ? 'در انتظار انتقال' : 'اتصال ندارد')) + '</em>' +
+    '<em class="badge">KV: ' + (st.hasKv ? '✓' : '✗') + '</em>' +
+    '<em class="badge">CACHE_KV: ' + (st.hasCacheKv ? '✓' : '✗') + '</em>' +
+    '<em class="badge">کش عمومی (Cache API): فعال</em></div>' +
+    (rows || '<p class="note" style="margin:8px 0">شاردی اضافه نشده است — همهٔ آثار در D1 اصلی ذخیره می‌شوند.</p>') +
+    '<details style="margin-top:10px"><summary>➕ افزودن شارد D1 جدید (اکانت دیگر)</summary>' +
+    '<p class="note">روی اکانت دیگر، Worker قالب <code dir="ltr">scripts/shard-proxy-worker.js</code> را Deploy کنید (binding D1 با نام <code dir="ltr">SHARD_DB</code> + Secret <code dir="ltr">SHARD_SECRET</code>)؛ آدرس و رمزش را اینجا وارد کنید. توضیح کامل: <code dir="ltr">docs/D1-SHARDS.md</code></p>' +
+    '<div class="field"><label>شناسه (حروف کوچک/عدد/خط تیره)</label><input id="shard-id" dir="ltr" placeholder="d1-2"></div>' +
+    '<div class="field"><label>آدرس shard-proxy</label><input id="shard-url" dir="ltr" placeholder="https://shard2.example.workers.dev"></div>' +
+    '<div class="field"><label>رمز اشتراک (همان SHARD_SECRET)</label><input id="shard-secret" dir="ltr" autocomplete="off" placeholder="حداقل ۱۶ نویسه"></div>' +
+    '<div class="adm-row"><button type="button" class="btn btn-ghost btn-sm" id="shard-test">🧪 تست اتصال</button><button type="button" class="btn btn-primary btn-sm" id="shard-add">افزودن</button><span id="shard-test-out" class="badge" style="display:none"></span></div>' +
+    '</details></div>';
+}
+function bindShardAdmin (q) {
+  function testPayload () {
+    var u = $('#shard-url'), s = $('#shard-secret');
+    return { action: 'test', url: (u && u.value.trim()) || '', secret: (s && s.value.trim()) || '' };
+  }
+  var tt = $('#shard-test');
+  if (tt) tt.addEventListener('click', function () {
+    var out = $('#shard-test-out');
+    out.style.display = ''; out.className = 'badge'; out.textContent = 'در حال تست…';
+    api('/admin/shards', { method: 'POST', body: testPayload() }).then(function (r) {
+      out.className = r.ok ? 'badge acc' : 'badge red';
+      out.textContent = r.ok ? ('اتصال ✓ — ' + r.latency + 'ms — ' + r.count + ' رکورد') : r.error;
+    }).catch(function (e) { out.className = 'badge red'; out.textContent = e.message; });
+  });
+  var add = $('#shard-add');
+  if (add) add.addEventListener('click', function () {
+    var body = testPayload();
+    body.action = 'add';
+    body.id = ($('#shard-id') && $('#shard-id').value.trim()) || '';
+    if (!body.id || !body.url || !body.secret) { toast('شناسه، آدرس و رمز را وارد کنید', 'err'); return; }
+    api('/admin/shards', { method: 'POST', body: body }).then(function () {
+      toast('شارد اضافه شد ✓', 'ok');
+      loadAdminTab('settings', q);
+    }).catch(function (e) { toast(e.message, 'err'); });
+  });
+  $all('[data-shard-del]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var id = b.getAttribute('data-shard-del');
+      openModal('حذف شارد', '<p style="font-size:14px;color:var(--tx2)">شارد «' + esc(id) + '» از سایت جدا شود؟ رکوردهای روی D1 آن شارد حذف نمی‌شوند؛ آثار روی آن تا جابه‌جایی دستی قابل خواندن باقی می‌مانند.</p><div class="adm-row" style="justify-content:flex-end;margin-top:14px"><button type="button" class="btn btn-ghost btn-sm" id="m-cancel">انصراف</button><button type="button" class="btn btn-danger btn-sm" id="m-yes">حذف</button></div>', function (wrap, close) {
+        $('#m-cancel', wrap).addEventListener('click', close);
+        $('#m-yes', wrap).addEventListener('click', function () {
+          api('/admin/shards', { method: 'POST', body: { action: 'remove', id: id } }).then(function () {
+            close(); toast('شارد حذف شد', 'ok'); loadAdminTab('settings', q);
+          }).catch(function (e) { toast(e.message, 'err'); });
+        });
+      });
+    });
+  });
+}
 function adminTabHtml (tab, data, q) {
   if (tab === 'overview') {
     return '<div class="adm-h">📊 نمای کلی</div><div class="stat-cards">' +
@@ -10217,6 +10642,7 @@ function adminTabHtml (tab, data, q) {
       '<p style="font-size:13px;color:var(--tx2)">در ویرایش هر اثر، لینک پست مشخصات کانال را بگذارید تا عنوان، سال، ژانر و بقیهٔ فیلدها خودکار پر شوند.</p></div>' +
       '<div class="adm-row">' +
       (data.botSet ? '' : '<span class="badge red">⚠️ توکن ربات تنظیم نشده</span>') +
+      '<em class="badge' + ((data.storage && data.storage.d1Ready) ? ' acc' : '') + '">🗄 ذخیره‌سازی: ' + esc(storageLabel(data.storage)) + ((data.storage && data.storage.shards && data.storage.shards.length) ? (' + ' + data.storage.shards.length + ' شارد') : '') + '</em>' +
       '<a class="btn btn-ghost btn-sm" href="#/admin/content">➕ افزودن محتوا</a>' +
       '<a class="btn btn-ghost btn-sm" href="#/admin/settings">⚙️ تنظیمات</a>' +
       '</div>';
@@ -10459,6 +10885,11 @@ function adminTabHtml (tab, data, q) {
       '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-bottom:10px"><input type="checkbox" id="set-ad-on" style="width:auto"' + (data.adEnabled !== false ? ' checked' : '') + '> نمایش دکمهٔ تبلیغ زیر فایل (فقط دکمه، نه داخل کپشن)</label>' +
       '<div class="field"><label>متن دکمهٔ تبلیغ</label><input id="set-ad-txt" value="' + esc(data.adButtonText || '') + '" placeholder="🎭 جدیدترین اخبار سینما"></div>' +
       '<div class="field"><label>لینک دکمه (https://…)</label><input id="set-ad-url" dir="ltr" value="' + esc(data.adButtonUrl || '') + '" placeholder="https://t.me/movie_shatelup"></div>' +
+      '</div>' +
+      '<div class="adm-box"><h4>🗄️ ذخیره‌سازی و فدراسیون D1</h4>' +
+      '<p class="note">معماری فعلی: داده‌های سنگین (کاربران، کیف پول، تراکنش‌ها، آثار و لینک‌ها) در <b>D1 اصلی</b>، موقتی‌ها (کش، rate-limit، توکن‌های موقت) در <b>KV</b>، صف‌های انتشار و mirrorها در <b>Durable Object</b>، و صفحات عمومی با <b>Cache API</b> کش می‌شوند. شاردهای D1 از اکانت‌های دیگر فقط «آثار» را بین دیتابیس‌ها تقسیم می‌کنند تا حد Free-plan دیرتر تمام شود.</p>' +
+      shardStatusHtml(data.storage) +
+      '<button class="btn btn-ghost btn-sm" id="shard-refresh" style="margin-top:8px">🔄 به‌روزرسانی وضعیت</button>' +
       '</div>' +
       '<button class="btn btn-primary btn-block" id="set-save">💾 ذخیره تنظیمات</button>' +
       contentSetupHtml(data.contentBotSetup) +
@@ -10940,6 +11371,9 @@ function bindAdminTab (tab, q) {
   if (tab === 'settings') {
     bindDatabaseMaintenance();
     bindContentSetup();
+    bindShardAdmin(q);
+    var shRef = $('#shard-refresh');
+    if (shRef) shRef.addEventListener('click', function () { loadAdminTab('settings', q); });
     var contentSetup = $('#content-bot-setup');
     if (contentSetup) contentSetup.addEventListener('click', function () {
       var status = $('#content-bot-status');
@@ -11728,7 +12162,7 @@ const D1_MIGRATION_HTML = `<!doctype html><html lang="fa" dir="rtl"><meta charse
 <article><h1>انتقال امن اطلاعات به D1</h1><p>این ابزار اطلاعات KV را کپی و دوباره مقایسه می‌کند؛ هیچ داده‌ای از KV حذف نمی‌شود و فعال‌سازی D1 خودکار نیست.</p>
 <ol><li>ابتدا در سایت با حساب مدیر وارد شوید؛ سپس این صفحه را در همین مرورگر باز کنید.</li><li>در Cloudflare یک D1 خالی به همان Worker با نام <code>DB</code> وصل کنید. اتصال‌های KV و EDITOR را نگه دارید.</li><li>تمام ابزارهای دیگرِ تغییر داده را متوقف کنید. پس از فعال‌شدن حالت نگهداری، دکمه دانلود پشتیبان KV را بزنید و فایل را امن نگه دارید.</li><li>متغیر <code>STORAGE_BACKEND=kv</code> و <code>STORAGE_MAINTENANCE=1</code> را تنظیم و Deploy کنید. سایت و webhookها موقتاً پاسخ 503 می‌دهند. پیش از ادامه، مطمئن شوید درخواست‌ها و استقرارهای قبلی پایان یافته‌اند.</li></ol>
 <label><input id="safe" type="checkbox"> پشتیبان دارم و تأیید می‌کنم منبع دیگر تغییر نمی‌کند.</label><p><button id="backup">دانلود پشتیبان KV قدیمی</button><button id="backupD1">دانلود پشتیبان D1 فعال</button><button id="status">بررسی وضعیت</button><button id="start">شروع / ادامه انتقال</button><button id="stop" disabled>توقف پس از این مرحله</button></p>
-<pre id="out">هنوز درخواستی ارسال نشده است.</pre><p id="done" hidden>انتقال و مقایسه تمام شد. اکنون در Cloudflare، STORAGE_BACKEND را d1 و STORAGE_MAINTENANCE را 0 کنید و با هم Deploy کنید. سپس ورود، کیف پول، دریافت فایل و ثبت آزمایشی را بررسی کنید. KV قدیمی را پاک نکنید. پس از ایجاد داده جدید در D1، بازگشت ساده به KV اطلاعات جدید را از دسترس خارج می‌کند.</p><a href="/">بازگشت به سایت</a></article>
+<pre id="out">هنوز درخواستی ارسال نشده است.</pre><p id="done" hidden>انتقال و مقایسه تمام شد. اکنون در Cloudflare، STORAGE_BACKEND را <b>hybrid</b> (معماری ترکیبی جدید: سنگین‌ها روی D1، cache روی KV) و STORAGE_MAINTENANCE را 0 کنید و با هم Deploy کنید. اگر مایلید همه‌چیز (مثل قبل) روی D1 بماند، d1 را بگذارید. سپس ورود، کیف پول، دریافت فایل و ثبت آزمایشی را بررسی کنید. KV قدیمی را پاک نکنید. پس از ایجاد داده جدید در D1، بازگشت ساده به KV اطلاعات جدید را از دسترس خارج می‌کند.</p><a href="/">بازگشت به سایت</a></article>
 <script>
 let stop=false,running=false;const out=document.getElementById('out');
 async function call(action){const token=localStorage.getItem('mvx_t');if(!token)throw Error('ابتدا در سایت وارد حساب مدیر شوید.');const r=await fetch('/api/admin/storage/d1',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+token},body:JSON.stringify({action})});const d=await r.json();if(!r.ok)throw Error(d.error||'خطای انتقال');const s=d.state;out.textContent=s?'مرحله: '+({copy:'کپی اطلاعات',verify:'مقایسه اطلاعات',ready:'آماده فعال‌سازی'}[s.phase]||s.phase)+'\\nکپی‌شده: '+s.copied+'\\nبررسی‌شده: '+s.verified:'انتقال هنوز شروع نشده است.';document.getElementById('done').hidden=s?.phase!=='ready';return s;}
