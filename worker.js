@@ -91,6 +91,9 @@ const ECONOMY_DEFAULTS = {
   sub6m: 450,
   sub1y: 800,
   dlClickPrice: 2,
+  /* سقف روزانهٔ دانلود برای جلوگیری از سرقت/کپی انبوه منابع (0 = نامحدود) */
+  dlDailyLimit: 20,
+  dlDailyLimitBot: 0,
   refSignupBonus: 50,
   refPurchasePercent: 1,
   starsEnabled: true,
@@ -1958,6 +1961,8 @@ function publicEconomy(set) {
   return {
     unit: set.walletUnitName || 'سکه',
     dlClickPrice: Number(set.dlClickPrice) || 0,
+    dlDailyLimit: Math.max(0, Math.floor(Number(set.dlDailyLimit) || 0)),
+    dlDailyLimitBot: Math.max(0, Math.floor(Number(set.dlDailyLimitBot) || 0)),
     vanishSec: Number(set.vanishSec) || CONFIG.VANISH_SEC,
     refSignupBonus: Number(set.refSignupBonus) || 0,
     refPurchasePercent: Number(set.refPurchasePercent) || 0,
@@ -3962,6 +3967,43 @@ async function apiSubscribe(store, body, request) {
   return json({ ok: true, user: pubUser(fresh), wallet: fresh.wallet, subUntil: fresh.subUntil });
 }
 
+/* ═══════════════════ محدودیت دانلود روزانه (ضد سرقت/کپی انبوه) ═══════════════════ */
+
+/* روز به وقت ایران (UTC+3:30) — شمارنده هر شب به وقت تهران صفر می‌شود */
+function tlrDayStamp (ms) {
+  return new Date((ms || Date.now()) + 12600000).toISOString().slice(0, 10);
+}
+function dlCounterKey (key) { return 'dlc:' + key; }
+async function dlCounterRead(store, key) {
+  const cache = store && store.env && store.env.CACHE_KV;
+  let raw = null;
+  if (cache && cache.get) {
+    const s = await cache.get(dlCounterKey(key));
+    if (s) { try { raw = JSON.parse(s); } catch (e) { raw = null; } }
+  } else {
+    raw = await store.get(dlCounterKey(key));
+  }
+  const n = raw && typeof raw.n === 'number' ? Math.floor(raw.n) : 0;
+  return n > 0 ? n : 0;
+}
+async function dlCounterBump(store, key) {
+  const n = (await dlCounterRead(store, key)) + 1;
+  const cache = store && store.env && store.env.CACHE_KV;
+  if (cache && cache.put) await cache.put(dlCounterKey(key), JSON.stringify({ n: n }), { expirationTtl: 172800 });
+  else await store.set(dlCounterKey(key), { n: n }, 172800);
+  return n;
+}
+function dlLimitOf(set) {
+  return {
+    user: Math.max(0, Math.min(1000, Math.floor(Number(set && set.dlDailyLimit) || 0))),
+    bot: Math.max(0, Math.min(1000000, Math.floor(Number(set && set.dlDailyLimitBot) || 0))),
+  };
+}
+function dlExempt(user) {
+  // مدیر و کاربر مادام‌العمر (premium) از سقف روزانه مستثنا هستند
+  return !!(user && (user.role === 'admin' || user.role === 'premium'));
+}
+
 async function apiDlRequest(store, body, request) {
   const user = await currentUser(request, store);
   if (!user) return json({ error: 'وارد شوید' }, 401);
@@ -3981,6 +4023,25 @@ async function apiDlRequest(store, body, request) {
   }
   const fresh = await getUser(store, user.username);
   const sub = hasActiveSub(fresh);
+  /* ── محدودیت دانلود روزانه: پیش از کسر سکه بررسی می‌شود ── */
+  const limits = dlLimitOf(set);
+  const exempt = dlExempt(fresh);
+  let usedToday = 0, botUsedToday = 0;
+  if (!exempt) {
+    const day = tlrDayStamp();
+    if (limits.user > 0) {
+      usedToday = await dlCounterRead(store, fresh.username + ':' + day);
+      if (usedToday >= limits.user) {
+        return json({ error: 'سقف دانلود امروز شما (' + limits.user + ' بار) تکمیل شده است. برای جلوگیری از کپی منابع، فردا (به وقت ایران) دوباره می‌توانید دریافت کنید.', dlLimit: true, limit: limits.user, used: usedToday }, 403);
+      }
+    }
+    if (limits.bot > 0) {
+      botUsedToday = await dlCounterRead(store, 'bot:' + day);
+      if (botUsedToday >= limits.bot) {
+        return json({ error: 'سقف دانلود امروز ربات تکمیل شده است. لطفاً چند ساعت دیگر دوباره تلاش کنید.', dlLimit: true, botLimit: limits.bot }, 403);
+      }
+    }
+  }
   const price = downloadPrice(fresh, set);
   if (price > 0) {
     const d = await payFromWallet(store, fresh, price, 'download', 'دانلود: ' + (item.title || ''));
@@ -4002,6 +4063,14 @@ async function apiDlRequest(store, body, request) {
   };
   await store.set('dl:' + id, rec, 700);
 
+  /* درخواست دانلود ثبت شد؛ شمارندهٔ روزانه را (بعد از ثبت) افزایش می‌دهیم.
+     هر نسخه/فایل داخل یک درخواست، یک دانلود محسوب می‌شود. */
+  if (!exempt) {
+    const day = tlrDayStamp();
+    if (limits.user > 0) usedToday = await dlCounterBump(store, fresh.username + ':' + day);
+    if (limits.bot > 0) botUsedToday = await dlCounterBump(store, 'bot:' + day);
+  }
+
   const botLink = fileBotLink(set, 'dl_' + id);
   const out = {
     ok: true,
@@ -4012,6 +4081,8 @@ async function apiDlRequest(store, body, request) {
     vanishSec: Number(set.vanishSec) || CONFIG.VANISH_SEC,
     hasSub: sub,
     gateInfo: adGateInfo(set),
+    dlLimit: exempt ? 0 : limits.user,
+    dlUsed: exempt ? 0 : usedToday,
   };
 
   // کاربران دارای اشتراک هیچ تبلیغی نمی‌بینند
@@ -4955,6 +5026,8 @@ async function handleAdmin(store, url, request, adminUser) {
       signupBonus: signupBonusOf(set),
       sub1m: set.sub1m, sub3m: set.sub3m, sub6m: set.sub6m, sub1y: set.sub1y,
       dlClickPrice: set.dlClickPrice, refSignupBonus: set.refSignupBonus, refPurchasePercent: set.refPurchasePercent,
+      dlDailyLimit: Math.max(0, Math.floor(Number(set.dlDailyLimit) || 0)),
+      dlDailyLimitBot: Math.max(0, Math.floor(Number(set.dlDailyLimitBot) || 0)),
       vanishSec: set.vanishSec,
       k2kEnabled: !!set.k2kEnabled,
       k2kCardNumber: set.k2kCardNumber || '',
@@ -5018,6 +5091,16 @@ async function handleAdmin(store, url, request, adminUser) {
         if (isFinite(n) && n >= 0) set[k] = n;
       }
     });
+    if (body.dlDailyLimit !== undefined) {
+      const n = Number(body.dlDailyLimit);
+      if (!Number.isSafeInteger(n) || n < 0 || n > 1000) return json({ error: 'محدودیت دانلود روزانه باید عدد صحیح بین 0 تا 1000 باشد (0 = نامحدود)' }, 400);
+      set.dlDailyLimit = n;
+    }
+    if (body.dlDailyLimitBot !== undefined) {
+      const n = Number(body.dlDailyLimitBot);
+      if (!Number.isSafeInteger(n) || n < 0 || n > 1000000) return json({ error: 'سقف دانلود روزانه ربات باید عدد صحیح بین 0 تا 1000000 باشد (0 = نامحدود)' }, 400);
+      set.dlDailyLimitBot = n;
+    }
     if (body.fileCaption !== undefined) set.fileCaption = String(body.fileCaption).slice(0, 1000);
     if (body.adEnabled !== undefined) set.adEnabled = !!body.adEnabled;
     if (body.adButtonText !== undefined) set.adButtonText = String(body.adButtonText).slice(0, 64);
@@ -6734,6 +6817,32 @@ const APP_HTML = `<!doctype html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="utf-8">
+<script>
+/* ══ رفع باگ لودینگ مینی‌اپ در موبایل ═══════════════════════════════
+   تلگرام صفحهٔ لودینگ خود را تا زمانی که رویداد web_app_ready را از
+   مینی‌اپ دریافت نکند، بالا نگه می‌دارد. در نسخهٔ قبل این رویداد فقط
+   توسط اسکرپت telegram-web-app.js (از telegram.org) ارسال می‌شد؛ وقتی
+   آن اسکرپت در شبکهٔ موبایل کند یا در دسترس نبود، کاربر تا ابد در
+   لودینگ تلگرام می‌ماند (مگر تاچ/رفرش شانسی آن را برمی‌گرداند).
+   حالا با اولین بایت‌های صفحه — حتی قبل از بقیهٔ HTML/CSS/JS —
+   رویداد آماده‌شدن را می‌فرستیم تا لودینگ تلگرام فوراً برداشته شود.
+   (همان کاری که WebApp.ready() از SDK رسمی انجام می‌دهد.) */
+(function () {
+  'use strict';
+  try { window.__mvxT0 = Date.now(); } catch (e) { }
+  function mvxSendReady () {
+    var payload = { event: 'web_app_ready' };
+    try {
+      if (window.parent && window.parent !== window) window.parent.postMessage(payload, '*');
+      else window.postMessage(payload, '*');
+    } catch (e) { }
+    try { if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.ready) window.Telegram.WebApp.ready(); } catch (e2) { }
+  }
+  mvxSendReady();
+  // اگر SDK رسمی تلگرام زودتر از حد انتظار بارگذاری شده بود، یک‌بار دیگر اطمینان می‌گیریم
+  setTimeout(mvxSendReady, 1500);
+})();
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="mvx-version" content="v3.50">
 <meta name="theme-color" content="#0b0e14">
@@ -7399,7 +7508,7 @@ button.dp-slide{cursor:zoom-in}
 </style>
 </head>
 <body>
-<div id="app"><div style="text-align:center;padding-top:40px"><div class="spin"></div><div style="color:var(--tx3);font-size:13px;margin-top:12px">در حال بارگذاری…</div></div></div>
+<div id="app"><div style="text-align:center;padding-top:40px"><div style="font-size:24px;font-weight:900;margin-bottom:16px">@@SITE@@</div><div class="spin"></div><div style="color:var(--tx3);font-size:13px;margin-top:12px">در حال بارگذاری…</div></div></div>
 <div id="toasts"></div>
 <div id="modal-root"></div>
 <script>
@@ -7416,6 +7525,56 @@ var NL = String.fromCharCode(10);
 var APP = { user: null, tg: null, catalog: null, siteName: '@@SITE@@', tagline: '@@TAG@@', economy: { unit: 'سکه', dlClickPrice: 2, plans: {}, botUsername: '' } };
 var TG = (window.Telegram && window.Telegram.WebApp) || null;
 var TG_READY = false;
+
+/* ══ مینی‌اپ تلگرام بدون وابستگی به telegram.org ═════════════════════
+   اسکرپت رسمی SDK (telegram-web-app.js) از دامنهٔ telegram.org لود می‌شود.
+   در بسیاری از شبکه‌های موبایل این دامنه کند یا در دسترس نیست و بدون آن
+   نه WebApp.initData (برای ورود خودکار) در دسترس است و نه WebApp.ready()
+   صدا زده می‌شود — یعنی دقیقاً همان باگ لودینگ جاخوردگی.
+   بنابراین initData را خودمان از URL می‌خوانیم و اگر SDK رسمی تا چند ثانیه
+   نیامد، یک shim سبک داخلی جایگزین می‌شود که همهٔ امکانات موردنیاز سایت
+   (ready/expand/openTelegramLink/BackButton/Haptic) را — هر چند ساده —
+   تأمین می‌کند. اگر SDK رسمی بارگذاری شد، خودکار جای shim را می‌گیرد. */
+function tgInitDataFromUrl () {
+  function grab (qs) {
+    if (!qs) return '';
+    try {
+      var p = new URLSearchParams(qs.charAt(0) === '#' ? qs.slice(1) : qs);
+      return p.get('tgWebAppData') || '';
+    } catch (e) { return ''; }
+  }
+  return grab(location.search) || grab(location.hash);
+}
+function buildTgFallback () {
+  var raw = tgInitDataFromUrl();
+  var un = {};
+  try { new URLSearchParams(raw).forEach(function (v, k) { un[k] = v; }); } catch (e) { }
+  var noop = function () { };
+  return {
+    initData: raw,
+    initDataUnsafe: un,
+    colorScheme: 'dark',
+    ready: function () {
+      var payload = { event: 'web_app_ready' };
+      try {
+        if (window.parent && window.parent !== window) window.parent.postMessage(payload, '*');
+        else window.postMessage(payload, '*');
+      } catch (e) { }
+    },
+    expand: noop,
+    close: noop,
+    setHeaderColor: noop,
+    setBackgroundColor: noop,
+    disableVerticalSwipes: noop,
+    onEvent: noop,
+    offEvent: noop,
+    openTelegramLink: function (url) { try { location.assign(String(url)); } catch (e) { } },
+    HapticFeedback: { impactOccurred: noop, notificationOccurred: noop, selectionChanged: noop },
+    BackButton: { show: noop, hide: noop, onClick: noop, offClick: noop },
+    MainButton: { show: noop, hide: noop, setText: noop, onClick: noop, offClick: noop },
+    __fallback: true
+  };
+}
 var __bootErr = null;
 function captureErr (msg) { if (!__bootErr && msg) __bootErr = String(msg); }
 window.addEventListener('error', function (e) {
@@ -7632,6 +7791,42 @@ function bindLoginResume () {
   document.addEventListener('click', function () { if (getTick() && !APP.user) peekLoginTicket(true); }, true);
 }
 bindLoginResume();
+/* ══ «تاچ = ادامهٔ بارگذاری» ══════════════════════════════════════════
+   تا پیش از این، اگر بارگذاری اولیه در موبایل گیر می‌کرد، تاچ کاربر
+   «شانسی» باعث می‌شد سایت بالا بیاید. حالا هر تاچ اول وقتی هنوز صفحه
+   اولیهٔ «در حال بارگذاری» نمایش داده می‌شود، به‌طور قطع یا بارگذاری را
+   از سر می‌گیرد یا (در صورت خطای ثبت‌شده) صفحه را تازه می‌کند. */
+function bindBootKick () {
+  if (window.__bootKickBound) return;
+  window.__bootKickBound = true;
+  function kick () {
+    window.removeEventListener('pointerdown', kick);
+    window.removeEventListener('touchstart', kick);
+    window.removeEventListener('click', kick);
+    try {
+      var app = document.getElementById('app');
+      if (!app || app.innerHTML.indexOf('در حال بارگذاری') < 0) return;
+      if (Date.now() - (window.__mvxT0 || Date.now()) < 4000) return;
+      if (__bootErr) { location.reload(); return; }
+      api('/me').then(function (r) {
+        if (document.getElementById('app').innerHTML.indexOf('در حال بارگذاری') < 0) return;
+        if (r.user) APP.user = r.user;
+        if (r.site) { APP.siteName = r.site.siteName; APP.tagline = r.site.tagline || APP.tagline; }
+        if (r.economy) APP.economy = r.economy;
+        applySiteBranding();
+        render();
+      }).catch(function () { });
+    } catch (e) { }
+  }
+  try {
+    window.addEventListener('pointerdown', kick, { once: true, capture: true });
+    window.addEventListener('touchstart', kick, { once: true, capture: true });
+    window.addEventListener('click', kick, { once: true, capture: true });
+  } catch (e) { }
+}
+/* اسکرپت اصلی همین حالا (پیش از DOMContentLoaded) اجرا می‌شود، پس تاچ‌گیر را
+   همین‌جا فعال می‌کنیم — حتی اگر ادامهٔ بارگذاری/بوت دیر برسد. */
+bindBootKick();
 function api (path, opts) {
   opts = opts || {};
   var hd = { 'Content-Type': 'application/json' };
@@ -8664,12 +8859,19 @@ function viewItem (data, id) {
     ? '<section class="d-sec"><div class="d-sec-h">عوامل ' + (isSeries ? 'سریال' : 'فیلم') + ' ' + esc(tFa) + '</div><div class="people">' + directors.map(function (d) { return personHtml(d, 'کارگردان'); }).join('') + '</div></section>'
     : '';
 
+  var dlLim = Number((APP.economy && APP.economy.dlDailyLimit) || 0);
+  var dlExempt = !!(APP.user && (APP.user.role === 'admin' || APP.user.role === 'premium'));
+  var dlLimitLine = '';
+  if (dlLim > 0 && !dlExempt) {
+    dlLimitLine = '<br>🔒 برای جلوگیری از کپی منابع، هر کاربر حداکثر <b>' + faNum(dlLim) + ' دانلود در روز</b> (به وقت ایران) دارد.';
+  }
   var note = '<div class="note">🛡 پخش آنلاین وجود ندارد. فایل فقط داخل ربات ارسال می‌شود و بعد از <b>' + faNum(vanish) + ' ثانیه</b> پاک می‌گردد.' +
     (data.hasSub
-      ? '<br>👑 اشتراک فعال — دانلود نامحدود، بدون کسر سکه.'
+      ? '<br>👑 اشتراک فعال — بدون کسر سکه.' + (dlLim > 0 && !dlExempt ? ' (سقف روزانه: ' + faNum(dlLim) + ' دانلود)' : ' دانلود نامحدود.')
       : (price > 0
-        ? '<br>بدون اشتراک، هر دانلود <b>' + faMoney(price) + ' ' + unitName() + '</b> از کیف پول. با اشتراک، دانلود نامحدود و بدون کسر سکه است.'
+        ? '<br>بدون اشتراک، هر دانلود <b>' + faMoney(price) + ' ' + unitName() + '</b> از کیف پول.' + (dlLim > 0 && !dlExempt ? ' با اشتراک، کسر سکه حذف می‌شود؛ سقف روزانه برای همه یکسان است.' : ' با اشتراک، دانلود نامحدود و بدون کسر سکه است.')
         : '')) +
+    dlLimitLine +
     '</div>';
   var lockNote = '';
   if (APP.user && !canPlay) lockNote = '<div class="note">👑 این اثر ویژهٔ مشترکین است. <a href="#/subscribe" style="color:var(--acc2);font-weight:800">خرید اشتراک</a> · <a href="#/wallet" style="color:var(--acc2);font-weight:800">کیف پول</a></div>';
@@ -8852,6 +9054,10 @@ function requestDownload (itemId, opts, btn) {
       ? (faMoney(r.charged) + ' ' + unitName() + ' کسر شد.')
       : (r.unlimited ? 'اشتراک فعال — بدون کسر سکه.' : '');
     if (chargeMsg) toast(chargeMsg, 'ok');
+    if (Number(r.dlLimit) > 0 && r.dlUsed != null) {
+      var left = Math.max(0, Number(r.dlLimit) - Number(r.dlUsed));
+      if (left <= 3) toast('🔒 امروز ' + faNum(left) + ' دانلود دیگر برایتان مانده است (سقف روزانه: ' + faNum(r.dlLimit) + ')', 'err');
+    }
 
     closeModal();
     if (r.needAd && r.ad) {
@@ -9433,19 +9639,25 @@ function openK2kInvoice(inv) {
 function viewSubscribe () {
   if (!APP.user) return emptyHtml('👑', 'وارد نشده‌اید', 'برای خرید اشتراک ابتدا وارد شوید.', '<a class="btn btn-primary" href="#/auth">ورود با تلگرام</a>');
   var plans = (APP.economy && APP.economy.plans) || {};
+  var lim = Number((APP.economy && APP.economy.dlDailyLimit) || 0);
+  var exempt = (APP.user.role === 'admin' || APP.user.role === 'premium');
+  var dlWord = (lim > 0 && !exempt) ? ('دانلود رایگان تا ' + faNum(lim) + ' بار در روز') : 'دانلود نامحدود';
   var items = [
-    ['1m', 'یک‌ماهه', '۳۰ روز دانلود نامحدود بدون کسر سکه'],
-    ['3m', 'سه‌ماهه', '۹۰ روز دانلود نامحدود — به‌صرفه‌تر'],
-    ['6m', 'شش‌ماهه', '۱۸۰ روز دانلود نامحدود'],
-    ['1y', 'یک‌ساله', '۳۶۵ روز دانلود نامحدود — بهترین قیمت']
+    ['1m', 'یک‌ماهه', '۳۰ روز ' + dlWord + ' بدون کسر سکه'],
+    ['3m', 'سه‌ماهه', '۹۰ روز ' + dlWord + ' — به‌صرفه‌تر'],
+    ['6m', 'شش‌ماهه', '۱۸۰ روز ' + dlWord],
+    ['1y', 'یک‌ساله', '۳۶۵ روز ' + dlWord + ' — بهترین قیمت']
   ];
   var cards = items.map(function (p) {
     var price = Number(plans[p[0]]) || 0;
     return '<div class="plan"><h4>' + p[1] + '</h4><div class="pr">' + faMoney(price) + ' <span style="font-size:13px;font-weight:600">' + unitName() + '</span></div><div class="ds">' + p[2] + '</div>' +
       '<button class="btn btn-primary btn-block" data-plan="' + p[0] + '">خرید از کیف پول</button></div>';
   }).join('');
+  var subDesc = (lim > 0 && !exempt)
+    ? ('با اشتراک، همهٔ فیلم‌ها و سریال‌ها را بدون کسر سکه دانلود می‌کنید (سقف روزانه برای همه کاربران: ' + faNum(lim) + ' دانلود، به وقت ایران). سکه فقط از کاربران بدون اشتراک بابت هر دانلود کم می‌شود. خودِ اشتراک از کیف پول پرداخت می‌شود.')
+    : 'با اشتراک، همهٔ فیلم‌ها و سریال‌ها را نامحدود و بدون کسر سکه دانلود می‌کنید. سکه فقط از کاربران بدون اشتراک بابت هر دانلود کم می‌شود. خودِ اشتراک از کیف پول پرداخت می‌شود.';
   return '<div class="acc"><h2 style="font-size:20px;font-weight:900;margin-bottom:8px">👑 اشتراک</h2>' +
-    '<p style="color:var(--tx2);font-size:13.5px;margin-bottom:16px">با اشتراک، همهٔ فیلم‌ها و سریال‌ها را نامحدود و بدون کسر سکه دانلود می‌کنید. سکه فقط از کاربران بدون اشتراک بابت هر دانلود کم می‌شود. خودِ اشتراک از کیف پول پرداخت می‌شود.</p>' +
+    '<p style="color:var(--tx2);font-size:13.5px;margin-bottom:16px">' + subDesc + '</p>' +
     (hasSub() ? '<div class="note">اشتراک فعلی تا <b>' + faDate(APP.user.subUntil) + '</b> فعال است. خرید جدید به انتهای همان تاریخ اضافه می‌شود.</div>' : '') +
     '<div class="plans">' + cards + '</div>' +
     '<p style="font-size:12.5px;color:var(--tx3);text-align:center">موجودی: ' + faMoney(APP.user.wallet) + ' ' + unitName() + ' — <a href="#/wallet" style="color:var(--acc2)">شارژ کیف پول</a></p>' +
@@ -9848,6 +10060,8 @@ function adminTabHtml (tab, data, q) {
       '<div class="field"><label>نام واحد کیف پول</label><input id="set-unit" value="' + esc(data.walletUnitName || 'سکه') + '"></div>' +
       '<div class="field"><label>هدیه سکه اولین ثبت‌نام (صفر = بدون هدیه)</label><input id="set-signup-bonus" type="number" min="0" step="1" value="' + esc(data.signupBonus) + '"><small>فقط برای حساب‌های جدید؛ مستقل از پاداش دعوت.</small></div>' +
       '<div class="field"><label>قیمت هر دانلود (فقط کاربر بدون اشتراک)</label><input id="set-dlp" type="number" value="' + esc(data.dlClickPrice) + '"></div>' +
+      '<div class="field"><label>محدودیت دانلود روزانه هر کاربر (0 = نامحدود)</label><input id="set-dlmax" type="number" min="0" max="1000" value="' + esc(data.dlDailyLimit != null ? data.dlDailyLimit : 20) + '"><small>برای جلوگیری از سرقت/کپی انبوه منابع؛ مدیران و کاربران مادام‌العمر مستثنا. روز به وقت ایران.</small></div>' +
+      '<div class="field"><label>سقف کل دانلود روزانه ربات (0 = نامحدود)</label><input id="set-dlmaxbot" type="number" min="0" max="1000000" value="' + esc(data.dlDailyLimitBot != null ? data.dlDailyLimitBot : 0) + '"><small>مجموع دانلود همهٔ کاربران در یک روز (به وقت ایران).</small></div>' +
       '<div class="field"><label>اشتراک ۱ ماهه</label><input id="set-s1" type="number" value="' + esc(data.sub1m) + '"></div>' +
       '<div class="field"><label>اشتراک ۳ ماهه</label><input id="set-s3" type="number" value="' + esc(data.sub3m) + '"></div>' +
       '<div class="field"><label>اشتراک ۶ ماهه</label><input id="set-s6" type="number" value="' + esc(data.sub6m) + '"></div>' +
@@ -10390,6 +10604,8 @@ function bindAdminTab (tab, q) {
         walletUnitName: $('#set-unit').value.trim(),
         signupBonus: $('#set-signup-bonus').value,
         dlClickPrice: $('#set-dlp').value,
+        dlDailyLimit: ($('#set-dlmax') && $('#set-dlmax').value) || '0',
+        dlDailyLimitBot: ($('#set-dlmaxbot') && $('#set-dlmaxbot').value) || '0',
         sub1m: $('#set-s1').value, sub3m: $('#set-s3').value, sub6m: $('#set-s6').value, sub1y: $('#set-s12').value,
         refSignupBonus: $('#set-refb').value, refPurchasePercent: $('#set-refp').value,
         vanishSec: $('#set-van').value,
@@ -11039,6 +11255,7 @@ function render () {
 var __mainBtnBound = false;
 function initTg (webapp) {
   if (!webapp) return;
+  var wasFallback = !!(TG && TG.__fallback);
   TG = webapp;
   try {
     TG.ready();
@@ -11047,7 +11264,18 @@ function initTg (webapp) {
     TG.setBackgroundColor('#0b0e14');
     if (TG.disableVerticalSwipes) TG.disableVerticalSwipes();
   } catch (e) { }
-  if (TG_READY) return;
+  if (TG_READY) {
+    // SDK رسمی تلگرام دیرتر از shim داخلی بارگذاری شد: رویدادهای واقعی
+    // (بازگشت به اپ/تغییر viewport) را روی خودِ SDK دوباره سربندیم.
+    if (wasFallback && !webapp.__fallback && webapp.onEvent && window.__mvxActFallback) {
+      window.__mvxActFallback = false;
+      try {
+        webapp.onEvent('activated', function () { loginMiniApp(); burstPeek(); try { TG.expand(); } catch (e5) { } });
+        webapp.onEvent('viewportChanged', function () { loginMiniApp(); burstPeek(); });
+      } catch (eRb) { }
+    }
+    return;
+  }
   TG_READY = true;
   applyMiniAppItemLaunch();
   try {
@@ -11059,7 +11287,10 @@ function initTg (webapp) {
   try {
     if (TG && TG.onEvent && !window.__tgActBound) {
       window.__tgActBound = true;
-      /* در بازگشت به اپ، دوباره تمام‌صفحه بماند (مثل BatFather) */
+      window.__mvxActFallback = !!TG.__fallback;
+      /* در بازگشت به اپ، دوباره تمام‌صفحه بماند (مثل BatFather).
+         با shim داخلی onEvent بدون‌اثر است و تا آمدن SDK رسمی،
+         visibilitychange/focus/pageshow همان کار را می‌کنند. */
       TG.onEvent('activated', function () { loginMiniApp(); burstPeek(); try { TG.expand(); } catch (e5) { } });
       TG.onEvent('viewportChanged', function () { loginMiniApp(); burstPeek(); });
     }
@@ -11069,17 +11300,26 @@ function initTg (webapp) {
 window.__mvxInitTg = initTg;
 
 var __tgLoading = false;
+var __tgAttempts = 0;
 function loadTgScript () {
-  if (TG_READY || __tgLoading) return;
+  // حتی وقتی shim داخلی فعال است، بارگذاری SDK رسمی را (با تلاش محدود) ادامه می‌دهیم
+  if (TG_READY && !(TG && TG.__fallback)) return;
+  if (__tgLoading || __tgAttempts >= 2) return;
   __tgLoading = true;
+  __tgAttempts += 1;
   try {
     var s = document.createElement('script');
     s.src = 'https://telegram.org/js/telegram-web-app.js';
     s.async = true;
     s.onload = function () {
+      __tgLoading = false;
       try { if (window.Telegram && Telegram.WebApp) initTg(Telegram.WebApp); } catch (e) { }
     };
-    s.onerror = function () { __tgLoading = false; };
+    s.onerror = function () {
+      __tgLoading = false;
+      // اگر telegram.org در دسترس نبود، سایت با shim داخلی ادامه می‌دهد
+      if (__tgAttempts < 2) setTimeout(function () { loadTgScript(); }, 3000);
+    };
     (document.head || document.body).appendChild(s);
   } catch (e) { __tgLoading = false; }
 }
@@ -11087,6 +11327,7 @@ function loadTgScript () {
 function boot () {
   try {
     applyMiniAppItemLaunch();
+    if (!TG) TG = buildTgFallback();
     if (TG && !TG_READY) initTg(TG);
     loadTgScript();
     var rq = currentRoute();
