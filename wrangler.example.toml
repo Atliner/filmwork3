@@ -6,7 +6,12 @@ compatibility_date = "2026-09-01"
 
 [[kv_namespaces]]
 binding = "KV"
-id = "REPLACE_WITH_EXISTING_KV_NAMESPACE_ID"
+id = "REPLACE_WITH_NEW_LEGACY_OR_ARCHIVE_KV_NAMESPACE_ID"
+
+# Dedicated disposable KV for rate limits and short-lived operational cache.
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "REPLACE_WITH_NEW_CACHE_KV_NAMESPACE_ID"
 
 [[durable_objects.bindings]]
 name = "EDITOR"

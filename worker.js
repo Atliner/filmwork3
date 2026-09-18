@@ -2401,6 +2401,17 @@ async function requireAdmin(request, store) {
 }
 async function rlHit(store, key, max, ttl) {
   const k = 'rl:' + key;
+  // Rate limits are disposable operational state. Keep them out of D1's
+  // durable application records when a dedicated CACHE_KV is configured.
+  const cache=store?.env?.CACHE_KV;
+  if (cache?.get && cache?.put) {
+    let cur=null; try { cur=JSON.parse(await cache.get(k) || 'null'); } catch {}
+    cur=cur && typeof cur.n==='number' ? cur : {n:0};
+    cur.n += 1;
+    if (cur.n > max) return false;
+    await cache.put(k,JSON.stringify(cur),{expirationTtl:Math.max(60,Number(ttl)||60)});
+    return true;
+  }
   const cur = (await store.get(k)) || { n: 0 };
   cur.n += 1;
   if (cur.n > max) return false;
