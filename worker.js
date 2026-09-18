@@ -7505,6 +7505,124 @@ button.dp-slide{cursor:zoom-in}
 }
 @media(prefers-reduced-motion:reduce){.hero-track{transition:none}}
 
+/* ═══════════════════ راهنمای انتخاب کیفیت فیلم (Quality Guide) ═══════════════════ */
+.qg{max-width:1100px;margin:0 auto;padding:18px 16px calc(90px + env(safe-area-inset-bottom,0px))}
+.qg-sec,.qg-node{scroll-margin-top:calc(var(--hdr-h) + env(safe-area-inset-top,0px) + 16px)}
+.qg-hero{position:relative;overflow:hidden;border:1px solid var(--glass-line);border-radius:var(--rad);padding:30px 22px 26px;margin-bottom:16px;background:radial-gradient(120% 160% at 85% -20%,rgba(255,122,26,.22),transparent 55%),radial-gradient(90% 140% at 0% 120%,rgba(56,189,248,.10),transparent 55%),var(--card);box-shadow:var(--shadow)}
+.qg-hero:after{content:"🎬";position:absolute;inset-inline-start:-14px;bottom:-30px;font-size:120px;opacity:.07;transform:rotate(-8deg);pointer-events:none}
+.qg-hero-kicker{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:800;color:var(--acc2);background:var(--acc-soft);border:1px solid rgba(255,176,31,.3);padding:5px 12px;border-radius:999px;margin-bottom:12px}
+.qg-hero h1{font-size:clamp(21px,4.5vw,30px);font-weight:900;line-height:1.45;margin-bottom:8px}
+.qg-hero p{color:var(--tx2);font-size:14px;line-height:2;max-width:640px}
+.qg-hero-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.qg-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--tx2);background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;padding:6px 12px}
+.qg-chip b{color:var(--tx);font-weight:800}
+/* ── کوییز سریع ── */
+.qg-quiz{border:1px solid var(--glass-line);border-radius:var(--rad);background:var(--card);margin-bottom:16px;overflow:hidden;box-shadow:var(--shadow)}
+.qg-quiz-h{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;background:linear-gradient(135deg,rgba(255,122,26,.14),rgba(255,176,31,.06));border-bottom:1px solid var(--glass-line)}
+.qg-quiz-h h3{font-size:15.5px;font-weight:900}
+.qg-quiz-h h3 span{display:block;font-size:12px;color:var(--tx3);font-weight:600;margin-top:2px}
+.qg-quiz-body{padding:18px}
+.qg-q-progress{display:flex;align-items:center;gap:6px;margin-bottom:14px}
+.qg-q-dot{width:8px;height:8px;border-radius:999px;background:var(--glass-line-2);transition:all .25s}
+.qg-q-dot.on{width:22px;background:var(--grad)}
+.qg-q-title{font-size:16px;font-weight:900;margin-bottom:12px}
+.qg-q-opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.qg-q-opt{display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 10px;border:1px solid var(--glass-line);border-radius:var(--rad-s);background:var(--glass);font-size:13.5px;font-weight:700;transition:all .15s}
+.qg-q-opt span{font-size:26px}
+.qg-q-opt:hover,.qg-q-opt:focus{border-color:rgba(255,122,26,.6);background:var(--acc-soft);transform:translateY(-2px)}
+.qg-q-back{margin-top:12px;font-size:12.5px;color:var(--tx3);font-weight:700;padding:6px 14px;border:1px solid var(--glass-line);border-radius:999px}
+.qg-q-back:hover{color:var(--tx2);border-color:var(--glass-line-2)}
+.qg-q-result{text-align:center;padding:6px 0}
+.qg-q-result .ic{font-size:44px;margin-bottom:8px}
+.qg-q-result h4{font-size:19px;font-weight:900;margin-bottom:4px}
+.qg-q-result .rec{display:inline-flex;align-items:center;gap:8px;margin:10px 0;padding:10px 18px;border-radius:999px;background:var(--acc-soft);border:1px solid rgba(255,176,31,.4);font-size:15px;font-weight:900}
+.qg-q-result p{color:var(--tx2);font-size:13.5px;line-height:2;max-width:520px;margin:8px auto 0}
+.qg-q-again{margin-top:14px;display:inline-flex}
+/* ── چیدمان دو ستونه: فهرست درختی + محتوا ── */
+.qg-layout{display:grid;grid-template-columns:270px minmax(0,1fr);gap:16px;align-items:start}
+.qg-toc{position:sticky;top:calc(var(--hdr-h) + env(safe-area-inset-top,0px) + 14px);border:1px solid var(--glass-line);border-radius:var(--rad);background:var(--card);padding:14px 12px;max-height:calc(100dvh - var(--hdr-h) - env(safe-area-inset-top,0px) - 90px);overflow-y:auto}
+.qg-toc-h{display:none;align-items:center;justify-content:space-between;width:100%;padding:6px 8px;border-radius:10px;font-size:14px;font-weight:900}
+.qg-toc-h:active{background:var(--glass)}
+.qg-toc-h .arr{transition:transform .25s;color:var(--tx3)}
+.qg-toc.open .qg-toc-h .arr{transform:rotate(180deg)}
+.qg-toc ul{list-style:none}
+.qg-toc li{margin:2px 0}
+.qg-toc a,.qg-toc .tgl{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:10px;font-size:13px;font-weight:700;color:var(--tx2);transition:all .13s;width:100%}
+.qg-toc a:hover{color:var(--tx);background:var(--glass)}
+.qg-toc a.on{color:#fff;background:var(--acc-soft);box-shadow:inset 0 0 0 1px rgba(255,176,31,.35)}
+.qg-toc .lvl2{margin-inline-start:18px;border-inline-start:1px solid var(--line);padding-inline-start:4px}
+.qg-toc .lvl2 a{font-size:12px;font-weight:600;padding:5px 9px}
+.qg-toc .em{font-size:15px;flex:0 0 auto}
+.qg-toc .tgl .cnt{margin-inline-start:auto;font-size:10.5px;color:var(--tx3);background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;padding:1px 8px}
+.qg-main{min-width:0}
+/* ── بخش‌ها ── */
+.qg-sec{border:1px solid var(--glass-line);border-radius:var(--rad);background:var(--card);margin-bottom:16px;overflow:hidden}
+.qg-sec-h{display:flex;align-items:center;gap:10px;padding:16px 18px;border-bottom:1px solid var(--glass-line);background:linear-gradient(180deg,rgba(255,255,255,.025),transparent)}
+.qg-sec-h .em{font-size:20px}
+.qg-sec-h h2{font-size:16.5px;font-weight:900}
+.qg-sec-h small{display:block;font-size:12px;color:var(--tx3);font-weight:600;margin-top:2px}
+.qg-sec-h .cnt{margin-inline-start:auto;font-size:11px;font-weight:800;color:var(--acc2);background:var(--acc-soft);border-radius:999px;padding:4px 10px;white-space:nowrap}
+.qg-sec-b{padding:8px 10px 14px}
+/* ── نودهای درختی ── */
+.qg-tree{list-style:none}
+.qg-node{position:relative;margin:4px 0}
+.qg-node .line{position:absolute;inset-inline-start:19px;top:0;bottom:-4px;width:1px;background:var(--line)}
+.qg-node:last-child .line{bottom:auto;height:26px}
+.qg-node-h{display:flex;align-items:center;gap:10px;width:100%;text-align:start;padding:12px 12px 12px 14px;border:1px solid transparent;border-radius:var(--rad-s);background:transparent;transition:all .14s;position:relative}
+.qg-node-h:hover{background:var(--glass);border-color:var(--glass-line)}
+.qg-node.open .qg-node-h{background:var(--glass);border-color:var(--glass-line)}
+.qg-node-dot{flex:0 0 14px;height:14px;border-radius:999px;border:2px solid var(--acc);background:var(--bg);position:relative;z-index:1}
+.qg-node-dot:after{content:"";position:absolute;inset:3px;border-radius:999px;background:var(--acc);opacity:0;transition:opacity .2s}
+.qg-node.open .qg-node-dot:after{opacity:1}
+.qg-node-title{font-size:14px;font-weight:800;min-width:0}
+.qg-node-title .en{font-size:11px;color:var(--tx3);font-weight:700;margin-inline-start:6px;direction:ltr;unicode-bidi:embed}
+.qg-node-tags{display:flex;flex-wrap:wrap;gap:5px;margin-inline-start:auto;flex:0 1 auto;justify-content:flex-end}
+.qg-tag{font-size:10.5px;font-weight:800;border-radius:999px;padding:3px 9px;white-space:nowrap;background:var(--glass);border:1px solid var(--glass-line);color:var(--tx2)}
+.qg-tag.hot{color:#fff;background:linear-gradient(135deg,#ff5f2e,#ffb01f);border-color:transparent}
+.qg-tag.ok{color:var(--ok);background:rgba(61,220,132,.1);border-color:rgba(61,220,132,.3)}
+.qg-tag.no{color:var(--err);background:rgba(255,84,112,.1);border-color:rgba(255,84,112,.3)}
+.qg-tag.mid{color:var(--warn);background:rgba(255,197,61,.1);border-color:rgba(255,197,61,.3)}
+.qg-node-score{flex:0 0 auto;display:flex;gap:2.5px;direction:ltr}
+.qg-node-score i{width:14px;height:5px;border-radius:3px;background:var(--glass-line-2)}
+.qg-node-score i.f{background:var(--grad)}
+.qg-node-score i.h{background:linear-gradient(135deg,#ff5f2e66,#ffb01f66)}
+.qg-node-arr{flex:0 0 auto;color:var(--tx3);transition:transform .22s;font-size:12px}
+.qg-node.open .qg-node-arr{transform:rotate(180deg)}
+.qg-node-b{max-height:0;overflow:hidden;transition:max-height .3s ease}
+.qg-node.open .qg-node-b{max-height:640px}
+.qg-node-in{padding:2px 16px 14px 40px;color:var(--tx2);font-size:13.5px;line-height:2}
+.qg-node-in .row{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.qg-node-in .row .lbl{font-size:11.5px;font-weight:800;color:var(--tx3);width:100%;margin-bottom:2px}
+.qg-node-in .px{font-size:11px;color:var(--tx3);font-weight:700}
+/* ── کارت‌های ساده ── */
+.qg-prose{padding:16px 18px;color:var(--tx2);font-size:14px;line-height:2.1}
+.qg-prose b{color:var(--tx)}
+.qg-cards2{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:16px}
+.qg-card2{border:1px solid var(--glass-line);border-radius:var(--rad-s);background:var(--glass);padding:16px}
+.qg-card2 .ic{font-size:26px;margin-bottom:8px;display:block}
+.qg-card2 h4{font-size:14.5px;font-weight:900;margin-bottom:6px}
+.qg-card2 p{font-size:13px;color:var(--tx2);line-height:1.95}
+.qg-steps{list-style:none;counter-reset:st;margin:0 18px 16px}
+.qg-steps li{counter-increment:st;position:relative;padding:12px 46px 12px 16px;border:1px solid var(--glass-line);border-radius:var(--rad-s);background:var(--glass);margin-bottom:10px;font-size:13.5px;line-height:2;color:var(--tx2)}
+.qg-steps li:before{content:counter(st);position:absolute;top:12px;inset-inline-start:12px;width:26px;height:26px;border-radius:999px;background:var(--grad);color:#131313;font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center}
+.qg-steps li b{color:var(--tx)}
+/* ── CTA پایین صفحه ── */
+.qg-cta{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;padding:6px 0 10px}
+.qg-cta .btn{max-width:100%}
+/* ── لینک راهنما داخل باکس دانلود ── */
+.q-guide-link{margin-top:10px;padding-top:10px;border-top:1px dashed var(--glass-line)}
+.q-guide-link a{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:800;color:var(--acc2);padding:7px 13px;border:1px solid rgba(255,176,31,.35);border-radius:999px;background:var(--acc-soft);transition:all .15s}
+.q-guide-link a:hover{background:rgba(255,176,31,.22);transform:translateY(-1px)}
+@media(max-width:860px){
+  .qg-layout{grid-template-columns:1fr}
+  .qg-toc{position:static;max-height:none}
+  .qg-toc-h{display:flex}
+  .qg-toc-body{display:none}
+  .qg-toc.open .qg-toc-body{display:block}
+  .qg-toc ul{margin-top:8px}
+  .qg-cards2{grid-template-columns:1fr}
+  .qg-node-tags{flex-basis:100%;justify-content:flex-start;margin:6px 0 0 24px}
+}
 </style>
 </head>
 <body>
@@ -8876,11 +8994,12 @@ function viewItem (data, id) {
   var lockNote = '';
   if (APP.user && !canPlay) lockNote = '<div class="note">👑 این اثر ویژهٔ مشترکین است. <a href="#/subscribe" style="color:var(--acc2);font-weight:800">خرید اشتراک</a> · <a href="#/wallet" style="color:var(--acc2);font-weight:800">کیف پول</a></div>';
 
+  var qgLink = '<div class="q-guide-link"><a href="#/quality?from=' + id + '">❓ نمی‌دونم کدوم کیفیت رو انتخاب کنم؟</a></div>';
   var dlPanel;
   if (isSeries) {
-    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 دانلود سریال' + (live ? ' <small>' + esc(liveText) + '</small>' : '') + '</div><div class="season-bar" id="season-bar"></div><div class="eps" id="ep-list"></div></div>';
+    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 دانلود سریال' + (live ? ' <small>' + esc(liveText) + '</small>' : '') + '</div><div class="season-bar" id="season-bar"></div><div class="eps" id="ep-list"></div>' + qgLink + '</div>';
   } else {
-    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 انتخاب کیفیت دانلود</div>' + trackTabsHtml('track-tabs', 'sub') + '<div id="q-row-wrap"></div></div>';
+    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 انتخاب کیفیت دانلود</div>' + trackTabsHtml('track-tabs', 'sub') + '<div id="q-row-wrap"></div>' + qgLink + '</div>';
   }
   var related = '';
   if (data.related && data.related.length) {
@@ -9244,6 +9363,243 @@ function shareOrCopy (it) {
 }
 
 /* ═══════════ ورود با تلگرام ═══════════ */
+/* ═══════════════ راهنمای انتخاب کیفیت فیلم (صفحهٔ /quality) ═══════════════ */
+var QG_RES = [
+  { id: '480p', name: '480p', en: 'SD', score: 2, px: '854×480', badge: '', cls: '',
+    desc: 'معمولاً کمترین وضوحي که می‌توان برای فیلم و سریال دانلود کرد. کیفیت تصویر خیلی خوب نیست، اما حجم ویدئوها بسیار پایین است و فقط برای گوشی‌ها یا در صورت کم بودن اینترنت پیشنهاد می‌شود.',
+    best: ['گوشی‌های کم‌وضوح', 'اینترنت/حجم خیلی محدود'] },
+  { id: '720p', name: '720p', en: 'HD', score: 3, px: '1280×720', badge: 'به‌صرفه', cls: 'ok',
+    desc: 'بهترین رزولوشن وقتی حجم اینترنت کم است. ویدئوهای HD روی نمایشگرهای FHD هم کیفیت مناسبی دارند؛ برای گوشی/لپ‌تاپ با وضوح HD یا وقتی می‌خواهید حجم کمی مصرف کنید مناسب است.',
+    best: ['گوشی/لپ‌تاپ HD', 'مصرف حجم کم'] },
+  { id: '1080p', name: '1080p', en: 'FHD', score: 4, px: '1920×1080', badge: 'مرسوم‌ترین', cls: 'hot',
+    desc: 'مرسوم‌ترین رزولوشن با بیشترین سازگاری با دستگاه‌ها؛ کیفیت تصویر بسیار خوب در کنار حجم مناسب. برای تلویزیون و لپ‌تاپ بهترین انتخاب است و حتی برای موبایل هم FHD (و HD) بهترین کیفیت محسوب می‌شود.',
+    best: ['تلویزیون', 'لپ‌تاپ/دسکتاپ', 'موبایل'] },
+  { id: '1440p', name: '1440p', en: 'QHD', score: 4, px: '2560×1440', badge: '', cls: '',
+    desc: 'وضوحی دو برابر FHD که بین FHD و 4K قرار می‌گیرد؛ روی برخی نمایشگرهای گوشی و لپ‌تاپ (مثل مک‌بوک ایر M1 و گلکسی S22 اولترا) استاندارد است. برای نمایشگرهای QHD یا 4K پیشنهاد می‌شود.',
+    best: ['نمایشگر QHD', 'نمایشگر 4K'] },
+  { id: '2160p', name: '2160p', en: '4K', score: 5, px: '3840×2160', badge: 'بالاترین مرسوم', cls: 'ok',
+    desc: 'وضوح چهار برابر FHD که بهترین کیفیت مرسوم در جهان است؛ اما حجم فیلم‌ها بسیار بالاست. فقط در صورت داشتن تلویزیون یا مانیتور 4K پیشنهاد می‌شود.',
+    best: ['تلویزیون 4K', 'مانیتور 4K'] },
+  { id: '4320p', name: '4320p', en: '8K', score: 5, px: '7680×4320', badge: 'نادر', cls: 'mid',
+    desc: 'نمایشگرهای خیلی کمی در جهان با این وضوح وجود دارند و بسیاری از فیلم‌ها حداکثر نسخهٔ 4K دارند؛ بنابراین نسخهٔ 8K آن‌ها به‌دلیل شایع نبودن معمولاً قابل دانلود نیست.',
+    best: ['نمایشگرهای 8K (بسیار نادر)'] },
+];
+var QG_VER = [
+  { id: 'blu-ray', name: 'Blu-Ray', score: 5, src: 'دیسک بلوری', badge: 'بالاترین کیفیت', cls: 'hot',
+    desc: 'بالاترین کیفیت فیلم ممکن؛ از ریپ کردن دیسک Blu-Ray به دست می‌آید. فریم‌ریت بسیار بالا و حجم بالاتر. تماشای آن روی تلویزیون و نمایشگرهای بزرگ بسیار لذت‌بخش است و در صورت امکان پیشنهاد می‌شود.',
+    pros: ['بالاترین کیفیت تصویر و صدا', 'فریم‌ریت بالا'], cons: ['حجم بسیار بالا', 'برای همهٔ آثار موجود نیست'] },
+  { id: 'bdrip', name: 'BDRip', score: 5, src: 'دیسک بلوری', badge: 'تقریباً مثل بلوری', cls: 'ok',
+    desc: 'بهترین کیفیتی که برای پخش خانگی تولید می‌شود؛ از نظر کیفیت تفاوت زیادی با Blu-Ray ندارد، فقط فریم‌ریت پایین‌تر و حجم کمتری دارد. در عمل احتمالاً تفاوتی بین این دو احساس نخواهید کرد.',
+    pros: ['کیفیت تقریباً مساوی بلوری', 'حجم کمتر از بلوری'], cons: ['فریم‌ریت کمی پایین‌تر'] },
+  { id: 'brrip', name: 'BRRip', score: 4, src: 'نسخهٔ بومی کاربران', badge: '', cls: '',
+    desc: 'به‌صورت رسمی توسط سازنده منتشر نمی‌شود؛ کاربران حرفه‌ای آن را از روی نسخهٔ BDRip استخراج می‌کنند. تصویر و صدا کیفیت عالی دارند ولی مقداری پایین‌تر از BDRip است.',
+    pros: ['تصویر و صدا عالی', 'حجم متوسط'], cons: ['رسمی نیست', 'کمی پایین‌تر از BDRip'] },
+  { id: 'web-dl', name: 'WEB-DL', score: 4, src: 'سرویس استریم', badge: 'پیشنهاد فیلم تازه', cls: 'hot',
+    desc: 'یکی از مرسوم‌ترین نسخه‌ها که حین دانلود با آن مواجه می‌شوید؛ از سرویس‌های استریم آنلاین بدون انکود استخراج می‌شود، فاقد واترمارک است و کیفیت خوب دارد. معمولاً پیش از نسخه‌های دیسکی منتشر می‌شود.',
+    pros: ['بدون واترمارک', 'کیفیت خوب', 'اولین نسخهٔ قابل‌اعتماد فیلم تازه'], cons: ['کمی پایین‌تر از نسخه‌های دیسکی'] },
+  { id: 'webrip', name: 'WEBRip', score: 3.5, src: 'سرویس استریم', badge: '', cls: '',
+    desc: 'این نسخه هم از سرویس‌های آنلاین استخراج می‌شود، اما به دلیل انکود بودن کیفیتش در مقایسه با WEB-DL مقداری کاهش پیدا کرده؛ با این حال همچنان مناسب و قابل قبول است.',
+    pros: ['حجم کمتر از WEB-DL'], cons: ['انکود مجدد = افت جزئی کیفیت'] },
+  { id: 'hdtv', name: 'HDTV', score: 3, src: 'تلویزیون دیجیتال', badge: '', cls: '',
+    desc: 'از روی تلویزیون‌های دیجیتال ضبط می‌شود و به همین دلیل لوگوی شبکه و تبلیغات کنار تصویر دارد. بسیاری از سریال‌ها در این نسخه در دسترس‌اند و کیفیتش مناسب و رضایت‌بخش است.',
+    pros: ['کیفیت مناسب', 'برای سریال رایج'], cons: ['لوگوی شبکه', 'تبلیغ/زیرنویس روی تصویر'] },
+  { id: 'tvrip', name: 'TVRip', score: 2.5, src: 'تلویزیون آنالوگ', badge: '', cls: '',
+    desc: 'فیلم‌ها از روی تلویزیون با کارت کپچر و آنتن آنالوگ ضبط می‌شوند؛ به همین دلیل کیفیت پایین‌تری نسبت به HDTV دارد و این نسخه هم لوگوی شبکه و زیرنویس تبلیغاتی دارد.',
+    pros: [], cons: ['کیفیت پایین', 'لوگو و زیرنویس تبلیغاتی'] },
+  { id: 'dvdrip', name: 'DVDRip', score: 2, src: 'دیسک DVD', badge: '', cls: '',
+    desc: 'ریپ شده از روی دیسک DVD؛ کیفیت پایین دارد و معمولاً از رزولوشن 480p استفاده می‌کند.',
+    pros: ['حجم بسیار کم'], cons: ['کیفیت پایین (معمولاً 480p)'] },
+  { id: 'hdcam', name: 'HDCAM', score: 1, src: 'دوربین گوشی از سینما', badge: 'توصیه نمی‌شود', cls: 'no',
+    desc: 'معمولاً اولین نسخه‌ای است که از یک فیلم تازه منتشر می‌شود؛ با دوربین گوشی از روی پردهٔ سینما فیلم‌برداری شده و صدا هم از میکروفون گوشی است. هم تصویر پایین است و هم نویز صدای زیاد.',
+    pros: ['زودترین نسخه'], cons: ['کیفیت تصویر و صدا بسیار پایین', 'نویز و لرزش تصویر'] },
+  { id: 'hdts', name: 'HDTS', score: 1.5, src: 'سینما + صدای بهتر', badge: 'بهتر است صبر کنید', cls: 'no',
+    desc: 'مثل HDCAM است، اما صدا از منبعی با کیفیت بهتر با تصویر سینک شده. با این حال تماشای فیلم در این حالت چندان لذت‌بخش نیست؛ بهتر است تا انتشار نسخهٔ باکیفیت‌تر صبر کنید.',
+    pros: ['صدای بهتر نسبت به HDCAM'], cons: ['تصویر هنوز ضعیف', 'منتظر نسخهٔ بهتر باشید'] },
+];
+function qgSegs (score) {
+  var h = '';
+  for (var i = 1; i <= 5; i++) {
+    var f = score >= i ? 'f' : (score >= i - 0.5 ? 'h' : '');
+    h += '<i class="' + f + '"></i>';
+  }
+  return '<span class="qg-node-score" title="امتیاز: ' + score + ' از ۵">' + h + '</span>';
+}
+function qgNodeHtml (kind, n) {
+  var head = '<button class="qg-node-h" type="button" aria-expanded="false">' +
+    '<span class="qg-node-dot"></span>' +
+    '<span class="qg-node-title">' + n.name + (n.en ? '<span class="en">' + n.en + '</span>' : '') + '</span>' +
+    qgSegs(n.score) +
+    (kind === 'res' ? '<span class="qg-node-tags"><span class="qg-tag">' + n.px + '</span>' + (n.badge ? '<span class="qg-tag ' + n.cls + '">' + n.badge + '</span>' : '') + '</span>'
+      : '<span class="qg-node-tags"><span class="qg-tag">' + n.src + '</span>' + (n.badge ? '<span class="qg-tag ' + n.cls + '">' + n.badge + '</span>' : '') + '</span>') +
+    '<span class="qg-node-arr">▾</span></button>';
+  var body;
+  if (kind === 'res') {
+    body = '<p>' + n.desc + '</p><div class="row"><span class="lbl">مناسب برای:</span>' + n.best.map(function (b) { return '<span class="qg-tag">' + b + '</span>'; }).join('') + '</div>';
+  } else {
+    body = '<p>' + n.desc + '</p><div class="row"><span class="lbl">مزایا:</span>' +
+      (n.pros.length ? n.pros.map(function (b) { return '<span class="qg-tag ok">✓ ' + b + '</span>'; }).join('') : '<span class="qg-tag">—</span>') +
+      '</div><div class="row"><span class="lbl">معایب / محدودیت:</span>' +
+      n.cons.map(function (b) { return '<span class="qg-tag no">✕ ' + b + '</span>'; }).join('') + '</div>';
+  }
+  return '<li class="qg-node" id="' + kind + '-' + n.id + '"><span class="line"></span>' + head + '<div class="qg-node-b"><div class="qg-node-in">' + body + '</div></div></li>';
+}
+function qgTocHtml () {
+  function leaf (href, em, t) { return '<li class="lvl2"><a href="#' + href + '"><span class="em">' + em + '</span>' + t + '</a></li>'; }
+  var resKids = QG_RES.map(function (n) { return leaf('res-' + n.id, '◦', n.name + (n.en ? ' <span style="color:var(--tx3)">' + n.en + '</span>' : '')); }).join('');
+  var verKids = QG_VER.map(function (n) { return leaf('ver-' + n.id, '◦', n.name); }).join('');
+  return '<div class="qg-toc" id="qg-toc">' +
+    '<button class="qg-toc-h" type="button" id="qg-toc-tgl"><span>🗂 فهرست مطالب</span><span class="arr">▾</span></button>' +
+    '<div class="qg-toc-body"><ul>' +
+    '<li><a href="#res" data-spy="res"><span class="em">📐</span>رزولوشن فیلم<span class="cnt">' + QG_RES.length + '</span></a><ul>' + resKids + '</ul></li>' +
+    '<li><a href="#ver" data-spy="ver"><span class="em">🎞</span>نسخه‌های فیلم به ترتیب<span class="cnt">' + QG_VER.length + '</span></a><ul>' + verKids + '</ul></li>' +
+    '<li><a href="#enc" data-spy="enc"><span class="em">🧩</span>انکود یعنی چه؟</a></li>' +
+    '<li><a href="#x265" data-spy="x265"><span class="em">🗜</span>تفاوت x265 چیست؟</a></li>' +
+    '<li><a href="#howto" data-spy="howto"><span class="em">🔎</span>چگونه کیفیت را بفهمیم؟</a></li>' +
+    '<li><a href="#summary" data-spy="summary"><span class="em">✅</span>جمع‌بندی</a></li>' +
+    '<li><a href="#faq" data-spy="faq"><span class="em">💬</span>سوالات متداول</a></li>' +
+    '</ul></div></div>';
+}
+var QG_SPY_SECTIONS = ['res', 'ver', 'enc', 'x265', 'howto', 'summary', 'faq'];
+var QG_QUIZ = [
+  { q: 'روی چه دستگاهی تماشا می‌کنید؟', opts: [
+    { i: '📱', t: 'گوشی', v: 'phone' },
+    { i: '💻', t: 'لپ‌تاپ / کامپیوتر', v: 'pc' },
+    { i: '📺', t: 'تلویزیون', v: 'tv' }] },
+  { q: 'حجم اینترنت / فضای ذخیره چطور است؟', opts: [
+    { i: '📉', t: 'محدود (حجم کم)', v: 'low' },
+    { i: '📈', t: 'بی‌دغدغه (حجم زیاد)', v: 'ok' }] },
+  { q: 'فیلم/سریال چقدر تازه است؟', opts: [
+    { i: '🎞', t: 'قدیمی و مشهور', v: 'old' },
+    { i: '🆕', t: 'تازه منتشر شده', v: 'new' }] },
+];
+function qgQuizResult (a) {
+  var q, reason;
+  if (a[0] === 'tv') { q = a[1] === 'ok' ? '4K (2160p)' : '1080p (FHD)'; reason = a[1] === 'ok' ? 'با اینترنت خوب، 4K بهترین تجربه است؛ اگر تلویزیونتان 4K نیست، 1080p کافی است.' : 'با حجم محدود، 1080p روی تلویزیون تعادل خوبی دارد.'; }
+  else if (a[0] === 'pc') { q = a[1] === 'ok' ? '1080p (FHD)' : '720p (HD)'; reason = a[1] === 'ok' ? 'برای لپ‌تاپ و دسکتاپ، FHD بهترین انتخاب است.' : 'با حجم کم، 720p روی اکثر نمایشگرها کیفیت مناسبی دارد.'; }
+  else { q = a[1] === 'ok' ? '1080p (FHD)' : '720p (HD)'; reason = a[1] === 'ok' ? 'بهترین کیفیت برای موبایل FHD است (HD هم به‌صرفه‌تر است).' : 'برای موبایل با حجم کم، 720p انتخاب خوبی است.'; }
+  var ver = a[2] === 'old' ? 'Blu-Ray / BDRip' : 'WEB-DL';
+  var verReason = a[2] === 'old' ? 'فیلم قدیمی و مشهور معمولاً نسخهٔ Blu-Ray دارد که بهترین کیفیت است.' : 'برای فیلم تازه، نسخهٔ WEB-DL را صبر کنید و از HDCAM/HDTS پرهیز کنید.';
+  return { q: q, reason: reason, ver: ver, verReason: verReason };
+}
+function qgQuizHtml (step, answers) {
+  if (step >= QG_QUIZ.length) {
+    var r = qgQuizResult(answers);
+    return '<div class="qg-q-result"><div class="ic">🏆</div><h4>پیشنهاد ما برای شما</h4>' +
+      '<div class="rec">🎯 کیفیت: ' + r.q + '</div>' +
+      '<div class="rec" style="background:rgba(56,189,248,.12);border-color:rgba(56,189,248,.4)">📦 نسخه: ' + r.ver + '</div>' +
+      '<p>' + r.reason + ' ' + r.verReason + '</p>' +
+      '<button class="qg-q-again btn btn-ghost" type="button" id="qg-quiz-again">↺ دوباره امتحان کن</button></div>';
+  }
+  var st = QG_QUIZ[step];
+  var dots = '';
+  for (var i = 0; i < QG_QUIZ.length; i++) dots += '<span class="qg-q-dot' + (i <= step ? ' on' : '') + '"></span>';
+  var opts = st.opts.map(function (o) { return '<button class="qg-q-opt" type="button" data-v="' + o.v + '"><span>' + o.i + '</span>' + o.t + '</button>'; }).join('');
+  return '<div class="qg-q-progress">' + dots + '</div><div class="qg-q-title">' + (step + 1) + ' از ' + QG_QUIZ.length + ' — ' + st.q + '</div><div class="qg-q-opts">' + opts + '</div>' +
+    (step > 0 ? '<button class="qg-q-back" type="button" id="qg-quiz-back">→ سؤال قبل</button>' : '');
+}
+function viewQualityGuide (q) {
+  q = q || {};
+  var from = String(q.from || '').replace(/[^a-z0-9_]/g, '');
+  var hero = '<div class="qg-hero"><span class="qg-hero-kicker">❓ راهنمای کاربر</span><h1>کدوم کیفیت فیلم رو انتخاب کنم؟</h1>' +
+    '<p>هر فیلم در چندین <b>رزولوشن</b> (مثل 480p تا 4K) و چند <b>نسخه</b> (مثل Blu-Ray و WEB-DL) موجود است. با این صفحه می‌فهمید هر کدام یعنی چه و برای شما کدام بهترین انتخاب است — بدون اینکه گیج شوید.</p>' +
+    '<div class="qg-hero-chips"><span class="qg-chip">📐 <b>' + QG_RES.length + '</b> رزولوشن</span><span class="qg-chip">🎞 <b>' + QG_VER.length + '</b> نسخه</span><span class="qg-chip">⏱ در <b>۲ دقیقه</b> یاد می‌گیرید</span></div></div>';
+  var quiz = '<div class="qg-quiz"><div class="qg-quiz-h"><h3>⚡ انتخاب سریع در ۳ سؤال<span>جواب بدهید تا بهترین کیفیت و نسخه را پیشنهاد بدهیم</span></h3></div><div class="qg-quiz-body" id="qg-quiz-body">' + qgQuizHtml(0, []) + '</div></div>';
+  var toc = qgTocHtml();
+  var resSec = '<section class="qg-sec" id="res"><div class="qg-sec-h"><span class="em">📐</span><div><h2>رزولوشن فیلم</h2><small>تعداد خطوط عمودی تصویر؛ هرچه بیشتر، وضوح بالاتر</small></div><span class="cnt">' + QG_RES.length + ' قلم</span></div><div class="qg-sec-b"><ul class="qg-tree">' + QG_RES.map(function (n) { return qgNodeHtml('res', n); }).join('') + '</ul></div></section>';
+  var verSec = '<section class="qg-sec" id="ver"><div class="qg-sec-h"><span class="em">🎞</span><div><h2>نسخه‌های فیلم به ترتیب کیفیت</h2><small>از بهترین (Blu-Ray) تا ضعیف‌ترین (HDCAM) — از منبع فیلم چه می‌دانیم</small></div><span class="cnt">' + QG_VER.length + ' قلم</span></div><div class="qg-sec-b"><ul class="qg-tree">' + QG_VER.map(function (n) { return qgNodeHtml('ver', n); }).join('') + '</ul></div></section>';
+  var encSec = '<section class="qg-sec" id="enc"><div class="qg-sec-h"><span class="em">🧩</span><div><h2>انکود یعنی چه؟</h2><small>نام گروه پردازش در انتهای نام فایل</small></div></div><div class="qg-prose">وقتی در نام فیلم بعد از رزولوشن و نسخه به اسمی مثل <b>ShaAniG</b> می‌رسید، این «انکودر» نام گروهی است که فایل را پردازش کرده تا به بهترین کیفیت برسد. فیلم‌ها از منابع مختلفی استخراج می‌شوند و برای رسیدن به کیفیت مطلوب به این تنظیم (انکود) نیاز دارند. مشهورترین گروه‌ها:</div><div class="qg-prose" style="padding-top:0"><div class="qg-node-in row" style="padding:0"><span class="qg-tag hot">ShaAniG</span><span class="qg-tag hot">MkvCage</span><span class="qg-tag hot">Ganool</span><span class="qg-tag hot">PSA</span></div></div></section>';
+  var x265Sec = '<section class="qg-sec" id="x265"><div class="qg-sec-h"><span class="em">🗜</span><div><h2>تفاوت نسخه‌های x265 چیست؟</h2><small>یک کدک ویدئو و فناوری فشرده‌سازی</small></div></div><div class="qg-prose"><b>x265 (HEVC)</b> یک کدک ویدئو است که حجم فیلم را کم می‌کند و در عین حال کیفیت و گسترهٔ رنگ را مقداری بیشتر می‌کند؛ یعنی با همان کیفیت، اینترنت کمتری مصرف می‌کنید.</div><div class="qg-cards2"><div class="qg-card2"><span class="ic">✅</span><h4>مزایا</h4><p>حجم فایل کمتر، کیفیت تصویر بهتر و بازهٔ رنگی پهن‌تر نسبت به x264.</p></div><div class="qg-card2"><span class="ic">⚠️</span><h4>نکته</h4><p>برای کامپیوترهای قدیمی و گوشی‌های ضعیف توصیه نمی‌شود، چون ممکن است پخش آن‌ها را سخت کند.</p></div></div></section>';
+  var howtoSec = '<section class="qg-sec" id="howto"><div class="qg-sec-h"><span class="em">🔎</span><div><h2>چگونه کیفیت فیلم را بفهمیم؟</h2><small>در چند ثانیه رزولوشن و فریم‌ریت فایل خود را ببینید</small></div></div><ol class="qg-steps"><li><b>ویندوز:</b> روی ویدئو راست‌کلیک کنید ← <span dir="ltr">Properties</span> ← تب <span dir="ltr">Details</span>؛ رزولوشن و فریم‌ریت را ببینید.</li><li><b>اندروید:</b> در گالری فیلم را انتخاب کنید ← سه‌نقطهٔ کنار صفحه ← <span dir="ltr">Details</span>.</li><li><b>نکته:</b> رزولوشن <span dir="ltr">1920×1080</span> همان FHD است؛ حتی فیلمی با <span dir="ltr">1920×800</span> را FHD می‌نامیم، اما در صفحهٔ 16:9 نوار مشکی بالا و پایین می‌افتد.</li></ol></section>';
+  var sumSec = '<section class="qg-sec" id="summary"><div class="qg-sec-h"><span class="em">✅</span><div><h2>جمع‌بندی: یک قانون ساده</h2><small>بر اساس قدمت فیلم، بهترین نسخه را انتخاب کنید</small></div></div><div class="qg-cards2"><div class="qg-card2"><span class="ic">🎞</span><h4>فیلم قدیمی و مشهور</h4><p>احتمالاً نسخهٔ <b>Blu-Ray</b> آن موجود است و بهترین انتخاب هم همین است. اگر نبود، BDRip تقریباً فرق ندارد.</p></div><div class="qg-card2"><span class="ic">🆕</span><h4>فیلم تازه</h4><p>منتظر بمانید تا نسخهٔ <b>WEB-DL</b> در دسترس قرار بگیرد؛ پیشنهاد نمی‌کنیم قبل از آن سراغ نسخه‌های ضعیف‌تر مثل HDCAM بروید.</p></div></div></section>';
+  var faqItems = [
+    { id: 'f1', name: 'کدام کیفیت فیلم بهتر است؟', en: '', body: 'برای درک کیفیت یک فیلم باید هم به <b>رزولوشن</b> و هم به <b>نسخه</b> آن توجه کنید. مثلاً یک فیلم بلوری FHD قطعاً کیفیت بسیار خوبی دارد و یک فیلم WEB-DL با رزولوشن FHD هم همچنان خوب و مناسب است.' },
+    { id: 'f2', name: 'چگونه کیفیت فیلم را بفهمیم؟', en: '', body: 'در ویندوز روی ویدئو راست‌کلیک و وارد <span dir="ltr">Properties → Details</span> شوید. در گوشی‌های اندرویدی فیلم را در گالری انتخاب کنید و از سه‌نقطهٔ کنار صفحه وارد <span dir="ltr">Details</span> شوید.' },
+    { id: 'f3', name: 'انکود فیلم یعنی چه؟', en: '', body: 'فیلم‌ها از منابع مختلفی استخراج و در اختیار ما قرار می‌گیرند؛ به همین دلیل برای رسیدن به بهترین کیفیت به پردازش نیاز دارند و انکود یعنی تنظیم فیلم برای به‌دست‌آوردن بهترین کیفیت ممکن.' },
+  ];
+  var faqSec = '<section class="qg-sec" id="faq"><div class="qg-sec-h"><span class="em">💬</span><div><h2>سوالات متداول</h2><small>پاسخ پرسش‌های رایج</small></div><span class="cnt">' + faqItems.length + ' پرسش</span></div><div class="qg-sec-b"><ul class="qg-tree">' + faqItems.map(function (n) { return '<li class="qg-node" id="faq-' + n.id + '"><span class="line"></span><button class="qg-node-h" type="button" aria-expanded="false"><span class="qg-node-dot"></span><span class="qg-node-title">' + n.name + '</span><span class="qg-node-arr">▾</span></button><div class="qg-node-b"><div class="qg-node-in"><p>' + n.body + '</p></div></div></li>'; }).join('') + '</ul></div></section>';
+  var cta = '<div class="qg-cta">' +
+    (from ? '<a class="btn btn-primary" href="#/item/' + from + '">⬅ بازگشت به صفحهٔ دانلود</a>' : '') +
+    '<a class="btn btn-ghost" href="#/">🏠 صفحه اصلی</a></div>';
+  var main = '<div class="qg-main">' + resSec + verSec + encSec + x265Sec + howtoSec + sumSec + faqSec + '</div>';
+  return '<div class="qg">' + hero + quiz + '<div class="qg-layout">' + toc + main + '</div>' + cta + '</div>';
+}
+function bindQualityGuide (q) {
+  q = q || {};
+  /* ── باز/بسته‌کردن نودهای درختی ── */
+  $all('.qg-node-h').forEach(function (h) {
+    h.addEventListener('click', function () {
+      var node = h.closest('.qg-node');
+      var open = node.classList.toggle('open');
+      h.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  });
+  /* ── کوییز ── */
+  var body = $('#qg-quiz-body');
+  if (body) {
+    var answers = [];
+    function paint (step) { body.innerHTML = qgQuizHtml(step, answers); wire(); }
+    function wire () {
+      $all('#qg-quiz-body .qg-q-opt').forEach(function (b) {
+        b.addEventListener('click', function () {
+          answers.push(b.getAttribute('data-v'));
+          paint(answers.length);
+        });
+      });
+      var back = $('#qg-quiz-back'); if (back) back.addEventListener('click', function () { answers.pop(); paint(answers.length); });
+      var again = $('#qg-quiz-again'); if (again) again.addEventListener('click', function () { answers = []; paint(0); });
+    }
+    wire();
+  }
+  /* ── فهرست: تکی در موبایل + اسپای اسکرول ──
+     نکته: لینک‌ها preventDefault می‌خورند چون روتر صفحه هاش-محور است و
+     تغییر هاش باعث رندر مجدد (404) می‌شود؛ اسکرول با scrollIntoView است. */
+  var toc = $('#qg-toc');
+  if (toc) {
+    var tgl = $('#qg-toc-tgl');
+    if (tgl) tgl.addEventListener('click', function () { toc.classList.toggle('open'); });
+    function sectionOf (id) {
+      if (id.indexOf('res-') === 0) return 'res';
+      if (id.indexOf('ver-') === 0) return 'ver';
+      if (id.indexOf('faq-') === 0) return 'faq';
+      return ['res', 'ver', 'enc', 'x265', 'howto', 'summary', 'faq'].indexOf(id) >= 0 ? id : '';
+    }
+    $all('#qg-toc a').forEach(function (a) {
+      a.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        var id = String(a.getAttribute('href') || '').slice(1);
+        var el = document.getElementById(id);
+        if (!el) return;
+        /* اگر لینک به نود درختی بود، نود را هم باز کنیم */
+        if (id.charAt(0) !== '#' && (id.indexOf('res-') === 0 || id.indexOf('ver-') === 0 || id.indexOf('faq-') === 0)) {
+          var node = el.closest ? el.closest('.qg-node') : null;
+          if (node && !node.classList.contains('open')) node.classList.add('open');
+        }
+        try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { window.scrollTo(0, el.getBoundingClientRect().top + window.pageYOffset - 80); }
+        toc.classList.remove('open');
+        var sec = sectionOf(id);
+        $all('#qg-toc a[data-spy]').forEach(function (x) { x.classList.toggle('on', sec && x.getAttribute('data-spy') === sec); });
+      });
+    });
+    /* اسپای اسکرول: یک‌بار برای همهٔ رندرهای صفحه ثبت می‌شود */
+    if (!window.__qgSpy) {
+      var ticking = false;
+      window.__qgSpy = function () {
+        if (ticking) return; ticking = true;
+        requestAnimationFrame(function () {
+          ticking = false;
+          var cur = '';
+          for (var i = 0; i < QG_SPY_SECTIONS.length; i++) {
+            var el = document.getElementById(QG_SPY_SECTIONS[i]);
+            if (el && el.getBoundingClientRect().top <= 120) cur = QG_SPY_SECTIONS[i];
+          }
+          $all('#qg-toc a[data-spy]').forEach(function (a) { a.classList.toggle('on', a.getAttribute('data-spy') === cur); });
+        });
+      };
+      window.addEventListener('scroll', window.__qgSpy, { passive: true });
+    }
+    window.__qgSpy();
+  }
+}
 function viewAuth (q) {
   if (APP.user) {
     return '<div class="auth"><div class="auth-card"><h2>✓ شما وارد هستید</h2><p class="auth-sub">به‌عنوان «' + esc(APP.user.tgName || APP.user.username) + '»</p>' +
@@ -11247,6 +11603,11 @@ function render () {
     bindAdminNav();
     loadAdminTab(tab, r.query);
     if (r.query.edit) setTimeout(function () { openItemEdit(r.query.edit, null); }, 300);
+    return;
+  }
+  if (path === '/quality') {
+    shell(viewQualityGuide(r.query), { active: '', back: true });
+    bindQualityGuide(r.query);
     return;
   }
   shell(emptyHtml('😕', 'صفحه پیدا نشد', 'آدرس را بررسی کنید.', '<a class="btn btn-primary" href="#/">صفحه اصلی</a>'));
