@@ -6294,7 +6294,7 @@ function channelFileDetails(media, context, item) {
   const tagged = /hardsub/.test(lower) ? 'hardsub' : /softsub/.test(lower) ? 'softsub' : /dubbed|duble/.test(lower) ? 'dub' : '';
   if (tagged && tagged!==context.kind) throw new Error('نوع فایل با #نوع فعال تعارض دارد: '+name);
   return {...parsed,season:item.type==='series'?parsed.season:1,episode:item.type==='series'?parsed.episode:1,
-    title:editorVersionTitle(media,context.version,parsed.quality),sizeBytes:media.file_size || null,
+    title:editorVersionTitle(media,context.version,parsed.quality,context.kind),sizeBytes:media.file_size || null,
     contentIdentity:{version:context.version,stem:editorMediaStem(name),externalSubtitles:!!context.externalSubtitles,kind:context.kind}};
 }
 function editorSubtitleFile(media) {
@@ -6353,14 +6353,18 @@ async function attachEditorSubtitle(store,item,file,body,receipt,digest) {
   await idxUpsert(store,item);
   return json({ok:true,itemId:item.id,count:1,replayed:!!receipt,attachment:true});
 }
-function editorVersionTitle(media, version, quality) {
+function editorVersionTitle(media, version, quality, kind) {
   // Stop at the media extension: forwarded captions may have a bot signature after it.
   const name=String(media.file_name || '').split(/\.(?:mkv|mp4|avi|mov|m4v|webm)(?:\b|$)/i)[0];
   const qpos=name.search(/(?:^|[._ -])(?:2160|1080|720|480)p?(?=[._ -]|$)|(?:^|[._ -])4k(?=[._ -]|$)/i);
   const specs=(qpos>=0?name.slice(qpos):(quality || 'کیفیت نامشخص')+(quality?'p':''))
     .split(/[._ ]+/).filter(Boolean).filter(x=>!/^(farsi|persian|dubbed|duble|hardsub|softsub)$/i.test(x)).join('.');
+  /* نوع زیرنویس را در انتهای خط مشخصات می‌نویسیم تا در کانال مشخص باشد
+     فایل هاردساب است یا سافتساب (الان تگ نام فایل حذف می‌شد و چیزی نمی‌ماند). */
+  const kindTag=kind==='hardsub'?'HardSub':kind==='softsub'?'SoftSub':'';
+  const specText=kindTag ? (specs ? specs.slice(0,119)+'.'+kindTag : kindTag) : specs.slice(0,128);
   const size=Number.isSafeInteger(media.file_size)&&media.file_size>0 ? (media.file_size/1048576).toFixed(1).replace(/\.0$/,'')+' MB' : 'حجم نامشخص';
-  return String(version || 'نسخه نامشخص').slice(0,64)+' | '+specs.slice(0,128)+' | '+size;
+  return String(version || 'نسخه نامشخص').slice(0,64)+' | '+specText+' | '+size;
 }
 
 /* Integrated editorial bot. Telegram copies media; this Worker never downloads movie files. */
@@ -6938,7 +6942,7 @@ export class EditorSession {
       d.pending=file; d.phase='collect'; await this.save(d);
       return this.say(d.chat,'نیاز به بررسی: '+(file.detectedTitle || 'نام نامشخص')+'\nفصل '+(file.season ?? '؟')+'، قسمت '+(file.episode ?? '؟')+'، کیفیت '+(file.quality || '؟')+'\nاثر مقصد: '+d.item.title+'\nبرای اصلاح: /assign 1 2 1080\nاگر اطلاعات درست است: /accept\nردکردن: /skip');
     }
-    file.title=editorVersionTitle({file_name:file.fileName,file_size:file.sizeBytes},file.version,file.quality);
+    file.title=editorVersionTitle({file_name:file.fileName,file_size:file.sizeBytes},file.version,file.quality,file.kind);
     const copied=await tg(this.env,'copyMessage',{chat_id:d.vault,from_chat_id:file.inputChat,message_id:file.inputMessage});
     d.files.push({key:file.key,kind:file.kind,title:file.title,formattedTitle:true,season:d.item.type==='series'?file.season:1,episode:d.item.type==='series'?file.episode:1,
       quality:file.quality,sizeBytes:file.sizeBytes,chatId:d.vault,msgId:copied.message_id});

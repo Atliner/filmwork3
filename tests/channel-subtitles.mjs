@@ -27,6 +27,12 @@ assert.equal(details.title,'Rubixfa | 720p.WEBRip.x265.10bit.2CH.PSA | 332 MB');
 assert.equal(details.episode,1); assert.equal(details.season,1); assert.equal(details.quality,'720');
 assert.throws(()=>app.channelFileDetails({file_name:filename.replace('Silo','SiloOther')},ctx,data.get('it:i_silo')));
 assert.throws(()=>app.channelFileDetails({file_name:filename.replace('Farsi.Dubbed','HardSub')},ctx,data.get('it:i_silo')));
+// هاردساب: مثل سافتساب، نوع باید در خط مشخصات دیده شود
+const hardCtx=app.parseChannelHeader(header.replace('#نوع دوبله','#نوع هاردساب'),null,origin);
+const hardFile='Silo.S01E01.1080p.WEB-DL.6CH.HardSub.mkv';
+const hardDetails=app.channelFileDetails({file_name:hardFile,file_size:Math.round(959.5*1048576)},hardCtx,data.get('it:i_silo'));
+assert.equal(hardDetails.title,'Rubixfa | 1080p.WEB-DL.6CH.HardSub | 959.5 MB');
+
 function storageContext() {
  const values=new Map(); let alarm=null;
  return {values,storage:{get:async k=>structuredClone(values.get(k)),put:async(k,v)=>values.set(k,structuredClone(v)),delete:async k=>values.delete(k),
@@ -69,7 +75,8 @@ try {
  const variants=()=>data.get('it:i_silo').seasons[0].episodes[0].variants.sub;
  const primary=q=>variants()[q].files[0];
  assert.equal(variants()['1080'].files.length,1);
- assert.equal(primary('1080').title,'Rubixfa | 1080p.WEBRip.x265.10bit.2CH.PSA | 332 MB');
+ assert.equal(primary('1080').title,'Rubixfa | 1080p.WEBRip.x265.10bit.2CH.PSA.SoftSub | 332 MB'); // نوع سافتساب در خط مشخصات
+assert.equal(primary('720').title,'Rubixfa | 720p.WEBRip.x265.10bit.2CH.PSA.SoftSub | 332 MB');
  assert.equal(primary('1080').sizeBytes,332*1048576);
  assert.deepEqual(primary('1080').source.parts.map(p=>p.msgId),['2','4','5']);
  assert.deepEqual(primary('720').source.parts.map(p=>p.msgId),['3','6']);
