@@ -3351,9 +3351,12 @@ function posterUrlFor(entry) {
     if (/^https?:\/\//i.test(ov)) return '/img?url=' + encodeURIComponent(ov);
     return ov;
   }
-  if (entry.posterSrc) return '/img?src=' + encodeURIComponent(entry.posterSrc);
+  /* وقتی لینک پوستر خالی است، پوستر از اولین تصویر گالری IMP Awards گرفته
+     می‌شود — نه از لینک منبع t.me (فایل‌های document آنجا تصویر ندارند و
+     /img?src= برای آن‌ها ۴۰ می‌داد و پوستر خالی می‌ماند). */
   const gp = entry.galleryPoster || '';
   if (gp && /^https?:\/\//i.test(gp) && isPublicHttpUrl(gp)) return '/img?url=' + encodeURIComponent(gp);
+  if (entry.posterSrc) return '/img?src=' + encodeURIComponent(entry.posterSrc);
   return '';
 }
 
@@ -9037,6 +9040,10 @@ function posterSlidesForView (it) {
   try { main = posterSrc(it) || ''; } catch (e) { main = ''; }
   var limit = galleryLimitForView(it);
   var gallery = galleryImagesForView(it.galleryImages, limit);
+  /* وقتی لینک پوستر (صریح) خالی است و تنها منبع تصویر اصلی، لینک منبعِ
+     t.me است (برای فایل‌های document تصویر ندارد)، اولین تصویر گالری
+     IMP Awards را پوستر می‌کنیم. */
+  if (main.indexOf('/img?src=') === 0 && !(it && it.posterOverride) && gallery.length) main = '';
   function proxied (raw) {
     if (!raw) return '';
     if (raw.indexOf('/img?') === 0) return raw;
