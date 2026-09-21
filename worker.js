@@ -8841,7 +8841,6 @@ function proSearchHtml (c, q) {
     '<div class="ps-field ps-multi"><label>کشور</label>' + checkListHtml('f-country', f.countries, q.country) + '</div>' +
     '<div class="ps-field ps-multi"><label>رده سنی</label>' + checkListHtml('f-age', f.ages, q.age) + '</div>' +
     '<div class="ps-field ps-multi"><label>ژانر</label>' + checkListHtml('f-genre', f.genres, q.genre) + '</div>' +
-    '<div class="ps-field ps-multi"><label>کیفیت</label>' + checkListHtml('f-quality', f.qualities, q.quality) + '</div>' +
     '<div class="ps-field ps-multi"><label>شبکه</label>' + checkListHtml('f-net', f.networks, q.network) + '</div>' +
     '<div class="ps-field"><label>ترتیب</label><select id="f-sort">' +
     '<option value="new"' + (!q.sort || q.sort === 'new' ? ' selected' : '') + '>جدیدترین‌ها</option>' +
@@ -8874,7 +8873,6 @@ function readProQuery () {
   var country = readCheckList('f-country'); if (country) q.country = country;
   var age = readCheckList('f-age'); if (age) q.age = age;
   var genre = readCheckList('f-genre'); if (genre) q.genre = genre;
-  var quality = readCheckList('f-quality'); if (quality) q.quality = quality;
   var net = readCheckList('f-net'); if (net) q.network = net;
   var sort = $('#f-sort'); if (sort && sort.value && sort.value !== 'new') q.sort = sort.value;
   var qq = $('#f-q'); if (qq && qq.value.trim()) q.q = qq.value.trim();
@@ -8928,7 +8926,7 @@ function bindProSearch () {
       go();
     });
   });
-  ['f-country', 'f-age', 'f-genre', 'f-quality', 'f-net', 'f-sort'].forEach(function (id) {
+  ['f-country', 'f-age', 'f-genre', 'f-net', 'f-sort'].forEach(function (id) {
     var el = $('#' + id);
     if (el) el.addEventListener('change', go);
   });
