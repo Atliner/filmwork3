@@ -91,6 +91,9 @@ const ECONOMY_DEFAULTS = {
   sub6m: 450,
   sub1y: 800,
   dlClickPrice: 2,
+  /* سقف روزانهٔ دانلود برای جلوگیری از سرقت/کپی انبوه منابع (0 = نامحدود) */
+  dlDailyLimit: 20,
+  dlDailyLimitBot: 0,
   refSignupBonus: 50,
   refPurchasePercent: 1,
   starsEnabled: true,
@@ -251,6 +254,40 @@ async function getItem(store, id) {
   return item;
 }
 function bustItem(id) { memItem.delete(id); }
+/* ── نسخه عمومی محتوا (Cache API) ──
+   هر بار که اثر یا فهرست تغییر کند، catrev یک واحد جلو می‌رود و کل
+   کلیدهای کش Cache API (که catrev در نامشان است) بی‌اعتبار می‌شوند. */
+async function catRev(store) {
+  try { const v = await store.get('catrev'); return v && v.n > 0 ? v.n : 0; } catch (e) { return 0; }
+}
+async function bumpCatRev(store) {
+  try { const n = (await catRev(store)) + 1; await store.set('catrev', { n: n }, 604800); } catch (e) { }
+}
+async function publicCache() {
+  try { if (typeof caches === 'undefined' || !caches.default) return null; return caches.default; } catch (e) { return null; }
+}
+/* کش پاسخ‌های عمومی (صفحات و فهرست‌ها) با Cache API؛ فقط پاسخ 200 کش
+   می‌شود و هر خطا کش را درگیر نمی‌کند (Free-tier friendly). */
+async function cachedResponse(cache, key, ttl, gen) {
+  if (!cache) return gen();
+  try {
+    const hit = await cache.match(key);
+    if (hit) {
+      const resp = new Response(hit.body, { status: hit.status, headers: hit.headers });
+      try { resp.headers.set('x-cache', 'HIT'); } catch (e) { }
+      return resp;
+    }
+  } catch (e) { }
+  const resp = await gen();
+  if (resp && resp.status === 200) {
+    try {
+      const clone = resp.clone();
+      try { resp.headers.set('x-cache', 'MISS'); } catch (e) { }
+      cache.put(key, clone, { expirationTtl: ttl }).catch(function () { });
+    } catch (e) { }
+  }
+  return resp;
+}
 async function getIdx(store) {
   const c = memIdx.get('idx');
   if (c && Date.now() - c.t < 60000) return c.data;
@@ -293,7 +330,10 @@ function mergeSettings(s) {
     redirectMode: 'off',
     redirectSelected: '',
     widgetDomain: '',
+    /* شارد‌های D1 دور (اکانت‌های دیگر) برای تقسیم آثار؛ هر قلم: {id,url,secret} */
+    shards: [],
   }, ECONOMY_DEFAULTS, s || {});
+  if (!Array.isArray(out.shards)) out.shards = [];
   if (!Array.isArray(out.starPacks) || !out.starPacks.length) out.starPacks = ECONOMY_DEFAULTS.starPacks.slice();
   if (!Array.isArray(out.rialPacks)) out.rialPacks = [];
   if (!Array.isArray(out.starShops) || !out.starShops.length) out.starShops = (ECONOMY_DEFAULTS.starShops || []).slice();
@@ -656,12 +696,135 @@ class D1Backend {
       cursor:more?encodeURIComponent(JSON.stringify({prefix,after:page[page.length-1].key})):''};
   }
 }
-function hasDataStorage(env) { return String(env?.STORAGE_BACKEND || 'kv').toLowerCase()==='d1' ? !!env.DB?.prepare : !!env?.KV; }
+/* ═══════ معماری ذخیره‌سازی نهایی (ترکیبی / Hybrid) ═══════
+   D1 اصلی  : داده‌های ماندگار + همهٔ داده‌هایی که روزانه زیاد نوشته
+              می‌شوند: کاربران، کیف پول، تراکنش‌ها، آثار (فیلم/سریال)،
+              نسخه‌ها و لینک‌ها، شمارنده‌های روزانه، rate-limit،
+              توکن‌های موقت و آمار. (حد رایگان D1: ~۵M خوان + ۱۰۰k نوشت/روز)
+   KV        : فقط داده‌های کم‌تغییر و cache (set, res:, gallery:, ads,
+              mirrorهای قدیمی, catrev). (حد رایگان KV: ۱۰۰k خوان ولی
+              فقط ~۱k نوشت/روز — برای شمارنده و rate-limit کافی نیست!)
+   CACHE_KV  : اختیاری و جدا — فقط کش سبک؛ معماری جدید به آن نیاز ندارد
+   Durable Object: صف‌های EDITOR، retry انتشار و mirrorها (تغییرناپذیر)
+   Cache API : کش ۶۰ ثانیه‌ای صفحه/فهرست عمومی — خواندن D1 را کاهش می‌دهد
+   اگر D1 وصل نباشد یا آماده نشده باشد، همه‌چیز روی KV می‌ماند
+   (سازگاری کامل با حالت قدیم) — اگر KV نباشد، همه‌چیز روی D1. */
+const HEAVY_PREFIXES = ['u:', 'it:', 'src:', 'sub:', 'code:', 'pay:', 'refcode:', 'tg:', 'tgu:', 'ph:', 'k2k:', 'dlc:', 'bot:', 'rl:', 'views:', 'stars:', 'tick:', 'adstat:'];
+const HEAVY_KEYS = new Set(['idx']);
+function isHeavyKey (k) {
+  if (HEAVY_KEYS.has(k)) return true;
+  for (const p of HEAVY_PREFIXES) if (k.indexOf(p) === 0) return true;
+  return false;
+}
+function isHeavyPrefix (p) {
+  if (!p) return false;
+  for (const x of HEAVY_PREFIXES) if (p.indexOf(x) === 0) return true;
+  return false;
+}
+function storageMode (env) {
+  const mode = String(env?.STORAGE_BACKEND || 'kv').toLowerCase();
+  if (mode === 'd1') return 'd1';
+  if (mode === 'hybrid') return 'hybrid';
+  if (mode !== 'kv') throw storageError('STORAGE_BACKEND باید kv، hybrid یا d1 باشد');
+  return 'kv';
+}
+function hasDataStorage(env) {
+  const mode = storageMode(env);
+  if (mode === 'd1') return !!env.DB?.prepare;
+  return !!env?.KV || !!env?.DB?.prepare;
+}
 function dataBackend(env) {
-  const mode=String(env?.STORAGE_BACKEND || 'kv').toLowerCase();
-  if (mode==='d1') return new D1Backend(env.DB);
-  if (mode!=='kv') throw storageError('STORAGE_BACKEND باید kv یا d1 باشد');
+  // حالت قدیم (all-D1)؛ در حالت‌های hybrid/kv، Store خودش مسیریابی می‌کند.
+  const mode = storageMode(env);
+  if (mode === 'd1') return new D1Backend(env.DB);
   return env?.KV;
+}
+function memFallbackRead(k) {
+  return Promise.resolve().then(function () {
+    const entry = memFallback.get(k);
+    if (!entry) return null;
+    if (entry.expiresAt && entry.expiresAt <= Date.now()) { memFallback.delete(k); return null; }
+    return JSON.parse(entry.value);
+  });
+}
+
+/* ═══════ فدریشن D1: شارد‌های دور (اکانت‌های متفاوت) ═══════
+   هر شارد یک Worker کوچک «shard-proxy» روی اکانت خودش است که به یک D1
+   متصل است و رابط get/put/del/list با امضای HMAC ارائه می‌دهد.
+   آثار (it:/sub:) با hash قطعی کلید بین شارد‌ها تقسیم می‌شوند تا
+   حجم و کوته‌مردی‌های D1 اصلی پخش شوند. */
+async function sha256Hex(text) {
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text || ''));
+  return Array.from(new Uint8Array(h)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+}
+async function hmacSign(secret, method, path, bodyText, ts, nonce) {
+  const data = new TextEncoder().encode(method + '\n' + path + '\n' + (await sha256Hex(bodyText || '')) + '\n' + ts + '\n' + nonce);
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, data);
+  return Array.from(new Uint8Array(sig)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+}
+function shardHash(s) {
+  /* FNV-1a 32bit — قطعی و بدون وابستگی */
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
+  return h >>> 0;
+}
+class RemoteShard {
+  constructor(cfg) {
+    this.id = String(cfg.id || '');
+    this.url = String(cfg.url || '').replace(/\/+$/, '');
+    this.secret = String(cfg.secret || '');
+    this.fails = 0;
+    this.lastFail = 0;
+  }
+  /* شارد «سالم» است مگر اینکه ۳ شکست پشت‌سرهم در ۳۰ ثانیه اخیر داشته باشد */
+  healthy() { return this.fails < 3 || (this.lastFail && Date.now() - this.lastFail > 30000); }
+  async req(method, path, bodyObj) {
+    if (!this.url || !this.secret) throw new Error('shard-incomplete');
+    const bodyText = bodyObj ? JSON.stringify(bodyObj) : '';
+    const ts = Math.floor(Date.now() / 1000);
+    const nonce = randomHex(8);
+    const sign = await hmacSign(this.secret, method, path, bodyText, ts, nonce);
+    const controller = new AbortController();
+    const timer = setTimeout(function () { controller.abort(); }, 2500);
+    try {
+      const r = await fetch(this.url + path, {
+        method: method,
+        headers: { 'content-type': 'application/json', 'x-shard-ts': String(ts), 'x-shard-nonce': nonce, 'x-shard-sign': sign },
+        body: bodyText || undefined,
+        signal: controller.signal,
+      });
+      const j = await r.json().catch(function () { return {}; });
+      if (!r.ok) {
+        this.fails++; this.lastFail = Date.now();
+        const e = new Error(j.error || ('shard-http-' + r.status));
+        e.status = r.status;
+        throw e;
+      }
+      this.fails = 0;
+      return j;
+    } catch (e) {
+      this.fails++; this.lastFail = Date.now();
+      throw e;
+    } finally { clearTimeout(timer); }
+  }
+  async get(key) {
+    const j = await this.req('GET', '/get?k=' + encodeURIComponent(key));
+    return j.missing ? null : j.value;
+  }
+  async put(key, value, ttl) {
+    await this.req('POST', '/put', { k: key, v: typeof value === 'string' ? value : JSON.stringify(value), ttl: Math.max(0, Math.floor(Number(ttl) || 0)) });
+  }
+  async del(key) { await this.req('POST', '/del', { k: key }); }
+  async list(prefix, cursor, limit) {
+    const j = await this.req('POST', '/list', { prefix: prefix || '', cursor: cursor || '', limit: Math.max(1, Math.min(1000, Number(limit) || 1000)) });
+    return { keys: j.keys || [], cursor: j.cursor || '' };
+  }
+  async catalog() {
+    const j = await this.req('GET', '/catalog');
+    return { items: j.items || [], count: j.count || 0 };
+  }
+  async health() { return await this.req('GET', '/health'); }
 }
 async function runD1Migration(env,action) {
   if (!env.DB?.prepare || !env.KV) throw storageError('برای انتقال، هر دو اتصال KV و DB لازم‌اند');
@@ -719,19 +882,93 @@ async function runD1Migration(env,action) {
 }
 
 class Store {
-  constructor(kv, env) { this.kv = (env && kv===env.KV ? dataBackend(env) : kv) || null; this.env = env || {}; this.reads = new Map(); }
+  constructor(kv, env) {
+    this.env = env || {};
+    this.reads = new Map();
+    const mode = storageMode(this.env);
+    const sameBinding = !!(env && kv === env.KV);
+    /* حالت قدیم all-D1: همه‌چیز یک بک‌اند (D1) */
+    if (mode === 'd1') {
+      this.d1 = new D1Backend(this.env.DB);
+      this.kv = this.d1;
+      this.hybrid = false;
+      this._d1Ready = undefined;
+      this._shards = undefined;
+      return;
+    }
+    /* حالت hybrid/kv: D1 (در صورت اتصال) برای کلیدهای سنگین، KV برای بقیه.
+       اگر فراخوان بک‌اند دلخواه داده باشد (تست/مسیر legacy)، همان حفظ می‌شود. */
+    this.d1 = (this.env.DB && this.env.DB.prepare) ? new D1Backend(this.env.DB) : null;
+    this.kv = sameBinding ? this.env.KV : (kv || null);
+    this.hybrid = !!(this.d1 && this.kv);
+    this._d1Ready = undefined;
+    this._shards = undefined;
+  }
+  /* آمادگی D1 به‌صورت تنبل و یک‌بار؛ اگر انتقال D1 نهایی نشده باشد،
+     کلیدهای سنگین به KV تنزل می‌کنند (سایت نمی‌ریزد). */
+  async heavyBe() {
+    if (!this.d1) return null;
+    if (this._d1Ready === undefined) {
+      try { await this.d1.ensureReady(); this._d1Ready = true; }
+      catch (e) { this._d1Ready = false; console.warn('[storage] D1 not ready; heavy keys fall back to KV:', e && e.message); }
+    }
+    return this._d1Ready ? this.d1 : null;
+  }
+  /* بک‌اند محلی یک کلید: hybrid → D1 برای سنگین‌ها (با تنزل به KV)، بقیه KV */
+  async localBackendFor(k) {
+    if (!this.hybrid) return this.kv || null;
+    if (isHeavyKey(k)) return (await this.heavyBe()) || this.kv || null;
+    return this.kv || null;
+  }
+  /* ── فدریشن D1: کلیدهای مرتبط با آثار (it: / sub:) ممکن است روی
+     شارد دوری (D1 اکانت دیگر) باشند. مسیریابی قطعی با hash کلید؛
+     خواندن: شارد ← محلی (نسخه‌های قدیمی). نوشتن: شارد ← محلی (تنزل). */
+  async shards() {
+    if (this._shards !== undefined) return this._shards;
+    let list = [];
+    try {
+      const set = await getSettings(this);
+      list = (set.shards || [])
+        .filter(function (s) { return s && s.url && s.secret; })
+        .map(function (s) { return new RemoteShard(s); });
+    } catch (e) { list = []; }
+    this._shards = list;
+    return list;
+  }
+  shardForKey(k) {
+    if (k.indexOf('it:') !== 0 && k.indexOf('sub:') !== 0) return Promise.resolve(null);
+    return this.shards().then(function (list) { return list.length ? list[shardHash(k) % list.length] : null; });
+  }
+  async localGet(k) {
+    const be = await this.localBackendFor(k);
+    /* خواندن کلیدهای پرتکرار با cacheTtl لبه‌ای (کاهش شمارش خواندن در حد Free) */
+    return be
+      ? be.get(k, /^(tick:|tg:|tgstate:|u:|ph:)/.test(k) || k === 'set' ? { type: 'json', cacheTtl: 30 } : 'json')
+      : memFallbackRead(k);
+  }
+  async localSet(k, value, ttl) {
+    const be = await this.localBackendFor(k);
+    const opts = ttl ? { expirationTtl: Math.max(60, Math.ceil(ttl)) } : undefined;
+    if (be) await be.put(k, value, opts);
+    else memFallback.set(k, { value: value, expiresAt: ttl ? Date.now() + ttl * 1000 : 0 });
+  }
+  async localDel(k) {
+    const be = await this.localBackendFor(k);
+    if (be) await be.delete(k);
+    else memFallback.delete(k);
+  }
   async get(k) {
     // One upstream read per key per request; callers cannot mutate the cached snapshot.
     if (!this.reads.has(k)) {
-      const read = this.kv
-        ? this.kv.get(k, /^(tick:|tg:|tgstate:|u:|ph:)/.test(k) ? { type: 'json', cacheTtl: 30 } : 'json')
-        : Promise.resolve().then(function () {
-          const entry = memFallback.get(k);
-          if (!entry) return null;
-          if (entry.expiresAt && entry.expiresAt <= Date.now()) { memFallback.delete(k); return null; }
-          return JSON.parse(entry.value);
-        });
-      this.reads.set(k, Promise.resolve(read).then(function (v) { return v == null ? null : JSON.stringify(v); }));
+      const store = this;
+      const read = this.shardForKey(k).then(function (shard) {
+        if (!shard || !shard.healthy()) return store.localGet(k);
+        return shard.get(k).then(
+          function (v) { return v == null ? store.localGet(k) : v; },
+          function () { return store.localGet(k); } // شارد در دسترس نیست → نسخهٔ محلی
+        );
+      });
+      this.reads.set(k, read.then(function (v) { return v == null ? null : JSON.stringify(v); }));
     }
     try { const value = await this.reads.get(k); return value == null ? null : JSON.parse(value); }
     catch (e) { this.reads.delete(k); throw e; }
@@ -741,19 +978,23 @@ class Store {
     const value = JSON.stringify(v);
     // TTL writes must still refresh expiration, even if the value is unchanged.
     if (!ttl && this.reads.has(k) && await this.reads.get(k) === value) return;
-    if (this.kv) await this.kv.put(k, value, ttl ? { expirationTtl: Math.max(60, Math.ceil(ttl)) } : undefined);
-    else memFallback.set(k, { value: value, expiresAt: ttl ? Date.now() + ttl * 1000 : 0 });
+    const shard = await this.shardForKey(k);
+    if (shard) {
+      try { await shard.put(k, value, ttl); this.reads.set(k, Promise.resolve(value)); return; }
+      catch (e) { /* شارد در دسترس نیست → تنزل به بک‌اند اصلی */ }
+    }
+    await this.localSet(k, value, ttl);
     this.reads.set(k, Promise.resolve(value));
   }
   async del(k) {
     assertStorageWritable(this.env);
-    if (this.kv) await this.kv.delete(k);
-    else memFallback.delete(k);
+    const shard = await this.shardForKey(k);
+    if (shard) { try { await shard.del(k); } catch (e) { /* در دسترس نیست */ } }
+    await this.localDel(k);
     this.reads.set(k, Promise.resolve(null));
   }
-  async listPage(prefix, cursor, limit) {
-    limit = Math.max(1, Math.min(1000, Number(limit) || 1000));
-    if (this.kv) {
+  async kvListPage(prefix, cursor, limit) {
+    if (this.kv && this.kv.list) {
       const r = await this.kv.list({ prefix: prefix, limit: limit, ...(cursor ? { cursor: cursor } : {}) });
       return { keys: r.keys.map(function (k) { return k.name; }), cursor: r.list_complete ? '' : r.cursor };
     }
@@ -765,6 +1006,34 @@ class Store {
     keys.sort();
     const page = keys.slice(0, limit);
     return { keys: page, cursor: keys.length > limit ? page[page.length - 1] : '' };
+  }
+  async d1ListPage(prefix, cursor, limit) {
+    const be = await this.heavyBe();
+    if (!be) return { keys: [], cursor: '' };
+    const r = await be.list({ prefix: prefix, limit: limit, ...(cursor ? { cursor: cursor } : {}) });
+    return { keys: r.keys.map(function (k) { return k.name; }), cursor: r.list_complete ? '' : r.cursor };
+  }
+  async listPage(prefix, cursor, limit) {
+    limit = Math.max(1, Math.min(1000, Number(limit) || 1000));
+    if (this.hybrid) {
+      if (isHeavyPrefix(prefix)) {
+        const d1 = await this.d1ListPage(prefix, cursor, limit);
+        if (d1.keys.length || d1.cursor) return d1;
+        return await this.kvListPage(prefix, cursor, limit); // هنوز در KV است (تنزل)
+      }
+      if (prefix) return await this.kvListPage(prefix, cursor, limit); // پیشوند سبک
+      /* پیشوند خالی/مخلوط: دو فاز (اول D1، بعد KV) — cursor 'kv:' جداکننده فازها */
+      if (cursor && cursor.indexOf('kv:') === 0) return await this.kvListPage(prefix, '', limit);
+      const d1c = cursor && cursor.indexOf('d1:') === 0 ? cursor.slice(3) : '';
+      const d1 = await this.d1ListPage(prefix, d1c, limit);
+      if (!d1.cursor) {
+        if (d1.keys.length) return { keys: d1.keys, cursor: 'kv:' };
+        return await this.kvListPage(prefix, '', limit);
+      }
+      return { keys: d1.keys, cursor: 'd1:' + d1.cursor };
+    }
+    if (this.d1 && !this.kv) return await this.d1ListPage(prefix, cursor, limit);
+    return await this.kvListPage(prefix, cursor, limit);
   }
   async list(prefix) {
     const keys = [];
@@ -1782,6 +2051,7 @@ async function idxUpsert(store, item) {
   if (i >= 0) idx[i] = entry; else idx.unshift(entry);
   await store.set('idx', idx.slice(0, CONFIG.MAX_ITEMS));
   bustIdx();
+  bumpCatRev(store); // بی‌اعتبارسازی کش عمومی (Cache API)
 }
 function guessQuality(w) {
   if (!w) return '';
@@ -1958,6 +2228,8 @@ function publicEconomy(set) {
   return {
     unit: set.walletUnitName || 'سکه',
     dlClickPrice: Number(set.dlClickPrice) || 0,
+    dlDailyLimit: Math.max(0, Math.floor(Number(set.dlDailyLimit) || 0)),
+    dlDailyLimitBot: Math.max(0, Math.floor(Number(set.dlDailyLimitBot) || 0)),
     vanishSec: Number(set.vanishSec) || CONFIG.VANISH_SEC,
     refSignupBonus: Number(set.refSignupBonus) || 0,
     refPurchasePercent: Number(set.refPurchasePercent) || 0,
@@ -3962,6 +4234,43 @@ async function apiSubscribe(store, body, request) {
   return json({ ok: true, user: pubUser(fresh), wallet: fresh.wallet, subUntil: fresh.subUntil });
 }
 
+/* ═══════════════════ محدودیت دانلود روزانه (ضد سرقت/کپی انبوه) ═══════════════════ */
+
+/* روز به وقت ایران (UTC+3:30) — شمارنده هر شب به وقت تهران صفر می‌شود */
+function tlrDayStamp (ms) {
+  return new Date((ms || Date.now()) + 12600000).toISOString().slice(0, 10);
+}
+function dlCounterKey (key) { return 'dlc:' + key; }
+async function dlCounterRead(store, key) {
+  const cache = store && store.env && store.env.CACHE_KV;
+  let raw = null;
+  if (cache && cache.get) {
+    const s = await cache.get(dlCounterKey(key));
+    if (s) { try { raw = JSON.parse(s); } catch (e) { raw = null; } }
+  } else {
+    raw = await store.get(dlCounterKey(key));
+  }
+  const n = raw && typeof raw.n === 'number' ? Math.floor(raw.n) : 0;
+  return n > 0 ? n : 0;
+}
+async function dlCounterBump(store, key) {
+  const n = (await dlCounterRead(store, key)) + 1;
+  const cache = store && store.env && store.env.CACHE_KV;
+  if (cache && cache.put) await cache.put(dlCounterKey(key), JSON.stringify({ n: n }), { expirationTtl: 172800 });
+  else await store.set(dlCounterKey(key), { n: n }, 172800);
+  return n;
+}
+function dlLimitOf(set) {
+  return {
+    user: Math.max(0, Math.min(1000, Math.floor(Number(set && set.dlDailyLimit) || 0))),
+    bot: Math.max(0, Math.min(1000000, Math.floor(Number(set && set.dlDailyLimitBot) || 0))),
+  };
+}
+function dlExempt(user) {
+  // مدیر و کاربر مادام‌العمر (premium) از سقف روزانه مستثنا هستند
+  return !!(user && (user.role === 'admin' || user.role === 'premium'));
+}
+
 async function apiDlRequest(store, body, request) {
   const user = await currentUser(request, store);
   if (!user) return json({ error: 'وارد شوید' }, 401);
@@ -3981,6 +4290,25 @@ async function apiDlRequest(store, body, request) {
   }
   const fresh = await getUser(store, user.username);
   const sub = hasActiveSub(fresh);
+  /* ── محدودیت دانلود روزانه: پیش از کسر سکه بررسی می‌شود ── */
+  const limits = dlLimitOf(set);
+  const exempt = dlExempt(fresh);
+  let usedToday = 0, botUsedToday = 0;
+  if (!exempt) {
+    const day = tlrDayStamp();
+    if (limits.user > 0) {
+      usedToday = await dlCounterRead(store, fresh.username + ':' + day);
+      if (usedToday >= limits.user) {
+        return json({ error: 'سقف دانلود امروز شما (' + limits.user + ' بار) تکمیل شده است. برای جلوگیری از کپی منابع، فردا (به وقت ایران) دوباره می‌توانید دریافت کنید.', dlLimit: true, limit: limits.user, used: usedToday }, 403);
+      }
+    }
+    if (limits.bot > 0) {
+      botUsedToday = await dlCounterRead(store, 'bot:' + day);
+      if (botUsedToday >= limits.bot) {
+        return json({ error: 'سقف دانلود امروز ربات تکمیل شده است. لطفاً چند ساعت دیگر دوباره تلاش کنید.', dlLimit: true, botLimit: limits.bot }, 403);
+      }
+    }
+  }
   const price = downloadPrice(fresh, set);
   if (price > 0) {
     const d = await payFromWallet(store, fresh, price, 'download', 'دانلود: ' + (item.title || ''));
@@ -4002,6 +4330,14 @@ async function apiDlRequest(store, body, request) {
   };
   await store.set('dl:' + id, rec, 700);
 
+  /* درخواست دانلود ثبت شد؛ شمارندهٔ روزانه را (بعد از ثبت) افزایش می‌دهیم.
+     هر نسخه/فایل داخل یک درخواست، یک دانلود محسوب می‌شود. */
+  if (!exempt) {
+    const day = tlrDayStamp();
+    if (limits.user > 0) usedToday = await dlCounterBump(store, fresh.username + ':' + day);
+    if (limits.bot > 0) botUsedToday = await dlCounterBump(store, 'bot:' + day);
+  }
+
   const botLink = fileBotLink(set, 'dl_' + id);
   const out = {
     ok: true,
@@ -4012,6 +4348,8 @@ async function apiDlRequest(store, body, request) {
     vanishSec: Number(set.vanishSec) || CONFIG.VANISH_SEC,
     hasSub: sub,
     gateInfo: adGateInfo(set),
+    dlLimit: exempt ? 0 : limits.user,
+    dlUsed: exempt ? 0 : usedToday,
   };
 
   // کاربران دارای اشتراک هیچ تبلیغی نمی‌بینند
@@ -4910,6 +5248,74 @@ async function setupContentWebhook(store, request) {
   return json({ok:true,url:url});
 }
 
+async function handleShards(store, request, method) {
+  if (method === 'GET') {
+    const set = await getSettings(store);
+    const rows = [];
+    for (const s of set.shards || []) {
+      const sh = new RemoteShard(s);
+      let ok = false, latency = 0, error = '', count = 0;
+      try {
+        const t0 = Date.now();
+        const h = await sh.health();
+        latency = Date.now() - t0;
+        ok = !!h.ok;
+        count = h.count || 0;
+      } catch (e) { error = (e && e.message) || String(e); }
+      rows.push({ id: s.id, url: s.url, ok: ok, latency: latency, error: error, count: count, healthy: sh.healthy() });
+    }
+    return json({ shards: rows });
+  }
+  const body = await readBody(request, 16384);
+  const set = await getSettings(store);
+  if (body.action === 'test') {
+    const sh = new RemoteShard({ id: 'test', url: String(body.url || ''), secret: String(body.secret || '') });
+    try {
+      const t0 = Date.now();
+      const h = await sh.health();
+      return json({ ok: true, latency: Date.now() - t0, count: h.count || 0 });
+    } catch (e) { return json({ ok: false, error: (e && e.message) || String(e) }, 400); }
+  }
+  if (body.action === 'add') {
+    const id = String(body.id || '').trim();
+    const u = String(body.url || '').trim().replace(/\/+$/, '');
+    const secret = String(body.secret || '').trim();
+    if (!/^[a-z0-9_-]{2,24}$/.test(id)) throw Object.assign(new Error('شناسهٔ شارد: ۲ تا ۲۴ حرف کوچک انگلیسی/عدد/خط تیره'), { status: 400 });
+    if (!/^https:\/\//.test(u)) throw Object.assign(new Error('آدرس شارد باید با https:// شروع شود'), { status: 400 });
+    if (secret.length < 16 || secret.length > 256) throw Object.assign(new Error('رمز اشتراک باید بین ۱۶ تا ۲۵۶ نویسه باشد'), { status: 400 });
+    const list = (set.shards || []).filter(function (x) { return x.id !== id; });
+    if (list.length >= 8) throw Object.assign(new Error('حداکثر ۸ شارد مجاز است'), { status: 400 });
+    list.push({ id: id, url: u, secret: secret });
+    set.shards = list;
+    await writeSettings(store, set);
+    bumpCatRev(store);
+    return json({ ok: true, shards: list.map(function (x) { return { id: x.id, url: x.url }; }) });
+  }
+  if (body.action === 'remove') {
+    const id = String(body.id || '').trim();
+    const list = (set.shards || []).filter(function (x) { return x.id !== id; });
+    set.shards = list;
+    await writeSettings(store, set);
+    bumpCatRev(store);
+    return json({ ok: true, shards: list.map(function (x) { return { id: x.id, url: x.url }; }) });
+  }
+  throw Object.assign(new Error('عملیات نامعتبر'), { status: 400 });
+}
+async function storageStatus(store, set) {
+  let d1Ready = false;
+  try {
+    if (store.kv instanceof D1Backend) { await store.kv.ensureReady(); d1Ready = true; }
+    else d1Ready = !!(await store.heavyBe());
+  } catch (e) { d1Ready = false; }
+  return {
+    mode: storageMode(store.env),
+    hasD1: !!(store.d1 || (store.kv instanceof D1Backend)),
+    d1Ready: d1Ready,
+    hasKv: !!store.kv && !(store.kv instanceof D1Backend),
+    hasCacheKv: !!(store.env && store.env.CACHE_KV),
+    shards: (set.shards || []).map(function (x) { return { id: x.id, url: x.url }; }),
+  };
+}
 async function handleAdmin(store, url, request, adminUser) {
   const set = await getSettings(store);
   const p = url.pathname.replace(/^\/api\/admin\//, '');
@@ -4922,11 +5328,14 @@ async function handleAdmin(store, url, request, adminUser) {
     return maintenanceBatch(store, await readBody(request, 16 * 1024));
   }
 
+  if (p === 'shards' && (m === 'GET' || m === 'POST')) return handleShards(store, request, m);
+
   if (p === 'overview' && m === 'GET') {
     const users = await store.list('u:');
     const items = (await store.get('idx')) || [];
     return json({
       items: items.length, users: users.length,
+      storage: await storageStatus(store, set),
       contentBotSetup: await contentSetupStatus(store, adminUser),
       lastSyncAt: set.lastSyncAt, lastSyncLog: set.lastSyncLog,
       botSet: !!set.botToken, botFromEnv: !!set.botFromEnv, botUserFromEnv: !!set.botUserFromEnv, autoSync: !!set.autoSync,
@@ -4955,6 +5364,8 @@ async function handleAdmin(store, url, request, adminUser) {
       signupBonus: signupBonusOf(set),
       sub1m: set.sub1m, sub3m: set.sub3m, sub6m: set.sub6m, sub1y: set.sub1y,
       dlClickPrice: set.dlClickPrice, refSignupBonus: set.refSignupBonus, refPurchasePercent: set.refPurchasePercent,
+      dlDailyLimit: Math.max(0, Math.floor(Number(set.dlDailyLimit) || 0)),
+      dlDailyLimitBot: Math.max(0, Math.floor(Number(set.dlDailyLimitBot) || 0)),
       vanishSec: set.vanishSec,
       k2kEnabled: !!set.k2kEnabled,
       k2kCardNumber: set.k2kCardNumber || '',
@@ -5018,6 +5429,16 @@ async function handleAdmin(store, url, request, adminUser) {
         if (isFinite(n) && n >= 0) set[k] = n;
       }
     });
+    if (body.dlDailyLimit !== undefined) {
+      const n = Number(body.dlDailyLimit);
+      if (!Number.isSafeInteger(n) || n < 0 || n > 1000) return json({ error: 'محدودیت دانلود روزانه باید عدد صحیح بین 0 تا 1000 باشد (0 = نامحدود)' }, 400);
+      set.dlDailyLimit = n;
+    }
+    if (body.dlDailyLimitBot !== undefined) {
+      const n = Number(body.dlDailyLimitBot);
+      if (!Number.isSafeInteger(n) || n < 0 || n > 1000000) return json({ error: 'سقف دانلود روزانه ربات باید عدد صحیح بین 0 تا 1000000 باشد (0 = نامحدود)' }, 400);
+      set.dlDailyLimitBot = n;
+    }
     if (body.fileCaption !== undefined) set.fileCaption = String(body.fileCaption).slice(0, 1000);
     if (body.adEnabled !== undefined) set.adEnabled = !!body.adEnabled;
     if (body.adButtonText !== undefined) set.adButtonText = String(body.adButtonText).slice(0, 64);
@@ -5248,6 +5669,7 @@ async function handleAdmin(store, url, request, adminUser) {
     bustItem(item.id);
     const idx = await getIdx(store);
     await store.set('idx', idx.filter(function (x) { return x.id !== item.id; }));
+    bumpCatRev(store); // بی‌اعتبارسازی کش عمومی (Cache API)
     bustIdx();
     return json({ ok: true });
   }
@@ -6586,7 +7008,12 @@ async function handleApi(request, url, store, ctx) {
     });
   }
 
-  if (p === 'catalog' && m === 'GET') return await apiCatalog(store, url, request);
+  if (p === 'catalog' && m === 'GET') {
+    const cache = await publicCache();
+    const rev = await catRev(store);
+    const ckey = 'mvx:cat:' + rev + ':' + url.pathname + url.search;
+    return await cachedResponse(cache, ckey, 60, function () { return apiCatalog(store, url, request); });
+  }
 
   mm = p.match(/^item\/(i_[a-z0-9]+)$/);
   if (mm && m === 'GET') return await apiItem(store, mm[1], request);
@@ -6718,6 +7145,14 @@ export default {
         const job = maybeSetWebhook(store, set, origin).then(function () { return writeSettings(store, set); });
         if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(job);
       }
+      /* ── کش عمومی با Cache API (Free-tier friendly) ──
+         صفحهٔ HTML فقط ۶۰ ثانیه کش می‌شود و با هر تغییر محتوا (catrev)
+         بی‌اعتبار می‌شود؛ دادهٔ کاربری/پرداختی اصلاً کش نمی‌شود. */
+      if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '')) {
+        const cache = await publicCache();
+        const rev = await catRev(store);
+        return await cachedResponse(cache, 'mvx:page:' + rev, 60, function () { return htmlPage(set); });
+      }
       return htmlPage(set);
     } catch (e) {
       const st = e && e.status ? e.status : 500;
@@ -6734,6 +7169,32 @@ const APP_HTML = `<!doctype html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="utf-8">
+<script>
+/* ══ رفع باگ لودینگ مینی‌اپ در موبایل ═══════════════════════════════
+   تلگرام صفحهٔ لودینگ خود را تا زمانی که رویداد web_app_ready را از
+   مینی‌اپ دریافت نکند، بالا نگه می‌دارد. در نسخهٔ قبل این رویداد فقط
+   توسط اسکرپت telegram-web-app.js (از telegram.org) ارسال می‌شد؛ وقتی
+   آن اسکرپت در شبکهٔ موبایل کند یا در دسترس نبود، کاربر تا ابد در
+   لودینگ تلگرام می‌ماند (مگر تاچ/رفرش شانسی آن را برمی‌گرداند).
+   حالا با اولین بایت‌های صفحه — حتی قبل از بقیهٔ HTML/CSS/JS —
+   رویداد آماده‌شدن را می‌فرستیم تا لودینگ تلگرام فوراً برداشته شود.
+   (همان کاری که WebApp.ready() از SDK رسمی انجام می‌دهد.) */
+(function () {
+  'use strict';
+  try { window.__mvxT0 = Date.now(); } catch (e) { }
+  function mvxSendReady () {
+    var payload = { event: 'web_app_ready' };
+    try {
+      if (window.parent && window.parent !== window) window.parent.postMessage(payload, '*');
+      else window.postMessage(payload, '*');
+    } catch (e) { }
+    try { if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.ready) window.Telegram.WebApp.ready(); } catch (e2) { }
+  }
+  mvxSendReady();
+  // اگر SDK رسمی تلگرام زودتر از حد انتظار بارگذاری شده بود، یک‌بار دیگر اطمینان می‌گیریم
+  setTimeout(mvxSendReady, 1500);
+})();
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="mvx-version" content="v3.50">
 <meta name="theme-color" content="#0b0e14">
@@ -7396,10 +7857,128 @@ button.dp-slide{cursor:zoom-in}
 }
 @media(prefers-reduced-motion:reduce){.hero-track{transition:none}}
 
+/* ═══════════════════ راهنمای انتخاب کیفیت فیلم (Quality Guide) ═══════════════════ */
+.qg{max-width:1100px;margin:0 auto;padding:18px 16px calc(90px + env(safe-area-inset-bottom,0px))}
+.qg-sec,.qg-node{scroll-margin-top:calc(var(--hdr-h) + env(safe-area-inset-top,0px) + 16px)}
+.qg-hero{position:relative;overflow:hidden;border:1px solid var(--glass-line);border-radius:var(--rad);padding:30px 22px 26px;margin-bottom:16px;background:radial-gradient(120% 160% at 85% -20%,rgba(255,122,26,.22),transparent 55%),radial-gradient(90% 140% at 0% 120%,rgba(56,189,248,.10),transparent 55%),var(--card);box-shadow:var(--shadow)}
+.qg-hero:after{content:"🎬";position:absolute;inset-inline-start:-14px;bottom:-30px;font-size:120px;opacity:.07;transform:rotate(-8deg);pointer-events:none}
+.qg-hero-kicker{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:800;color:var(--acc2);background:var(--acc-soft);border:1px solid rgba(255,176,31,.3);padding:5px 12px;border-radius:999px;margin-bottom:12px}
+.qg-hero h1{font-size:clamp(21px,4.5vw,30px);font-weight:900;line-height:1.45;margin-bottom:8px}
+.qg-hero p{color:var(--tx2);font-size:14px;line-height:2;max-width:640px}
+.qg-hero-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.qg-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--tx2);background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;padding:6px 12px}
+.qg-chip b{color:var(--tx);font-weight:800}
+/* ── کوییز سریع ── */
+.qg-quiz{border:1px solid var(--glass-line);border-radius:var(--rad);background:var(--card);margin-bottom:16px;overflow:hidden;box-shadow:var(--shadow)}
+.qg-quiz-h{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;background:linear-gradient(135deg,rgba(255,122,26,.14),rgba(255,176,31,.06));border-bottom:1px solid var(--glass-line)}
+.qg-quiz-h h3{font-size:15.5px;font-weight:900}
+.qg-quiz-h h3 span{display:block;font-size:12px;color:var(--tx3);font-weight:600;margin-top:2px}
+.qg-quiz-body{padding:18px}
+.qg-q-progress{display:flex;align-items:center;gap:6px;margin-bottom:14px}
+.qg-q-dot{width:8px;height:8px;border-radius:999px;background:var(--glass-line-2);transition:all .25s}
+.qg-q-dot.on{width:22px;background:var(--grad)}
+.qg-q-title{font-size:16px;font-weight:900;margin-bottom:12px}
+.qg-q-opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.qg-q-opt{display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 10px;border:1px solid var(--glass-line);border-radius:var(--rad-s);background:var(--glass);font-size:13.5px;font-weight:700;transition:all .15s}
+.qg-q-opt span{font-size:26px}
+.qg-q-opt:hover,.qg-q-opt:focus{border-color:rgba(255,122,26,.6);background:var(--acc-soft);transform:translateY(-2px)}
+.qg-q-back{margin-top:12px;font-size:12.5px;color:var(--tx3);font-weight:700;padding:6px 14px;border:1px solid var(--glass-line);border-radius:999px}
+.qg-q-back:hover{color:var(--tx2);border-color:var(--glass-line-2)}
+.qg-q-result{text-align:center;padding:6px 0}
+.qg-q-result .ic{font-size:44px;margin-bottom:8px}
+.qg-q-result h4{font-size:19px;font-weight:900;margin-bottom:4px}
+.qg-q-result .rec{display:inline-flex;align-items:center;gap:8px;margin:10px 0;padding:10px 18px;border-radius:999px;background:var(--acc-soft);border:1px solid rgba(255,176,31,.4);font-size:15px;font-weight:900}
+.qg-q-result p{color:var(--tx2);font-size:13.5px;line-height:2;max-width:520px;margin:8px auto 0}
+.qg-q-again{margin-top:14px;display:inline-flex}
+/* ── چیدمان دو ستونه: فهرست درختی + محتوا ── */
+.qg-layout{display:grid;grid-template-columns:270px minmax(0,1fr);gap:16px;align-items:start}
+.qg-toc{position:sticky;top:calc(var(--hdr-h) + env(safe-area-inset-top,0px) + 14px);border:1px solid var(--glass-line);border-radius:var(--rad);background:var(--card);padding:14px 12px;max-height:calc(100dvh - var(--hdr-h) - env(safe-area-inset-top,0px) - 90px);overflow-y:auto}
+.qg-toc-h{display:none;align-items:center;justify-content:space-between;width:100%;padding:6px 8px;border-radius:10px;font-size:14px;font-weight:900}
+.qg-toc-h:active{background:var(--glass)}
+.qg-toc-h .arr{transition:transform .25s;color:var(--tx3)}
+.qg-toc.open .qg-toc-h .arr{transform:rotate(180deg)}
+.qg-toc ul{list-style:none}
+.qg-toc li{margin:2px 0}
+.qg-toc a,.qg-toc .tgl{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:10px;font-size:13px;font-weight:700;color:var(--tx2);transition:all .13s;width:100%}
+.qg-toc a:hover{color:var(--tx);background:var(--glass)}
+.qg-toc a.on{color:#fff;background:var(--acc-soft);box-shadow:inset 0 0 0 1px rgba(255,176,31,.35)}
+.qg-toc .lvl2{margin-inline-start:18px;border-inline-start:1px solid var(--line);padding-inline-start:4px}
+.qg-toc .lvl2 a{font-size:12px;font-weight:600;padding:5px 9px}
+.qg-toc .em{font-size:15px;flex:0 0 auto}
+.qg-toc .tgl .cnt{margin-inline-start:auto;font-size:10.5px;color:var(--tx3);background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;padding:1px 8px}
+.qg-main{min-width:0}
+/* ── بخش‌ها ── */
+.qg-sec{border:1px solid var(--glass-line);border-radius:var(--rad);background:var(--card);margin-bottom:16px;overflow:hidden}
+.qg-sec-h{display:flex;align-items:center;gap:10px;padding:16px 18px;border-bottom:1px solid var(--glass-line);background:linear-gradient(180deg,rgba(255,255,255,.025),transparent)}
+.qg-sec-h .em{font-size:20px}
+.qg-sec-h h2{font-size:16.5px;font-weight:900}
+.qg-sec-h small{display:block;font-size:12px;color:var(--tx3);font-weight:600;margin-top:2px}
+.qg-sec-h .cnt{margin-inline-start:auto;font-size:11px;font-weight:800;color:var(--acc2);background:var(--acc-soft);border-radius:999px;padding:4px 10px;white-space:nowrap}
+.qg-sec-b{padding:8px 10px 14px}
+/* ── نودهای درختی ── */
+.qg-tree{list-style:none}
+.qg-node{position:relative;margin:4px 0}
+.qg-node .line{position:absolute;inset-inline-start:19px;top:0;bottom:-4px;width:1px;background:var(--line)}
+.qg-node:last-child .line{bottom:auto;height:26px}
+.qg-node-h{display:flex;align-items:center;gap:10px;width:100%;text-align:start;padding:12px 12px 12px 14px;border:1px solid transparent;border-radius:var(--rad-s);background:transparent;transition:all .14s;position:relative}
+.qg-node-h:hover{background:var(--glass);border-color:var(--glass-line)}
+.qg-node.open .qg-node-h{background:var(--glass);border-color:var(--glass-line)}
+.qg-node-dot{flex:0 0 14px;height:14px;border-radius:999px;border:2px solid var(--acc);background:var(--bg);position:relative;z-index:1}
+.qg-node-dot:after{content:"";position:absolute;inset:3px;border-radius:999px;background:var(--acc);opacity:0;transition:opacity .2s}
+.qg-node.open .qg-node-dot:after{opacity:1}
+.qg-node-title{font-size:14px;font-weight:800;min-width:0}
+.qg-node-title .en{font-size:11px;color:var(--tx3);font-weight:700;margin-inline-start:6px;direction:ltr;unicode-bidi:embed}
+.qg-node-tags{display:flex;flex-wrap:wrap;gap:5px;margin-inline-start:auto;flex:0 1 auto;justify-content:flex-end}
+.qg-tag{font-size:10.5px;font-weight:800;border-radius:999px;padding:3px 9px;white-space:nowrap;background:var(--glass);border:1px solid var(--glass-line);color:var(--tx2)}
+.qg-tag.hot{color:#fff;background:linear-gradient(135deg,#ff5f2e,#ffb01f);border-color:transparent}
+.qg-tag.ok{color:var(--ok);background:rgba(61,220,132,.1);border-color:rgba(61,220,132,.3)}
+.qg-tag.no{color:var(--err);background:rgba(255,84,112,.1);border-color:rgba(255,84,112,.3)}
+.qg-tag.mid{color:var(--warn);background:rgba(255,197,61,.1);border-color:rgba(255,197,61,.3)}
+.qg-node-score{flex:0 0 auto;display:flex;gap:2.5px;direction:ltr}
+.qg-node-score i{width:14px;height:5px;border-radius:3px;background:var(--glass-line-2)}
+.qg-node-score i.f{background:var(--grad)}
+.qg-node-score i.h{background:linear-gradient(135deg,#ff5f2e66,#ffb01f66)}
+.qg-node-arr{flex:0 0 auto;color:var(--tx3);transition:transform .22s;font-size:12px}
+.qg-node.open .qg-node-arr{transform:rotate(180deg)}
+.qg-node-b{max-height:0;overflow:hidden;transition:max-height .3s ease}
+.qg-node.open .qg-node-b{max-height:640px}
+.qg-node-in{padding:2px 16px 14px 40px;color:var(--tx2);font-size:13.5px;line-height:2}
+.qg-node-in .row{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.qg-node-in .row .lbl{font-size:11.5px;font-weight:800;color:var(--tx3);width:100%;margin-bottom:2px}
+.qg-node-in .px{font-size:11px;color:var(--tx3);font-weight:700}
+/* ── کارت‌های ساده ── */
+.qg-prose{padding:16px 18px;color:var(--tx2);font-size:14px;line-height:2.1}
+.qg-prose b{color:var(--tx)}
+.qg-cards2{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:16px}
+.qg-card2{border:1px solid var(--glass-line);border-radius:var(--rad-s);background:var(--glass);padding:16px}
+.qg-card2 .ic{font-size:26px;margin-bottom:8px;display:block}
+.qg-card2 h4{font-size:14.5px;font-weight:900;margin-bottom:6px}
+.qg-card2 p{font-size:13px;color:var(--tx2);line-height:1.95}
+.qg-steps{list-style:none;counter-reset:st;margin:0 18px 16px}
+.qg-steps li{counter-increment:st;position:relative;padding:12px 46px 12px 16px;border:1px solid var(--glass-line);border-radius:var(--rad-s);background:var(--glass);margin-bottom:10px;font-size:13.5px;line-height:2;color:var(--tx2)}
+.qg-steps li:before{content:counter(st);position:absolute;top:12px;inset-inline-start:12px;width:26px;height:26px;border-radius:999px;background:var(--grad);color:#131313;font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center}
+.qg-steps li b{color:var(--tx)}
+/* ── CTA پایین صفحه ── */
+.qg-cta{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;padding:6px 0 10px}
+.qg-cta .btn{max-width:100%}
+/* ── لینک راهنما داخل باکس دانلود ── */
+.q-guide-link{margin-bottom:12px;padding-bottom:12px;border-bottom:1px dashed var(--glass-line)}
+.q-guide-link a{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:800;color:var(--acc2);padding:7px 13px;border:1px solid rgba(255,176,31,.35);border-radius:999px;background:var(--acc-soft);transition:all .15s}
+.q-guide-link a:hover{background:rgba(255,176,31,.22);transform:translateY(-1px)}
+@media(max-width:860px){
+  .qg-layout{grid-template-columns:1fr}
+  .qg-toc{position:static;max-height:none}
+  .qg-toc-h{display:flex}
+  .qg-toc-body{display:none}
+  .qg-toc.open .qg-toc-body{display:block}
+  .qg-toc ul{margin-top:8px}
+  .qg-cards2{grid-template-columns:1fr}
+  .qg-node-tags{flex-basis:100%;justify-content:flex-start;margin:6px 0 0 24px}
+}
 </style>
 </head>
 <body>
-<div id="app"><div style="text-align:center;padding-top:40px"><div class="spin"></div><div style="color:var(--tx3);font-size:13px;margin-top:12px">در حال بارگذاری…</div></div></div>
+<div id="app"><div style="text-align:center;padding-top:40px"><div style="font-size:24px;font-weight:900;margin-bottom:16px">@@SITE@@</div><div class="spin"></div><div style="color:var(--tx3);font-size:13px;margin-top:12px">در حال بارگذاری…</div></div></div>
 <div id="toasts"></div>
 <div id="modal-root"></div>
 <script>
@@ -7416,6 +7995,56 @@ var NL = String.fromCharCode(10);
 var APP = { user: null, tg: null, catalog: null, siteName: '@@SITE@@', tagline: '@@TAG@@', economy: { unit: 'سکه', dlClickPrice: 2, plans: {}, botUsername: '' } };
 var TG = (window.Telegram && window.Telegram.WebApp) || null;
 var TG_READY = false;
+
+/* ══ مینی‌اپ تلگرام بدون وابستگی به telegram.org ═════════════════════
+   اسکرپت رسمی SDK (telegram-web-app.js) از دامنهٔ telegram.org لود می‌شود.
+   در بسیاری از شبکه‌های موبایل این دامنه کند یا در دسترس نیست و بدون آن
+   نه WebApp.initData (برای ورود خودکار) در دسترس است و نه WebApp.ready()
+   صدا زده می‌شود — یعنی دقیقاً همان باگ لودینگ جاخوردگی.
+   بنابراین initData را خودمان از URL می‌خوانیم و اگر SDK رسمی تا چند ثانیه
+   نیامد، یک shim سبک داخلی جایگزین می‌شود که همهٔ امکانات موردنیاز سایت
+   (ready/expand/openTelegramLink/BackButton/Haptic) را — هر چند ساده —
+   تأمین می‌کند. اگر SDK رسمی بارگذاری شد، خودکار جای shim را می‌گیرد. */
+function tgInitDataFromUrl () {
+  function grab (qs) {
+    if (!qs) return '';
+    try {
+      var p = new URLSearchParams(qs.charAt(0) === '#' ? qs.slice(1) : qs);
+      return p.get('tgWebAppData') || '';
+    } catch (e) { return ''; }
+  }
+  return grab(location.search) || grab(location.hash);
+}
+function buildTgFallback () {
+  var raw = tgInitDataFromUrl();
+  var un = {};
+  try { new URLSearchParams(raw).forEach(function (v, k) { un[k] = v; }); } catch (e) { }
+  var noop = function () { };
+  return {
+    initData: raw,
+    initDataUnsafe: un,
+    colorScheme: 'dark',
+    ready: function () {
+      var payload = { event: 'web_app_ready' };
+      try {
+        if (window.parent && window.parent !== window) window.parent.postMessage(payload, '*');
+        else window.postMessage(payload, '*');
+      } catch (e) { }
+    },
+    expand: noop,
+    close: noop,
+    setHeaderColor: noop,
+    setBackgroundColor: noop,
+    disableVerticalSwipes: noop,
+    onEvent: noop,
+    offEvent: noop,
+    openTelegramLink: function (url) { try { location.assign(String(url)); } catch (e) { } },
+    HapticFeedback: { impactOccurred: noop, notificationOccurred: noop, selectionChanged: noop },
+    BackButton: { show: noop, hide: noop, onClick: noop, offClick: noop },
+    MainButton: { show: noop, hide: noop, setText: noop, onClick: noop, offClick: noop },
+    __fallback: true
+  };
+}
 var __bootErr = null;
 function captureErr (msg) { if (!__bootErr && msg) __bootErr = String(msg); }
 window.addEventListener('error', function (e) {
@@ -7632,6 +8261,42 @@ function bindLoginResume () {
   document.addEventListener('click', function () { if (getTick() && !APP.user) peekLoginTicket(true); }, true);
 }
 bindLoginResume();
+/* ══ «تاچ = ادامهٔ بارگذاری» ══════════════════════════════════════════
+   تا پیش از این، اگر بارگذاری اولیه در موبایل گیر می‌کرد، تاچ کاربر
+   «شانسی» باعث می‌شد سایت بالا بیاید. حالا هر تاچ اول وقتی هنوز صفحه
+   اولیهٔ «در حال بارگذاری» نمایش داده می‌شود، به‌طور قطع یا بارگذاری را
+   از سر می‌گیرد یا (در صورت خطای ثبت‌شده) صفحه را تازه می‌کند. */
+function bindBootKick () {
+  if (window.__bootKickBound) return;
+  window.__bootKickBound = true;
+  function kick () {
+    window.removeEventListener('pointerdown', kick);
+    window.removeEventListener('touchstart', kick);
+    window.removeEventListener('click', kick);
+    try {
+      var app = document.getElementById('app');
+      if (!app || app.innerHTML.indexOf('در حال بارگذاری') < 0) return;
+      if (Date.now() - (window.__mvxT0 || Date.now()) < 4000) return;
+      if (__bootErr) { location.reload(); return; }
+      api('/me').then(function (r) {
+        if (document.getElementById('app').innerHTML.indexOf('در حال بارگذاری') < 0) return;
+        if (r.user) APP.user = r.user;
+        if (r.site) { APP.siteName = r.site.siteName; APP.tagline = r.site.tagline || APP.tagline; }
+        if (r.economy) APP.economy = r.economy;
+        applySiteBranding();
+        render();
+      }).catch(function () { });
+    } catch (e) { }
+  }
+  try {
+    window.addEventListener('pointerdown', kick, { once: true, capture: true });
+    window.addEventListener('touchstart', kick, { once: true, capture: true });
+    window.addEventListener('click', kick, { once: true, capture: true });
+  } catch (e) { }
+}
+/* اسکرپت اصلی همین حالا (پیش از DOMContentLoaded) اجرا می‌شود، پس تاچ‌گیر را
+   همین‌جا فعال می‌کنیم — حتی اگر ادامهٔ بارگذاری/بوت دیر برسد. */
+bindBootKick();
 function api (path, opts) {
   opts = opts || {};
   var hd = { 'Content-Type': 'application/json' };
@@ -8664,21 +9329,29 @@ function viewItem (data, id) {
     ? '<section class="d-sec"><div class="d-sec-h">عوامل ' + (isSeries ? 'سریال' : 'فیلم') + ' ' + esc(tFa) + '</div><div class="people">' + directors.map(function (d) { return personHtml(d, 'کارگردان'); }).join('') + '</div></section>'
     : '';
 
+  var dlLim = Number((APP.economy && APP.economy.dlDailyLimit) || 0);
+  var dlExempt = !!(APP.user && (APP.user.role === 'admin' || APP.user.role === 'premium'));
+  var dlLimitLine = '';
+  if (dlLim > 0 && !dlExempt) {
+    dlLimitLine = '<br>🔒 برای جلوگیری از کپی منابع، هر کاربر حداکثر <b>' + faNum(dlLim) + ' دانلود در روز</b> (به وقت ایران) دارد.';
+  }
   var note = '<div class="note">🛡 پخش آنلاین وجود ندارد. فایل فقط داخل ربات ارسال می‌شود و بعد از <b>' + faNum(vanish) + ' ثانیه</b> پاک می‌گردد.' +
     (data.hasSub
-      ? '<br>👑 اشتراک فعال — دانلود نامحدود، بدون کسر سکه.'
+      ? '<br>👑 اشتراک فعال — بدون کسر سکه.' + (dlLim > 0 && !dlExempt ? ' (سقف روزانه: ' + faNum(dlLim) + ' دانلود)' : ' دانلود نامحدود.')
       : (price > 0
-        ? '<br>بدون اشتراک، هر دانلود <b>' + faMoney(price) + ' ' + unitName() + '</b> از کیف پول. با اشتراک، دانلود نامحدود و بدون کسر سکه است.'
+        ? '<br>بدون اشتراک، هر دانلود <b>' + faMoney(price) + ' ' + unitName() + '</b> از کیف پول.' + (dlLim > 0 && !dlExempt ? ' با اشتراک، کسر سکه حذف می‌شود؛ سقف روزانه برای همه یکسان است.' : ' با اشتراک، دانلود نامحدود و بدون کسر سکه است.')
         : '')) +
+    dlLimitLine +
     '</div>';
   var lockNote = '';
   if (APP.user && !canPlay) lockNote = '<div class="note">👑 این اثر ویژهٔ مشترکین است. <a href="#/subscribe" style="color:var(--acc2);font-weight:800">خرید اشتراک</a> · <a href="#/wallet" style="color:var(--acc2);font-weight:800">کیف پول</a></div>';
 
+  var qgLink = '<div class="q-guide-link"><a href="#/quality?from=' + id + '">❓ نمی‌دونم کدوم کیفیت رو انتخاب کنم؟</a></div>';
   var dlPanel;
   if (isSeries) {
-    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 دانلود سریال' + (live ? ' <small>' + esc(liveText) + '</small>' : '') + '</div><div class="season-bar" id="season-bar"></div><div class="eps" id="ep-list"></div></div>';
+    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 دانلود سریال' + (live ? ' <small>' + esc(liveText) + '</small>' : '') + '</div>' + qgLink + '<div class="season-bar" id="season-bar"></div><div class="eps" id="ep-list"></div></div>';
   } else {
-    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 انتخاب کیفیت دانلود</div>' + trackTabsHtml('track-tabs', 'sub') + '<div id="q-row-wrap"></div></div>';
+    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 انتخاب کیفیت دانلود</div>' + qgLink + trackTabsHtml('track-tabs', 'sub') + '<div id="q-row-wrap"></div></div>';
   }
   var related = '';
   if (data.related && data.related.length) {
@@ -8838,6 +9511,38 @@ function showAdThen (res, done) {
   }, 1000);
 }
 
+/* پس از ثبت درخواست دانلود: علاوه بر باز کردن چت ربات دریافت، یک مودال
+   تأیید ماندگار داخل مینی‌اپ نشان می‌دهیم — چون وقتی کاربر از پیش در چتِ
+   ربات دریافت باشد، openTelegramLink هیچ حرکتی در صفحه ایجاد نمی‌کند
+   (مینی‌اپ جمع هم نمی‌شود) و کاربر فکر می‌کرد ارسال نشده است.
+   حالا در هر دو حالت، کاربر داخل مینی‌اپ می‌بیند فایل راه است. */
+function showDlBot (botLink, r) {
+  r = r || {};
+  var html =
+    '<div style="text-align:center;padding:8px 2px 2px">' +
+      '<div style="font-size:46px;line-height:1.15">📥</div>' +
+      '<p style="font-size:16px;font-weight:800;margin:10px 0 4px">درخواست دانلود شما ثبت شد ✓</p>' +
+      '<p class="note" style="margin:0 0 6px">فایل به چتِ <b>ربات دریافت</b> ارسال می‌شود.</p>' +
+      '<p class="note" style="margin:0 0 14px">اگر چت باز نشد، روی دکمهٔ پایین بزنید؛ اگر همین حالا در چت ربات هستید، فایل <b>همان‌جا</b> می‌رسد — بالای چت را بررسی کنید.</p>' +
+      '<div class="adm-row" style="justify-content:center;gap:8px;flex-wrap:wrap">' +
+        '<button type="button" class="btn btn-primary" id="dlbot-open">باز کردن ربات دریافت 🤖</button>' +
+        '<button type="button" class="btn btn-ghost" id="dlbot-copy">📋 کپی لینک</button>' +
+      '</div>' +
+      '<p class="note" style="margin:14px 0 2px" dir="ltr"><code style="word-break:break-all">' + esc(botLink) + '</code></p>' +
+      '<p class="note" style="margin:10px 0 0">⏳ این درخواست حدود ۱۰ دقیقه اعتبار دارد؛ اگر فایل نرسید، دوباره از سایت دکمهٔ دریافت را بزنید.</p>' +
+    '</div>';
+  openModal('فایل شما در راه است', html, function (wrap) {
+    var bOpen = $('#dlbot-open', wrap);
+    if (bOpen) bOpen.addEventListener('click', function () { openBot(botLink); });
+    var bCopy = $('#dlbot-copy', wrap);
+    if (bCopy) bCopy.addEventListener('click', function () { copyText(botLink, function () { toast('لینک کپی شد ✓', 'ok'); }); });
+  });
+  /* اگر کاربر در چت ربات دریافت نیست، همین حالا آن را باز می‌کنیم
+     (رفتار قبلی حفظ می‌شود و مینی‌اپ جمع می‌شود). اگر در چت باشد،
+     چیزی دیده نمی‌شود — اما مودال باز مانده و کاربر آگاه است. */
+  setTimeout(function () { openBot(botLink); }, 300);
+}
+
 function requestDownload (itemId, opts, btn) {
   opts = opts || {};
   if (!APP.user) { nav('#/auth'); return; }
@@ -8852,13 +9557,17 @@ function requestDownload (itemId, opts, btn) {
       ? (faMoney(r.charged) + ' ' + unitName() + ' کسر شد.')
       : (r.unlimited ? 'اشتراک فعال — بدون کسر سکه.' : '');
     if (chargeMsg) toast(chargeMsg, 'ok');
+    if (Number(r.dlLimit) > 0 && r.dlUsed != null) {
+      var left = Math.max(0, Number(r.dlLimit) - Number(r.dlUsed));
+      if (left <= 3) toast('🔒 امروز ' + faNum(left) + ' دانلود دیگر برایتان مانده است (سقف روزانه: ' + faNum(r.dlLimit) + ')', 'err');
+    }
 
     closeModal();
     if (r.needAd && r.ad) {
-      showAdThen(r, function (g) { openBot(g.botLink); });
+      showAdThen(r, function (g) { showDlBot(g.botLink, g); });
       return;
     }
-    openBot(r.botLink);
+    showDlBot(r.botLink, r);
   }).catch(function (e) {
     release();
     if (e.data && e.data.needWallet) { toast('موجودی کافی نیست', 'err'); nav('#/wallet'); return; }
@@ -9038,6 +9747,243 @@ function shareOrCopy (it) {
 }
 
 /* ═══════════ ورود با تلگرام ═══════════ */
+/* ═══════════════ راهنمای انتخاب کیفیت فیلم (صفحهٔ /quality) ═══════════════ */
+var QG_RES = [
+  { id: '480p', name: '480p', en: 'SD', score: 2, px: '854×480', badge: '', cls: '',
+    desc: 'معمولاً کمترین وضوحي که می‌توان برای فیلم و سریال دانلود کرد. کیفیت تصویر خیلی خوب نیست، اما حجم ویدئوها بسیار پایین است و فقط برای گوشی‌ها یا در صورت کم بودن اینترنت پیشنهاد می‌شود.',
+    best: ['گوشی‌های کم‌وضوح', 'اینترنت/حجم خیلی محدود'] },
+  { id: '720p', name: '720p', en: 'HD', score: 3, px: '1280×720', badge: 'به‌صرفه', cls: 'ok',
+    desc: 'بهترین رزولوشن وقتی حجم اینترنت کم است. ویدئوهای HD روی نمایشگرهای FHD هم کیفیت مناسبی دارند؛ برای گوشی/لپ‌تاپ با وضوح HD یا وقتی می‌خواهید حجم کمی مصرف کنید مناسب است.',
+    best: ['گوشی/لپ‌تاپ HD', 'مصرف حجم کم'] },
+  { id: '1080p', name: '1080p', en: 'FHD', score: 4, px: '1920×1080', badge: 'مرسوم‌ترین', cls: 'hot',
+    desc: 'مرسوم‌ترین رزولوشن با بیشترین سازگاری با دستگاه‌ها؛ کیفیت تصویر بسیار خوب در کنار حجم مناسب. برای تلویزیون و لپ‌تاپ بهترین انتخاب است و حتی برای موبایل هم FHD (و HD) بهترین کیفیت محسوب می‌شود.',
+    best: ['تلویزیون', 'لپ‌تاپ/دسکتاپ', 'موبایل'] },
+  { id: '1440p', name: '1440p', en: 'QHD', score: 4, px: '2560×1440', badge: '', cls: '',
+    desc: 'وضوحی دو برابر FHD که بین FHD و 4K قرار می‌گیرد؛ روی برخی نمایشگرهای گوشی و لپ‌تاپ (مثل مک‌بوک ایر M1 و گلکسی S22 اولترا) استاندارد است. برای نمایشگرهای QHD یا 4K پیشنهاد می‌شود.',
+    best: ['نمایشگر QHD', 'نمایشگر 4K'] },
+  { id: '2160p', name: '2160p', en: '4K', score: 5, px: '3840×2160', badge: 'بالاترین مرسوم', cls: 'ok',
+    desc: 'وضوح چهار برابر FHD که بهترین کیفیت مرسوم در جهان است؛ اما حجم فیلم‌ها بسیار بالاست. فقط در صورت داشتن تلویزیون یا مانیتور 4K پیشنهاد می‌شود.',
+    best: ['تلویزیون 4K', 'مانیتور 4K'] },
+  { id: '4320p', name: '4320p', en: '8K', score: 5, px: '7680×4320', badge: 'نادر', cls: 'mid',
+    desc: 'نمایشگرهای خیلی کمی در جهان با این وضوح وجود دارند و بسیاری از فیلم‌ها حداکثر نسخهٔ 4K دارند؛ بنابراین نسخهٔ 8K آن‌ها به‌دلیل شایع نبودن معمولاً قابل دانلود نیست.',
+    best: ['نمایشگرهای 8K (بسیار نادر)'] },
+];
+var QG_VER = [
+  { id: 'blu-ray', name: 'Blu-Ray', score: 5, src: 'دیسک بلوری', badge: 'بالاترین کیفیت', cls: 'hot',
+    desc: 'بالاترین کیفیت فیلم ممکن؛ از ریپ کردن دیسک Blu-Ray به دست می‌آید. فریم‌ریت بسیار بالا و حجم بالاتر. تماشای آن روی تلویزیون و نمایشگرهای بزرگ بسیار لذت‌بخش است و در صورت امکان پیشنهاد می‌شود.',
+    pros: ['بالاترین کیفیت تصویر و صدا', 'فریم‌ریت بالا'], cons: ['حجم بسیار بالا', 'برای همهٔ آثار موجود نیست'] },
+  { id: 'bdrip', name: 'BDRip', score: 5, src: 'دیسک بلوری', badge: 'تقریباً مثل بلوری', cls: 'ok',
+    desc: 'بهترین کیفیتی که برای پخش خانگی تولید می‌شود؛ از نظر کیفیت تفاوت زیادی با Blu-Ray ندارد، فقط فریم‌ریت پایین‌تر و حجم کمتری دارد. در عمل احتمالاً تفاوتی بین این دو احساس نخواهید کرد.',
+    pros: ['کیفیت تقریباً مساوی بلوری', 'حجم کمتر از بلوری'], cons: ['فریم‌ریت کمی پایین‌تر'] },
+  { id: 'brrip', name: 'BRRip', score: 4, src: 'نسخهٔ بومی کاربران', badge: '', cls: '',
+    desc: 'به‌صورت رسمی توسط سازنده منتشر نمی‌شود؛ کاربران حرفه‌ای آن را از روی نسخهٔ BDRip استخراج می‌کنند. تصویر و صدا کیفیت عالی دارند ولی مقداری پایین‌تر از BDRip است.',
+    pros: ['تصویر و صدا عالی', 'حجم متوسط'], cons: ['رسمی نیست', 'کمی پایین‌تر از BDRip'] },
+  { id: 'web-dl', name: 'WEB-DL', score: 4, src: 'سرویس استریم', badge: 'پیشنهاد فیلم تازه', cls: 'hot',
+    desc: 'یکی از مرسوم‌ترین نسخه‌ها که حین دانلود با آن مواجه می‌شوید؛ از سرویس‌های استریم آنلاین بدون انکود استخراج می‌شود، فاقد واترمارک است و کیفیت خوب دارد. معمولاً پیش از نسخه‌های دیسکی منتشر می‌شود.',
+    pros: ['بدون واترمارک', 'کیفیت خوب', 'اولین نسخهٔ قابل‌اعتماد فیلم تازه'], cons: ['کمی پایین‌تر از نسخه‌های دیسکی'] },
+  { id: 'webrip', name: 'WEBRip', score: 3.5, src: 'سرویس استریم', badge: '', cls: '',
+    desc: 'این نسخه هم از سرویس‌های آنلاین استخراج می‌شود، اما به دلیل انکود بودن کیفیتش در مقایسه با WEB-DL مقداری کاهش پیدا کرده؛ با این حال همچنان مناسب و قابل قبول است.',
+    pros: ['حجم کمتر از WEB-DL'], cons: ['انکود مجدد = افت جزئی کیفیت'] },
+  { id: 'hdtv', name: 'HDTV', score: 3, src: 'تلویزیون دیجیتال', badge: '', cls: '',
+    desc: 'از روی تلویزیون‌های دیجیتال ضبط می‌شود و به همین دلیل لوگوی شبکه و تبلیغات کنار تصویر دارد. بسیاری از سریال‌ها در این نسخه در دسترس‌اند و کیفیتش مناسب و رضایت‌بخش است.',
+    pros: ['کیفیت مناسب', 'برای سریال رایج'], cons: ['لوگوی شبکه', 'تبلیغ/زیرنویس روی تصویر'] },
+  { id: 'tvrip', name: 'TVRip', score: 2.5, src: 'تلویزیون آنالوگ', badge: '', cls: '',
+    desc: 'فیلم‌ها از روی تلویزیون با کارت کپچر و آنتن آنالوگ ضبط می‌شوند؛ به همین دلیل کیفیت پایین‌تری نسبت به HDTV دارد و این نسخه هم لوگوی شبکه و زیرنویس تبلیغاتی دارد.',
+    pros: [], cons: ['کیفیت پایین', 'لوگو و زیرنویس تبلیغاتی'] },
+  { id: 'dvdrip', name: 'DVDRip', score: 2, src: 'دیسک DVD', badge: '', cls: '',
+    desc: 'ریپ شده از روی دیسک DVD؛ کیفیت پایین دارد و معمولاً از رزولوشن 480p استفاده می‌کند.',
+    pros: ['حجم بسیار کم'], cons: ['کیفیت پایین (معمولاً 480p)'] },
+  { id: 'hdcam', name: 'HDCAM', score: 1, src: 'دوربین گوشی از سینما', badge: 'توصیه نمی‌شود', cls: 'no',
+    desc: 'معمولاً اولین نسخه‌ای است که از یک فیلم تازه منتشر می‌شود؛ با دوربین گوشی از روی پردهٔ سینما فیلم‌برداری شده و صدا هم از میکروفون گوشی است. هم تصویر پایین است و هم نویز صدای زیاد.',
+    pros: ['زودترین نسخه'], cons: ['کیفیت تصویر و صدا بسیار پایین', 'نویز و لرزش تصویر'] },
+  { id: 'hdts', name: 'HDTS', score: 1.5, src: 'سینما + صدای بهتر', badge: 'بهتر است صبر کنید', cls: 'no',
+    desc: 'مثل HDCAM است، اما صدا از منبعی با کیفیت بهتر با تصویر سینک شده. با این حال تماشای فیلم در این حالت چندان لذت‌بخش نیست؛ بهتر است تا انتشار نسخهٔ باکیفیت‌تر صبر کنید.',
+    pros: ['صدای بهتر نسبت به HDCAM'], cons: ['تصویر هنوز ضعیف', 'منتظر نسخهٔ بهتر باشید'] },
+];
+function qgSegs (score) {
+  var h = '';
+  for (var i = 1; i <= 5; i++) {
+    var f = score >= i ? 'f' : (score >= i - 0.5 ? 'h' : '');
+    h += '<i class="' + f + '"></i>';
+  }
+  return '<span class="qg-node-score" title="امتیاز: ' + score + ' از ۵">' + h + '</span>';
+}
+function qgNodeHtml (kind, n) {
+  var head = '<button class="qg-node-h" type="button" aria-expanded="false">' +
+    '<span class="qg-node-dot"></span>' +
+    '<span class="qg-node-title">' + n.name + (n.en ? '<span class="en">' + n.en + '</span>' : '') + '</span>' +
+    qgSegs(n.score) +
+    (kind === 'res' ? '<span class="qg-node-tags"><span class="qg-tag">' + n.px + '</span>' + (n.badge ? '<span class="qg-tag ' + n.cls + '">' + n.badge + '</span>' : '') + '</span>'
+      : '<span class="qg-node-tags"><span class="qg-tag">' + n.src + '</span>' + (n.badge ? '<span class="qg-tag ' + n.cls + '">' + n.badge + '</span>' : '') + '</span>') +
+    '<span class="qg-node-arr">▾</span></button>';
+  var body;
+  if (kind === 'res') {
+    body = '<p>' + n.desc + '</p><div class="row"><span class="lbl">مناسب برای:</span>' + n.best.map(function (b) { return '<span class="qg-tag">' + b + '</span>'; }).join('') + '</div>';
+  } else {
+    body = '<p>' + n.desc + '</p><div class="row"><span class="lbl">مزایا:</span>' +
+      (n.pros.length ? n.pros.map(function (b) { return '<span class="qg-tag ok">✓ ' + b + '</span>'; }).join('') : '<span class="qg-tag">—</span>') +
+      '</div><div class="row"><span class="lbl">معایب / محدودیت:</span>' +
+      n.cons.map(function (b) { return '<span class="qg-tag no">✕ ' + b + '</span>'; }).join('') + '</div>';
+  }
+  return '<li class="qg-node" id="' + kind + '-' + n.id + '"><span class="line"></span>' + head + '<div class="qg-node-b"><div class="qg-node-in">' + body + '</div></div></li>';
+}
+function qgTocHtml () {
+  function leaf (href, em, t) { return '<li class="lvl2"><a href="#' + href + '"><span class="em">' + em + '</span>' + t + '</a></li>'; }
+  var resKids = QG_RES.map(function (n) { return leaf('res-' + n.id, '◦', n.name + (n.en ? ' <span style="color:var(--tx3)">' + n.en + '</span>' : '')); }).join('');
+  var verKids = QG_VER.map(function (n) { return leaf('ver-' + n.id, '◦', n.name); }).join('');
+  return '<div class="qg-toc" id="qg-toc">' +
+    '<button class="qg-toc-h" type="button" id="qg-toc-tgl"><span>🗂 فهرست مطالب</span><span class="arr">▾</span></button>' +
+    '<div class="qg-toc-body"><ul>' +
+    '<li><a href="#res" data-spy="res"><span class="em">📐</span>رزولوشن فیلم<span class="cnt">' + QG_RES.length + '</span></a><ul>' + resKids + '</ul></li>' +
+    '<li><a href="#ver" data-spy="ver"><span class="em">🎞</span>نسخه‌های فیلم به ترتیب<span class="cnt">' + QG_VER.length + '</span></a><ul>' + verKids + '</ul></li>' +
+    '<li><a href="#enc" data-spy="enc"><span class="em">🧩</span>انکود یعنی چه؟</a></li>' +
+    '<li><a href="#x265" data-spy="x265"><span class="em">🗜</span>تفاوت x265 چیست؟</a></li>' +
+    '<li><a href="#howto" data-spy="howto"><span class="em">🔎</span>چگونه کیفیت را بفهمیم؟</a></li>' +
+    '<li><a href="#summary" data-spy="summary"><span class="em">✅</span>جمع‌بندی</a></li>' +
+    '<li><a href="#faq" data-spy="faq"><span class="em">💬</span>سوالات متداول</a></li>' +
+    '</ul></div></div>';
+}
+var QG_SPY_SECTIONS = ['res', 'ver', 'enc', 'x265', 'howto', 'summary', 'faq'];
+var QG_QUIZ = [
+  { q: 'روی چه دستگاهی تماشا می‌کنید؟', opts: [
+    { i: '📱', t: 'گوشی', v: 'phone' },
+    { i: '💻', t: 'لپ‌تاپ / کامپیوتر', v: 'pc' },
+    { i: '📺', t: 'تلویزیون', v: 'tv' }] },
+  { q: 'حجم اینترنت / فضای ذخیره چطور است؟', opts: [
+    { i: '📉', t: 'محدود (حجم کم)', v: 'low' },
+    { i: '📈', t: 'بی‌دغدغه (حجم زیاد)', v: 'ok' }] },
+  { q: 'فیلم/سریال چقدر تازه است؟', opts: [
+    { i: '🎞', t: 'قدیمی و مشهور', v: 'old' },
+    { i: '🆕', t: 'تازه منتشر شده', v: 'new' }] },
+];
+function qgQuizResult (a) {
+  var q, reason;
+  if (a[0] === 'tv') { q = a[1] === 'ok' ? '4K (2160p)' : '1080p (FHD)'; reason = a[1] === 'ok' ? 'با اینترنت خوب، 4K بهترین تجربه است؛ اگر تلویزیونتان 4K نیست، 1080p کافی است.' : 'با حجم محدود، 1080p روی تلویزیون تعادل خوبی دارد.'; }
+  else if (a[0] === 'pc') { q = a[1] === 'ok' ? '1080p (FHD)' : '720p (HD)'; reason = a[1] === 'ok' ? 'برای لپ‌تاپ و دسکتاپ، FHD بهترین انتخاب است.' : 'با حجم کم، 720p روی اکثر نمایشگرها کیفیت مناسبی دارد.'; }
+  else { q = a[1] === 'ok' ? '1080p (FHD)' : '720p (HD)'; reason = a[1] === 'ok' ? 'بهترین کیفیت برای موبایل FHD است (HD هم به‌صرفه‌تر است).' : 'برای موبایل با حجم کم، 720p انتخاب خوبی است.'; }
+  var ver = a[2] === 'old' ? 'Blu-Ray / BDRip' : 'WEB-DL';
+  var verReason = a[2] === 'old' ? 'فیلم قدیمی و مشهور معمولاً نسخهٔ Blu-Ray دارد که بهترین کیفیت است.' : 'برای فیلم تازه، نسخهٔ WEB-DL را صبر کنید و از HDCAM/HDTS پرهیز کنید.';
+  return { q: q, reason: reason, ver: ver, verReason: verReason };
+}
+function qgQuizHtml (step, answers) {
+  if (step >= QG_QUIZ.length) {
+    var r = qgQuizResult(answers);
+    return '<div class="qg-q-result"><div class="ic">🏆</div><h4>پیشنهاد ما برای شما</h4>' +
+      '<div class="rec">🎯 کیفیت: ' + r.q + '</div>' +
+      '<div class="rec" style="background:rgba(56,189,248,.12);border-color:rgba(56,189,248,.4)">📦 نسخه: ' + r.ver + '</div>' +
+      '<p>' + r.reason + ' ' + r.verReason + '</p>' +
+      '<button class="qg-q-again btn btn-ghost" type="button" id="qg-quiz-again">↺ دوباره امتحان کن</button></div>';
+  }
+  var st = QG_QUIZ[step];
+  var dots = '';
+  for (var i = 0; i < QG_QUIZ.length; i++) dots += '<span class="qg-q-dot' + (i <= step ? ' on' : '') + '"></span>';
+  var opts = st.opts.map(function (o) { return '<button class="qg-q-opt" type="button" data-v="' + o.v + '"><span>' + o.i + '</span>' + o.t + '</button>'; }).join('');
+  return '<div class="qg-q-progress">' + dots + '</div><div class="qg-q-title">' + (step + 1) + ' از ' + QG_QUIZ.length + ' — ' + st.q + '</div><div class="qg-q-opts">' + opts + '</div>' +
+    (step > 0 ? '<button class="qg-q-back" type="button" id="qg-quiz-back">→ سؤال قبل</button>' : '');
+}
+function viewQualityGuide (q) {
+  q = q || {};
+  var from = String(q.from || '').replace(/[^a-z0-9_]/g, '');
+  var hero = '<div class="qg-hero"><span class="qg-hero-kicker">❓ راهنمای کاربر</span><h1>کدوم کیفیت فیلم رو انتخاب کنم؟</h1>' +
+    '<p>هر فیلم در چندین <b>رزولوشن</b> (مثل 480p تا 4K) و چند <b>نسخه</b> (مثل Blu-Ray و WEB-DL) موجود است. با این صفحه می‌فهمید هر کدام یعنی چه و برای شما کدام بهترین انتخاب است — بدون اینکه گیج شوید.</p>' +
+    '<div class="qg-hero-chips"><span class="qg-chip">📐 <b>' + QG_RES.length + '</b> رزولوشن</span><span class="qg-chip">🎞 <b>' + QG_VER.length + '</b> نسخه</span><span class="qg-chip">⏱ در <b>۲ دقیقه</b> یاد می‌گیرید</span></div></div>';
+  var quiz = '<div class="qg-quiz"><div class="qg-quiz-h"><h3>⚡ انتخاب سریع در ۳ سؤال<span>جواب بدهید تا بهترین کیفیت و نسخه را پیشنهاد بدهیم</span></h3></div><div class="qg-quiz-body" id="qg-quiz-body">' + qgQuizHtml(0, []) + '</div></div>';
+  var toc = qgTocHtml();
+  var resSec = '<section class="qg-sec" id="res"><div class="qg-sec-h"><span class="em">📐</span><div><h2>رزولوشن فیلم</h2><small>تعداد خطوط عمودی تصویر؛ هرچه بیشتر، وضوح بالاتر</small></div><span class="cnt">' + QG_RES.length + ' قلم</span></div><div class="qg-sec-b"><ul class="qg-tree">' + QG_RES.map(function (n) { return qgNodeHtml('res', n); }).join('') + '</ul></div></section>';
+  var verSec = '<section class="qg-sec" id="ver"><div class="qg-sec-h"><span class="em">🎞</span><div><h2>نسخه‌های فیلم به ترتیب کیفیت</h2><small>از بهترین (Blu-Ray) تا ضعیف‌ترین (HDCAM) — از منبع فیلم چه می‌دانیم</small></div><span class="cnt">' + QG_VER.length + ' قلم</span></div><div class="qg-sec-b"><ul class="qg-tree">' + QG_VER.map(function (n) { return qgNodeHtml('ver', n); }).join('') + '</ul></div></section>';
+  var encSec = '<section class="qg-sec" id="enc"><div class="qg-sec-h"><span class="em">🧩</span><div><h2>انکود یعنی چه؟</h2><small>نام گروه پردازش در انتهای نام فایل</small></div></div><div class="qg-prose">وقتی در نام فیلم بعد از رزولوشن و نسخه به اسمی مثل <b>ShaAniG</b> می‌رسید، این «انکودر» نام گروهی است که فایل را پردازش کرده تا به بهترین کیفیت برسد. فیلم‌ها از منابع مختلفی استخراج می‌شوند و برای رسیدن به کیفیت مطلوب به این تنظیم (انکود) نیاز دارند. مشهورترین گروه‌ها:</div><div class="qg-prose" style="padding-top:0"><div class="qg-node-in row" style="padding:0"><span class="qg-tag hot">ShaAniG</span><span class="qg-tag hot">MkvCage</span><span class="qg-tag hot">Ganool</span><span class="qg-tag hot">PSA</span></div></div></section>';
+  var x265Sec = '<section class="qg-sec" id="x265"><div class="qg-sec-h"><span class="em">🗜</span><div><h2>تفاوت نسخه‌های x265 چیست؟</h2><small>یک کدک ویدئو و فناوری فشرده‌سازی</small></div></div><div class="qg-prose"><b>x265 (HEVC)</b> یک کدک ویدئو است که حجم فیلم را کم می‌کند و در عین حال کیفیت و گسترهٔ رنگ را مقداری بیشتر می‌کند؛ یعنی با همان کیفیت، اینترنت کمتری مصرف می‌کنید.</div><div class="qg-cards2"><div class="qg-card2"><span class="ic">✅</span><h4>مزایا</h4><p>حجم فایل کمتر، کیفیت تصویر بهتر و بازهٔ رنگی پهن‌تر نسبت به x264.</p></div><div class="qg-card2"><span class="ic">⚠️</span><h4>نکته</h4><p>برای کامپیوترهای قدیمی و گوشی‌های ضعیف توصیه نمی‌شود، چون ممکن است پخش آن‌ها را سخت کند.</p></div></div></section>';
+  var howtoSec = '<section class="qg-sec" id="howto"><div class="qg-sec-h"><span class="em">🔎</span><div><h2>چگونه کیفیت فیلم را بفهمیم؟</h2><small>در چند ثانیه رزولوشن و فریم‌ریت فایل خود را ببینید</small></div></div><ol class="qg-steps"><li><b>ویندوز:</b> روی ویدئو راست‌کلیک کنید ← <span dir="ltr">Properties</span> ← تب <span dir="ltr">Details</span>؛ رزولوشن و فریم‌ریت را ببینید.</li><li><b>اندروید:</b> در گالری فیلم را انتخاب کنید ← سه‌نقطهٔ کنار صفحه ← <span dir="ltr">Details</span>.</li><li><b>نکته:</b> رزولوشن <span dir="ltr">1920×1080</span> همان FHD است؛ حتی فیلمی با <span dir="ltr">1920×800</span> را FHD می‌نامیم، اما در صفحهٔ 16:9 نوار مشکی بالا و پایین می‌افتد.</li></ol></section>';
+  var sumSec = '<section class="qg-sec" id="summary"><div class="qg-sec-h"><span class="em">✅</span><div><h2>جمع‌بندی: یک قانون ساده</h2><small>بر اساس قدمت فیلم، بهترین نسخه را انتخاب کنید</small></div></div><div class="qg-cards2"><div class="qg-card2"><span class="ic">🎞</span><h4>فیلم قدیمی و مشهور</h4><p>احتمالاً نسخهٔ <b>Blu-Ray</b> آن موجود است و بهترین انتخاب هم همین است. اگر نبود، BDRip تقریباً فرق ندارد.</p></div><div class="qg-card2"><span class="ic">🆕</span><h4>فیلم تازه</h4><p>منتظر بمانید تا نسخهٔ <b>WEB-DL</b> در دسترس قرار بگیرد؛ پیشنهاد نمی‌کنیم قبل از آن سراغ نسخه‌های ضعیف‌تر مثل HDCAM بروید.</p></div></div></section>';
+  var faqItems = [
+    { id: 'f1', name: 'کدام کیفیت فیلم بهتر است؟', en: '', body: 'برای درک کیفیت یک فیلم باید هم به <b>رزولوشن</b> و هم به <b>نسخه</b> آن توجه کنید. مثلاً یک فیلم بلوری FHD قطعاً کیفیت بسیار خوبی دارد و یک فیلم WEB-DL با رزولوشن FHD هم همچنان خوب و مناسب است.' },
+    { id: 'f2', name: 'چگونه کیفیت فیلم را بفهمیم؟', en: '', body: 'در ویندوز روی ویدئو راست‌کلیک و وارد <span dir="ltr">Properties → Details</span> شوید. در گوشی‌های اندرویدی فیلم را در گالری انتخاب کنید و از سه‌نقطهٔ کنار صفحه وارد <span dir="ltr">Details</span> شوید.' },
+    { id: 'f3', name: 'انکود فیلم یعنی چه؟', en: '', body: 'فیلم‌ها از منابع مختلفی استخراج و در اختیار ما قرار می‌گیرند؛ به همین دلیل برای رسیدن به بهترین کیفیت به پردازش نیاز دارند و انکود یعنی تنظیم فیلم برای به‌دست‌آوردن بهترین کیفیت ممکن.' },
+  ];
+  var faqSec = '<section class="qg-sec" id="faq"><div class="qg-sec-h"><span class="em">💬</span><div><h2>سوالات متداول</h2><small>پاسخ پرسش‌های رایج</small></div><span class="cnt">' + faqItems.length + ' پرسش</span></div><div class="qg-sec-b"><ul class="qg-tree">' + faqItems.map(function (n) { return '<li class="qg-node" id="faq-' + n.id + '"><span class="line"></span><button class="qg-node-h" type="button" aria-expanded="false"><span class="qg-node-dot"></span><span class="qg-node-title">' + n.name + '</span><span class="qg-node-arr">▾</span></button><div class="qg-node-b"><div class="qg-node-in"><p>' + n.body + '</p></div></div></li>'; }).join('') + '</ul></div></section>';
+  var cta = '<div class="qg-cta">' +
+    (from ? '<a class="btn btn-primary" href="#/item/' + from + '">⬅ بازگشت به صفحهٔ دانلود</a>' : '') +
+    '<a class="btn btn-ghost" href="#/">🏠 صفحه اصلی</a></div>';
+  var main = '<div class="qg-main">' + resSec + verSec + encSec + x265Sec + howtoSec + sumSec + faqSec + '</div>';
+  return '<div class="qg">' + hero + quiz + '<div class="qg-layout">' + toc + main + '</div>' + cta + '</div>';
+}
+function bindQualityGuide (q) {
+  q = q || {};
+  /* ── باز/بسته‌کردن نودهای درختی ── */
+  $all('.qg-node-h').forEach(function (h) {
+    h.addEventListener('click', function () {
+      var node = h.closest('.qg-node');
+      var open = node.classList.toggle('open');
+      h.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  });
+  /* ── کوییز ── */
+  var body = $('#qg-quiz-body');
+  if (body) {
+    var answers = [];
+    function paint (step) { body.innerHTML = qgQuizHtml(step, answers); wire(); }
+    function wire () {
+      $all('#qg-quiz-body .qg-q-opt').forEach(function (b) {
+        b.addEventListener('click', function () {
+          answers.push(b.getAttribute('data-v'));
+          paint(answers.length);
+        });
+      });
+      var back = $('#qg-quiz-back'); if (back) back.addEventListener('click', function () { answers.pop(); paint(answers.length); });
+      var again = $('#qg-quiz-again'); if (again) again.addEventListener('click', function () { answers = []; paint(0); });
+    }
+    wire();
+  }
+  /* ── فهرست: تکی در موبایل + اسپای اسکرول ──
+     نکته: لینک‌ها preventDefault می‌خورند چون روتر صفحه هاش-محور است و
+     تغییر هاش باعث رندر مجدد (404) می‌شود؛ اسکرول با scrollIntoView است. */
+  var toc = $('#qg-toc');
+  if (toc) {
+    var tgl = $('#qg-toc-tgl');
+    if (tgl) tgl.addEventListener('click', function () { toc.classList.toggle('open'); });
+    function sectionOf (id) {
+      if (id.indexOf('res-') === 0) return 'res';
+      if (id.indexOf('ver-') === 0) return 'ver';
+      if (id.indexOf('faq-') === 0) return 'faq';
+      return ['res', 'ver', 'enc', 'x265', 'howto', 'summary', 'faq'].indexOf(id) >= 0 ? id : '';
+    }
+    $all('#qg-toc a').forEach(function (a) {
+      a.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        var id = String(a.getAttribute('href') || '').slice(1);
+        var el = document.getElementById(id);
+        if (!el) return;
+        /* اگر لینک به نود درختی بود، نود را هم باز کنیم */
+        if (id.charAt(0) !== '#' && (id.indexOf('res-') === 0 || id.indexOf('ver-') === 0 || id.indexOf('faq-') === 0)) {
+          var node = el.closest ? el.closest('.qg-node') : null;
+          if (node && !node.classList.contains('open')) node.classList.add('open');
+        }
+        try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { window.scrollTo(0, el.getBoundingClientRect().top + window.pageYOffset - 80); }
+        toc.classList.remove('open');
+        var sec = sectionOf(id);
+        $all('#qg-toc a[data-spy]').forEach(function (x) { x.classList.toggle('on', sec && x.getAttribute('data-spy') === sec); });
+      });
+    });
+    /* اسپای اسکرول: یک‌بار برای همهٔ رندرهای صفحه ثبت می‌شود */
+    if (!window.__qgSpy) {
+      var ticking = false;
+      window.__qgSpy = function () {
+        if (ticking) return; ticking = true;
+        requestAnimationFrame(function () {
+          ticking = false;
+          var cur = '';
+          for (var i = 0; i < QG_SPY_SECTIONS.length; i++) {
+            var el = document.getElementById(QG_SPY_SECTIONS[i]);
+            if (el && el.getBoundingClientRect().top <= 120) cur = QG_SPY_SECTIONS[i];
+          }
+          $all('#qg-toc a[data-spy]').forEach(function (a) { a.classList.toggle('on', a.getAttribute('data-spy') === cur); });
+        });
+      };
+      window.addEventListener('scroll', window.__qgSpy, { passive: true });
+    }
+    window.__qgSpy();
+  }
+}
 function viewAuth (q) {
   if (APP.user) {
     return '<div class="auth"><div class="auth-card"><h2>✓ شما وارد هستید</h2><p class="auth-sub">به‌عنوان «' + esc(APP.user.tgName || APP.user.username) + '»</p>' +
@@ -9433,19 +10379,25 @@ function openK2kInvoice(inv) {
 function viewSubscribe () {
   if (!APP.user) return emptyHtml('👑', 'وارد نشده‌اید', 'برای خرید اشتراک ابتدا وارد شوید.', '<a class="btn btn-primary" href="#/auth">ورود با تلگرام</a>');
   var plans = (APP.economy && APP.economy.plans) || {};
+  var lim = Number((APP.economy && APP.economy.dlDailyLimit) || 0);
+  var exempt = (APP.user.role === 'admin' || APP.user.role === 'premium');
+  var dlWord = (lim > 0 && !exempt) ? ('دانلود رایگان تا ' + faNum(lim) + ' بار در روز') : 'دانلود نامحدود';
   var items = [
-    ['1m', 'یک‌ماهه', '۳۰ روز دانلود نامحدود بدون کسر سکه'],
-    ['3m', 'سه‌ماهه', '۹۰ روز دانلود نامحدود — به‌صرفه‌تر'],
-    ['6m', 'شش‌ماهه', '۱۸۰ روز دانلود نامحدود'],
-    ['1y', 'یک‌ساله', '۳۶۵ روز دانلود نامحدود — بهترین قیمت']
+    ['1m', 'یک‌ماهه', '۳۰ روز ' + dlWord + ' بدون کسر سکه'],
+    ['3m', 'سه‌ماهه', '۹۰ روز ' + dlWord + ' — به‌صرفه‌تر'],
+    ['6m', 'شش‌ماهه', '۱۸۰ روز ' + dlWord],
+    ['1y', 'یک‌ساله', '۳۶۵ روز ' + dlWord + ' — بهترین قیمت']
   ];
   var cards = items.map(function (p) {
     var price = Number(plans[p[0]]) || 0;
     return '<div class="plan"><h4>' + p[1] + '</h4><div class="pr">' + faMoney(price) + ' <span style="font-size:13px;font-weight:600">' + unitName() + '</span></div><div class="ds">' + p[2] + '</div>' +
       '<button class="btn btn-primary btn-block" data-plan="' + p[0] + '">خرید از کیف پول</button></div>';
   }).join('');
+  var subDesc = (lim > 0 && !exempt)
+    ? ('با اشتراک، همهٔ فیلم‌ها و سریال‌ها را بدون کسر سکه دانلود می‌کنید (سقف روزانه برای همه کاربران: ' + faNum(lim) + ' دانلود، به وقت ایران). سکه فقط از کاربران بدون اشتراک بابت هر دانلود کم می‌شود. خودِ اشتراک از کیف پول پرداخت می‌شود.')
+    : 'با اشتراک، همهٔ فیلم‌ها و سریال‌ها را نامحدود و بدون کسر سکه دانلود می‌کنید. سکه فقط از کاربران بدون اشتراک بابت هر دانلود کم می‌شود. خودِ اشتراک از کیف پول پرداخت می‌شود.';
   return '<div class="acc"><h2 style="font-size:20px;font-weight:900;margin-bottom:8px">👑 اشتراک</h2>' +
-    '<p style="color:var(--tx2);font-size:13.5px;margin-bottom:16px">با اشتراک، همهٔ فیلم‌ها و سریال‌ها را نامحدود و بدون کسر سکه دانلود می‌کنید. سکه فقط از کاربران بدون اشتراک بابت هر دانلود کم می‌شود. خودِ اشتراک از کیف پول پرداخت می‌شود.</p>' +
+    '<p style="color:var(--tx2);font-size:13.5px;margin-bottom:16px">' + subDesc + '</p>' +
     (hasSub() ? '<div class="note">اشتراک فعلی تا <b>' + faDate(APP.user.subUntil) + '</b> فعال است. خرید جدید به انتهای همان تاریخ اضافه می‌شود.</div>' : '') +
     '<div class="plans">' + cards + '</div>' +
     '<p style="font-size:12.5px;color:var(--tx3);text-align:center">موجودی: ' + faMoney(APP.user.wallet) + ' ' + unitName() + ' — <a href="#/wallet" style="color:var(--acc2)">شارژ کیف پول</a></p>' +
@@ -9638,6 +10590,79 @@ function bindContentSetup () {
   bind('content-rules-generate',function () { try { $('#content-rules-value').value=buildChannelSetup($('#content-source-id').value,$('#content-rule-admin').value,$('#content-target-ids').value); } catch(e) { $('#content-rules-value').value=''; toast(e.message,'err'); } });
   bind('content-rules-copy',function () { copy('content-rules-value'); });
 }
+function storageLabel (st) {
+  st = st || {};
+  var lbl = 'KV';
+  if (st.mode === 'hybrid') lbl = 'D1 + KV (ترکیبی)';
+  else if (st.mode === 'd1') lbl = 'D1';
+  lbl += st.d1Ready ? ' ✓' : (st.hasD1 ? ' (در انتظار انتقال)' : '');
+  return lbl;
+}
+function shardStatusHtml (st) {
+  st = st || {};
+  var rows = '';
+  (st.shards || []).forEach(function (s) {
+    rows += '<div class="adm-item" style="margin-top:8px"><div class="inf"><b>' + esc(s.id) + '</b><span>' +
+      '<em class="badge' + (s.ok ? ' acc' : ' red') + '">' + (s.ok ? '✓ سالم' : '✗ قطع') + '</em>' +
+      (s.latency ? '<em class="badge">' + faNum(s.latency) + 'ms</em>' : '') +
+      (s.count != null ? '<em class="badge">' + faNum(s.count) + ' رکورد</em>' : '') +
+      (s.error ? '<em class="badge red">' + esc(s.error) + '</em>' : '') +
+      '</span></div><div class="acts"><button type="button" class="btn btn-danger btn-sm" data-shard-del="' + esc(s.id) + '">حذف</button></div></div>';
+  });
+  return '<div class="adm-row" style="margin-bottom:10px;flex-wrap:wrap">' +
+    '<em class="badge">حالت: ' + esc(storageLabel(st)) + '</em>' +
+    '<em class="badge' + (st.d1Ready ? ' acc' : '') + '">D1 اصلی: ' + (st.d1Ready ? 'آماده' : (st.hasD1 ? 'در انتظار انتقال' : 'اتصال ندارد')) + '</em>' +
+    '<em class="badge">KV: ' + (st.hasKv ? '✓' : '✗') + '</em>' +
+    '<em class="badge">CACHE_KV: ' + (st.hasCacheKv ? '✓' : '✗') + '</em>' +
+    '<em class="badge">کش عمومی (Cache API): فعال</em></div>' +
+    (rows || '<p class="note" style="margin:8px 0">شاردی اضافه نشده است — همهٔ آثار در D1 اصلی ذخیره می‌شوند.</p>') +
+    '<details style="margin-top:10px"><summary>➕ افزودن شارد D1 جدید (اکانت دیگر)</summary>' +
+    '<p class="note">روی اکانت دیگر، Worker قالب <code dir="ltr">scripts/shard-proxy-worker.js</code> را Deploy کنید (binding D1 با نام <code dir="ltr">SHARD_DB</code> + Secret <code dir="ltr">SHARD_SECRET</code>)؛ آدرس و رمزش را اینجا وارد کنید. توضیح کامل: <code dir="ltr">docs/D1-SHARDS.md</code></p>' +
+    '<div class="field"><label>شناسه (حروف کوچک/عدد/خط تیره)</label><input id="shard-id" dir="ltr" placeholder="d1-2"></div>' +
+    '<div class="field"><label>آدرس shard-proxy</label><input id="shard-url" dir="ltr" placeholder="https://shard2.example.workers.dev"></div>' +
+    '<div class="field"><label>رمز اشتراک (همان SHARD_SECRET)</label><input id="shard-secret" dir="ltr" autocomplete="off" placeholder="حداقل ۱۶ نویسه"></div>' +
+    '<div class="adm-row"><button type="button" class="btn btn-ghost btn-sm" id="shard-test">🧪 تست اتصال</button><button type="button" class="btn btn-primary btn-sm" id="shard-add">افزودن</button><span id="shard-test-out" class="badge" style="display:none"></span></div>' +
+    '</details></div>';
+}
+function bindShardAdmin (q) {
+  function testPayload () {
+    var u = $('#shard-url'), s = $('#shard-secret');
+    return { action: 'test', url: (u && u.value.trim()) || '', secret: (s && s.value.trim()) || '' };
+  }
+  var tt = $('#shard-test');
+  if (tt) tt.addEventListener('click', function () {
+    var out = $('#shard-test-out');
+    out.style.display = ''; out.className = 'badge'; out.textContent = 'در حال تست…';
+    api('/admin/shards', { method: 'POST', body: testPayload() }).then(function (r) {
+      out.className = r.ok ? 'badge acc' : 'badge red';
+      out.textContent = r.ok ? ('اتصال ✓ — ' + r.latency + 'ms — ' + r.count + ' رکورد') : r.error;
+    }).catch(function (e) { out.className = 'badge red'; out.textContent = e.message; });
+  });
+  var add = $('#shard-add');
+  if (add) add.addEventListener('click', function () {
+    var body = testPayload();
+    body.action = 'add';
+    body.id = ($('#shard-id') && $('#shard-id').value.trim()) || '';
+    if (!body.id || !body.url || !body.secret) { toast('شناسه، آدرس و رمز را وارد کنید', 'err'); return; }
+    api('/admin/shards', { method: 'POST', body: body }).then(function () {
+      toast('شارد اضافه شد ✓', 'ok');
+      loadAdminTab('settings', q);
+    }).catch(function (e) { toast(e.message, 'err'); });
+  });
+  $all('[data-shard-del]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var id = b.getAttribute('data-shard-del');
+      openModal('حذف شارد', '<p style="font-size:14px;color:var(--tx2)">شارد «' + esc(id) + '» از سایت جدا شود؟ رکوردهای روی D1 آن شارد حذف نمی‌شوند؛ آثار روی آن تا جابه‌جایی دستی قابل خواندن باقی می‌مانند.</p><div class="adm-row" style="justify-content:flex-end;margin-top:14px"><button type="button" class="btn btn-ghost btn-sm" id="m-cancel">انصراف</button><button type="button" class="btn btn-danger btn-sm" id="m-yes">حذف</button></div>', function (wrap, close) {
+        $('#m-cancel', wrap).addEventListener('click', close);
+        $('#m-yes', wrap).addEventListener('click', function () {
+          api('/admin/shards', { method: 'POST', body: { action: 'remove', id: id } }).then(function () {
+            close(); toast('شارد حذف شد', 'ok'); loadAdminTab('settings', q);
+          }).catch(function (e) { toast(e.message, 'err'); });
+        });
+      });
+    });
+  });
+}
 function adminTabHtml (tab, data, q) {
   if (tab === 'overview') {
     return '<div class="adm-h">📊 نمای کلی</div><div class="stat-cards">' +
@@ -9649,6 +10674,7 @@ function adminTabHtml (tab, data, q) {
       '<p style="font-size:13px;color:var(--tx2)">در ویرایش هر اثر، لینک پست مشخصات کانال را بگذارید تا عنوان، سال، ژانر و بقیهٔ فیلدها خودکار پر شوند.</p></div>' +
       '<div class="adm-row">' +
       (data.botSet ? '' : '<span class="badge red">⚠️ توکن ربات تنظیم نشده</span>') +
+      '<em class="badge' + ((data.storage && data.storage.d1Ready) ? ' acc' : '') + '">🗄 ذخیره‌سازی: ' + esc(storageLabel(data.storage)) + ((data.storage && data.storage.shards && data.storage.shards.length) ? (' + ' + data.storage.shards.length + ' شارد') : '') + '</em>' +
       '<a class="btn btn-ghost btn-sm" href="#/admin/content">➕ افزودن محتوا</a>' +
       '<a class="btn btn-ghost btn-sm" href="#/admin/settings">⚙️ تنظیمات</a>' +
       '</div>';
@@ -9848,6 +10874,8 @@ function adminTabHtml (tab, data, q) {
       '<div class="field"><label>نام واحد کیف پول</label><input id="set-unit" value="' + esc(data.walletUnitName || 'سکه') + '"></div>' +
       '<div class="field"><label>هدیه سکه اولین ثبت‌نام (صفر = بدون هدیه)</label><input id="set-signup-bonus" type="number" min="0" step="1" value="' + esc(data.signupBonus) + '"><small>فقط برای حساب‌های جدید؛ مستقل از پاداش دعوت.</small></div>' +
       '<div class="field"><label>قیمت هر دانلود (فقط کاربر بدون اشتراک)</label><input id="set-dlp" type="number" value="' + esc(data.dlClickPrice) + '"></div>' +
+      '<div class="field"><label>محدودیت دانلود روزانه هر کاربر (0 = نامحدود)</label><input id="set-dlmax" type="number" min="0" max="1000" value="' + esc(data.dlDailyLimit != null ? data.dlDailyLimit : 20) + '"><small>برای جلوگیری از سرقت/کپی انبوه منابع؛ مدیران و کاربران مادام‌العمر مستثنا. روز به وقت ایران.</small></div>' +
+      '<div class="field"><label>سقف کل دانلود روزانه ربات (0 = نامحدود)</label><input id="set-dlmaxbot" type="number" min="0" max="1000000" value="' + esc(data.dlDailyLimitBot != null ? data.dlDailyLimitBot : 0) + '"><small>مجموع دانلود همهٔ کاربران در یک روز (به وقت ایران).</small></div>' +
       '<div class="field"><label>اشتراک ۱ ماهه</label><input id="set-s1" type="number" value="' + esc(data.sub1m) + '"></div>' +
       '<div class="field"><label>اشتراک ۳ ماهه</label><input id="set-s3" type="number" value="' + esc(data.sub3m) + '"></div>' +
       '<div class="field"><label>اشتراک ۶ ماهه</label><input id="set-s6" type="number" value="' + esc(data.sub6m) + '"></div>' +
@@ -9889,6 +10917,11 @@ function adminTabHtml (tab, data, q) {
       '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-bottom:10px"><input type="checkbox" id="set-ad-on" style="width:auto"' + (data.adEnabled !== false ? ' checked' : '') + '> نمایش دکمهٔ تبلیغ زیر فایل (فقط دکمه، نه داخل کپشن)</label>' +
       '<div class="field"><label>متن دکمهٔ تبلیغ</label><input id="set-ad-txt" value="' + esc(data.adButtonText || '') + '" placeholder="🎭 جدیدترین اخبار سینما"></div>' +
       '<div class="field"><label>لینک دکمه (https://…)</label><input id="set-ad-url" dir="ltr" value="' + esc(data.adButtonUrl || '') + '" placeholder="https://t.me/movie_shatelup"></div>' +
+      '</div>' +
+      '<div class="adm-box"><h4>🗄️ ذخیره‌سازی و فدراسیون D1</h4>' +
+      '<p class="note">معماری فعلی: داده‌های سنگین (کاربران، کیف پول، تراکنش‌ها، آثار و لینک‌ها) در <b>D1 اصلی</b>، موقتی‌ها (کش، rate-limit، توکن‌های موقت) در <b>KV</b>، صف‌های انتشار و mirrorها در <b>Durable Object</b>، و صفحات عمومی با <b>Cache API</b> کش می‌شوند. شاردهای D1 از اکانت‌های دیگر فقط «آثار» را بین دیتابیس‌ها تقسیم می‌کنند تا حد Free-plan دیرتر تمام شود.</p>' +
+      shardStatusHtml(data.storage) +
+      '<button class="btn btn-ghost btn-sm" id="shard-refresh" style="margin-top:8px">🔄 به‌روزرسانی وضعیت</button>' +
       '</div>' +
       '<button class="btn btn-primary btn-block" id="set-save">💾 ذخیره تنظیمات</button>' +
       contentSetupHtml(data.contentBotSetup) +
@@ -10370,6 +11403,9 @@ function bindAdminTab (tab, q) {
   if (tab === 'settings') {
     bindDatabaseMaintenance();
     bindContentSetup();
+    bindShardAdmin(q);
+    var shRef = $('#shard-refresh');
+    if (shRef) shRef.addEventListener('click', function () { loadAdminTab('settings', q); });
     var contentSetup = $('#content-bot-setup');
     if (contentSetup) contentSetup.addEventListener('click', function () {
       var status = $('#content-bot-status');
@@ -10390,6 +11426,8 @@ function bindAdminTab (tab, q) {
         walletUnitName: $('#set-unit').value.trim(),
         signupBonus: $('#set-signup-bonus').value,
         dlClickPrice: $('#set-dlp').value,
+        dlDailyLimit: ($('#set-dlmax') && $('#set-dlmax').value) || '0',
+        dlDailyLimitBot: ($('#set-dlmaxbot') && $('#set-dlmaxbot').value) || '0',
         sub1m: $('#set-s1').value, sub3m: $('#set-s3').value, sub6m: $('#set-s6').value, sub1y: $('#set-s12').value,
         refSignupBonus: $('#set-refb').value, refPurchasePercent: $('#set-refp').value,
         vanishSec: $('#set-van').value,
@@ -11033,12 +12071,18 @@ function render () {
     if (r.query.edit) setTimeout(function () { openItemEdit(r.query.edit, null); }, 300);
     return;
   }
+  if (path === '/quality') {
+    shell(viewQualityGuide(r.query), { active: '', back: true });
+    bindQualityGuide(r.query);
+    return;
+  }
   shell(emptyHtml('😕', 'صفحه پیدا نشد', 'آدرس را بررسی کنید.', '<a class="btn btn-primary" href="#/">صفحه اصلی</a>'));
 }
 
 var __mainBtnBound = false;
 function initTg (webapp) {
   if (!webapp) return;
+  var wasFallback = !!(TG && TG.__fallback);
   TG = webapp;
   try {
     TG.ready();
@@ -11047,7 +12091,18 @@ function initTg (webapp) {
     TG.setBackgroundColor('#0b0e14');
     if (TG.disableVerticalSwipes) TG.disableVerticalSwipes();
   } catch (e) { }
-  if (TG_READY) return;
+  if (TG_READY) {
+    // SDK رسمی تلگرام دیرتر از shim داخلی بارگذاری شد: رویدادهای واقعی
+    // (بازگشت به اپ/تغییر viewport) را روی خودِ SDK دوباره سربندیم.
+    if (wasFallback && !webapp.__fallback && webapp.onEvent && window.__mvxActFallback) {
+      window.__mvxActFallback = false;
+      try {
+        webapp.onEvent('activated', function () { loginMiniApp(); burstPeek(); try { TG.expand(); } catch (e5) { } });
+        webapp.onEvent('viewportChanged', function () { loginMiniApp(); burstPeek(); });
+      } catch (eRb) { }
+    }
+    return;
+  }
   TG_READY = true;
   applyMiniAppItemLaunch();
   try {
@@ -11059,7 +12114,10 @@ function initTg (webapp) {
   try {
     if (TG && TG.onEvent && !window.__tgActBound) {
       window.__tgActBound = true;
-      /* در بازگشت به اپ، دوباره تمام‌صفحه بماند (مثل BatFather) */
+      window.__mvxActFallback = !!TG.__fallback;
+      /* در بازگشت به اپ، دوباره تمام‌صفحه بماند (مثل BatFather).
+         با shim داخلی onEvent بدون‌اثر است و تا آمدن SDK رسمی،
+         visibilitychange/focus/pageshow همان کار را می‌کنند. */
       TG.onEvent('activated', function () { loginMiniApp(); burstPeek(); try { TG.expand(); } catch (e5) { } });
       TG.onEvent('viewportChanged', function () { loginMiniApp(); burstPeek(); });
     }
@@ -11069,17 +12127,26 @@ function initTg (webapp) {
 window.__mvxInitTg = initTg;
 
 var __tgLoading = false;
+var __tgAttempts = 0;
 function loadTgScript () {
-  if (TG_READY || __tgLoading) return;
+  // حتی وقتی shim داخلی فعال است، بارگذاری SDK رسمی را (با تلاش محدود) ادامه می‌دهیم
+  if (TG_READY && !(TG && TG.__fallback)) return;
+  if (__tgLoading || __tgAttempts >= 2) return;
   __tgLoading = true;
+  __tgAttempts += 1;
   try {
     var s = document.createElement('script');
     s.src = 'https://telegram.org/js/telegram-web-app.js';
     s.async = true;
     s.onload = function () {
+      __tgLoading = false;
       try { if (window.Telegram && Telegram.WebApp) initTg(Telegram.WebApp); } catch (e) { }
     };
-    s.onerror = function () { __tgLoading = false; };
+    s.onerror = function () {
+      __tgLoading = false;
+      // اگر telegram.org در دسترس نبود، سایت با shim داخلی ادامه می‌دهد
+      if (__tgAttempts < 2) setTimeout(function () { loadTgScript(); }, 3000);
+    };
     (document.head || document.body).appendChild(s);
   } catch (e) { __tgLoading = false; }
 }
@@ -11087,6 +12154,7 @@ function loadTgScript () {
 function boot () {
   try {
     applyMiniAppItemLaunch();
+    if (!TG) TG = buildTgFallback();
     if (TG && !TG_READY) initTg(TG);
     loadTgScript();
     var rq = currentRoute();
@@ -11126,7 +12194,7 @@ const D1_MIGRATION_HTML = `<!doctype html><html lang="fa" dir="rtl"><meta charse
 <article><h1>انتقال امن اطلاعات به D1</h1><p>این ابزار اطلاعات KV را کپی و دوباره مقایسه می‌کند؛ هیچ داده‌ای از KV حذف نمی‌شود و فعال‌سازی D1 خودکار نیست.</p>
 <ol><li>ابتدا در سایت با حساب مدیر وارد شوید؛ سپس این صفحه را در همین مرورگر باز کنید.</li><li>در Cloudflare یک D1 خالی به همان Worker با نام <code>DB</code> وصل کنید. اتصال‌های KV و EDITOR را نگه دارید.</li><li>تمام ابزارهای دیگرِ تغییر داده را متوقف کنید. پس از فعال‌شدن حالت نگهداری، دکمه دانلود پشتیبان KV را بزنید و فایل را امن نگه دارید.</li><li>متغیر <code>STORAGE_BACKEND=kv</code> و <code>STORAGE_MAINTENANCE=1</code> را تنظیم و Deploy کنید. سایت و webhookها موقتاً پاسخ 503 می‌دهند. پیش از ادامه، مطمئن شوید درخواست‌ها و استقرارهای قبلی پایان یافته‌اند.</li></ol>
 <label><input id="safe" type="checkbox"> پشتیبان دارم و تأیید می‌کنم منبع دیگر تغییر نمی‌کند.</label><p><button id="backup">دانلود پشتیبان KV قدیمی</button><button id="backupD1">دانلود پشتیبان D1 فعال</button><button id="status">بررسی وضعیت</button><button id="start">شروع / ادامه انتقال</button><button id="stop" disabled>توقف پس از این مرحله</button></p>
-<pre id="out">هنوز درخواستی ارسال نشده است.</pre><p id="done" hidden>انتقال و مقایسه تمام شد. اکنون در Cloudflare، STORAGE_BACKEND را d1 و STORAGE_MAINTENANCE را 0 کنید و با هم Deploy کنید. سپس ورود، کیف پول، دریافت فایل و ثبت آزمایشی را بررسی کنید. KV قدیمی را پاک نکنید. پس از ایجاد داده جدید در D1، بازگشت ساده به KV اطلاعات جدید را از دسترس خارج می‌کند.</p><a href="/">بازگشت به سایت</a></article>
+<pre id="out">هنوز درخواستی ارسال نشده است.</pre><p id="done" hidden>انتقال و مقایسه تمام شد. اکنون در Cloudflare، STORAGE_BACKEND را <b>hybrid</b> (معماری ترکیبی جدید: سنگین‌ها روی D1، cache روی KV) و STORAGE_MAINTENANCE را 0 کنید و با هم Deploy کنید. اگر مایلید همه‌چیز (مثل قبل) روی D1 بماند، d1 را بگذارید. سپس ورود، کیف پول، دریافت فایل و ثبت آزمایشی را بررسی کنید. KV قدیمی را پاک نکنید. پس از ایجاد داده جدید در D1، بازگشت ساده به KV اطلاعات جدید را از دسترس خارج می‌کند.</p><a href="/">بازگشت به سایت</a></article>
 <script>
 let stop=false,running=false;const out=document.getElementById('out');
 async function call(action){const token=localStorage.getItem('mvx_t');if(!token)throw Error('ابتدا در سایت وارد حساب مدیر شوید.');const r=await fetch('/api/admin/storage/d1',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+token},body:JSON.stringify({action})});const d=await r.json();if(!r.ok)throw Error(d.error||'خطای انتقال');const s=d.state;out.textContent=s?'مرحله: '+({copy:'کپی اطلاعات',verify:'مقایسه اطلاعات',ready:'آماده فعال‌سازی'}[s.phase]||s.phase)+'\\nکپی‌شده: '+s.copied+'\\nبررسی‌شده: '+s.verified:'انتقال هنوز شروع نشده است.';document.getElementById('done').hidden=s?.phase!=='ready';return s;}

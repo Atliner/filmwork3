@@ -34,12 +34,28 @@ CONTENT_ADMIN_IDS = "REPLACE_WITH_NUMERIC_TELEGRAM_ADMIN_ID"
 # Optional channel automation (JSON string). Replace all IDs, then re-register webhook.
 # CONTENT_CHANNEL_RULES = '{"-1001111111111":{"adminId":"42","targets":["-1002222222222"],"publish":true}}'
 
-# Optional D1 migration (merge with your CURRENT deployment config; not a blank replacement).
+# ── معماری ذخیره‌سازی نهایی (Hybrid) — راهنما: docs/ARCHITECTURE-FREE-TIER.md ──
+# حالت ترکیبی: داده‌های ماندگار و پرتکرار روی D1، داده‌های کم‌تغییر/cache روی KV.
+#   • D1 = کاربران، کیف پول، تراکنش‌ها، آثار، نسخه‌ها، لینک‌ها، شمارنده‌ها،
+#           rate-limit، توکن‌های موقت (u:, it:, src:, sub:, dlc:, rl:, ...)
+#   • KV = فقط set, res:, gallery:, ads, mirrorهای قدیمی, catrev
+# فعال‌سازی (بعد از انتقال با /storage-migration):
+#   STORAGE_BACKEND="hybrid"  (نه d1 — حالت ترکیبی)
+#   STORAGE_MAINTENANCE="0"
+# تا وقتی D1 آماده نشده باشد، سایت با همان رفتار قدیم (KV) ادامه می‌دهد.
+# حالت قدیم all-D1 (STORAGE_BACKEND="d1") هنوز کار می‌کند ولی توصیه نمی‌شود.
+#
+# Optional D1 (merge with your CURRENT deployment config; not a blank replacement).
 # Add a new D1 binding DB in the dashboard, then use /storage-migration.
-# Keep KV and EDITOR. Do NOT enable d1 until migration verification reports ready.
+# Keep KV and EDITOR. Do NOT enable hybrid/d1 until migration verification reports ready.
 # Under [vars], use STORAGE_BACKEND="kv" and STORAGE_MAINTENANCE="1" during migration;
-# then switch them TOGETHER to "d1" and "0".
+# then switch them TOGETHER to "hybrid" (یا d1 برای حالت قدیم) and "0".
 # [[d1_databases]]
 # binding = "DB"
 # database_name = "filmwork-main"
 # database_id = "REPLACE_WITH_NEW_D1_DATABASE_ID"
+
+# ── فدراسیون D1 (اختیاری) — راهنما: docs/D1-SHARDS.md ──
+# شارد‌های D1 اکانت‌های دیگر از داخل پنل سایت (تنظیمات ← ذخیره‌سازی و فدراسیون D1)
+# اضافه می‌شوند: Worker قالب scripts/shard-proxy-worker.js روی اکانت دیگر
+# (نصب خودکار: node scripts/shard-installer.mjs). هیچ Binding جدیدی در این فایل لازم نیست.
