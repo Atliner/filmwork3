@@ -5,7 +5,9 @@ node_modules/
 .env.*
 .dev.vars
 .dev.vars.*
-wrangler.toml
+# NOTE: wrangler.toml IS committed on purpose — Cloudflare Workers Builds
+# (git-based deploys) reads bindings/vars from it. Keep tokens OUT of it and
+# store them as dashboard Secrets instead. KV/D1 IDs are not secret.
 *.log
 
 # Database exports can contain users and secrets

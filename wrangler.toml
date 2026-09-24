@@ -1,0 +1,87 @@
+# ══════════════════════════════════════════════════════════════════════════
+#  پیکربندی استقرار برای Cloudflare Workers Builds (دیپلوی خودکار از گیت‌هاب)
+# ──────────────────────────────────────────────────────────────────────────
+#  چون Cloudflare به گیت‌هاب وصل است، هر push این فایل را می‌خوانَد و
+#  اتصال‌ها (KV / D1 / Durable Object) و متغیرها را از همین‌جا اعمال می‌کند.
+#  مقادیر REPLACE_... را با شناسه‌های واقعی خودت جایگزین کن، سپس commit/push.
+#
+#  ⚠️ نکات حیاتی:
+#   • name باید *دقیقاً* برابر نام Workerِ فعلی‌ات باشد؛ اگر فرق کند یک
+#     Worker جدید ساخته می‌شود و دامنه/DO/Secretهای قبلی از دست می‌روند.
+#   • توکن‌ها را اینجا نگذار. آن‌ها را در داشبورد به‌صورت Secret نگه دار
+#     (Worker → Settings → Variables and Secrets):
+#       BOT_TOKEN, DELIVERY_BOT_TOKEN, CONTENT_BOT_TOKEN, CONTENT_WEBHOOK_SECRET
+#     Secretها با هر دیپلویِ گیت باقی می‌مانند و در این فایل تکرار نمی‌شوند.
+#   • فقط مقادیرِ غیرمحرمانه در [vars] اینجا می‌آیند.
+# ══════════════════════════════════════════════════════════════════════════
+
+name = "REPLACE_WITH_YOUR_EXACT_WORKER_NAME"   # ← نام دقیق Worker فعلی
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+# ── KV اصلی (آرشیو/تنظیمات/کش) — نام binding باید دقیقاً KV باشد ──
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_NEW_KV_NAMESPACE_ID"
+
+# ── KV سبک و اختیاری فقط برای rate-limit و کش کوتاه (می‌توانی حذفش کنی) ──
+# اگر این namespace را نساخته‌ای، کل این بلوک را پاک کن؛ کد بدون آن هم کار می‌کند.
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "REPLACE_WITH_NEW_CACHE_KV_NAMESPACE_ID"
+
+# ── Durable Object حافظهٔ گفتگو/صف/نگاشت مخزن — نام باید EDITOR باشد ──
+[[durable_objects.bindings]]
+name = "EDITOR"
+class_name = "EditorSession"
+
+# تاریخچهٔ migration کلاس DO. اگر این DO از قبل روی Worker شما فعال است،
+# wrangler این تگ را «قبلاً اعمال‌شده» می‌بیند و دوباره اجرا نمی‌کند.
+[[migrations]]
+tag = "content-editor-v1"
+new_sqlite_classes = ["EditorSession"]
+
+# ── D1 (دیتابیس اصلی) — نام binding باید دقیقاً DB باشد ──
+# دیتابیس تازه خالی است؛ بعد از دیپلوی، از /storage-migration آن را «آماده» کن
+# (راهنما پایین همین فایل + docs/D1-MIGRATION.md). تا آماده‌شدن، حالت hybrid
+# خودکار روی KV کار می‌کند و سایت خراب نمی‌شود.
+[[d1_databases]]
+binding = "DB"
+database_name = "filmwork-main"
+database_id = "REPLACE_WITH_NEW_D1_DATABASE_ID"
+
+[vars]
+SITE_PUBLIC_ORIGIN = "https://REPLACE_WITH_YOUR_SITE.workers.dev"
+CONTENT_ADMIN_IDS  = "REPLACE_WITH_NUMERIC_TELEGRAM_ADMIN_ID"
+
+# انتخاب لایهٔ ذخیره‌سازی:
+#   "kv"     = فقط KV
+#   "hybrid" = D1 برای داده‌های پرتکرار + KV برای کش (توصیه‌شده)
+#   "d1"     = فقط D1
+# نکته: در "hybrid" اگر D1 هنوز آماده (migrated) نشده باشد، خودکار روی KV
+# می‌ماند؛ پس گذاشتنِ hybrid از همین ابتدا امن است.
+STORAGE_BACKEND     = "hybrid"
+
+# "1" = حالت نگهداری (سایت 503 می‌دهد) — فقط هنگام اجرای /storage-migration.
+# در حالت عادی "0" باشد.
+STORAGE_MAINTENANCE = "0"
+
+# سایر متغیرهای غیرمحرمانهٔ قبلی‌ات را هم اینجا نگه دار، مثل:
+# BOT_USERNAME = "your_login_bot"
+# DELIVERY_BOT_USERNAME = "your_delivery_bot"
+# CONTENT_CHANNEL_RULES = '{"-100...":{"adminId":"123","targets":["-100..."],"publish":true}}'
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ترتیب راه‌اندازیِ پاک با D1/Hybrid (خلاصه):
+#   ۱) name و شناسه‌های KV/CACHE_KV/DB و SITE_PUBLIC_ORIGIN و
+#      CONTENT_ADMIN_IDS را پر کن. توکن‌ها را در داشبورد Secret نگه دار.
+#   ۲) commit و push کن. سایت روی KV بالا می‌آید (D1 هنوز غیرفعال است).
+#   ۳) با تلگرام وارد شو؛ اولین ورود، حسابت را «مدیر» می‌کند. کانال مخزن و
+#      دامنه را در تنظیمات سایت ست کن.
+#   ۴) برای فعال‌کردن D1: در همین فایل STORAGE_MAINTENANCE="1" و
+#      STORAGE_BACKEND="kv" بگذار و push کن (سایت موقتاً 503 می‌شود).
+#   ۵) صفحهٔ  https://<سایت>/storage-migration  را با همان مرورگرِ ادمین باز
+#      کن → «شروع/ادامه انتقال» تا پیام «آماده فعال‌سازی» را ببینی.
+#   ۶) STORAGE_BACKEND="hybrid" و STORAGE_MAINTENANCE="0" بگذار و push کن.
+#      از این پس داده‌های پرتکرار روی D1 نوشته می‌شوند.
+# ══════════════════════════════════════════════════════════════════════════
