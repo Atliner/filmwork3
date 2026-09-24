@@ -6535,6 +6535,28 @@ export class EditorSession {
       return Response.json({records,active,managed});
     }
 
+    /* ثبت دستی نگاشت مخزن پشتیبان برای فایل‌های موجود. relay فقط برای
+       کپی‌های جدیدِ خودِ ربات نگاشت می‌سازد؛ فایل‌هایی که قبلاً در دو کانال
+       بوده‌اند (با شماره‌های متفاوت) نگاشت ندارند و تلگرام امکان خواندن
+       تاریخچه را نمی‌دهد. با این مسیر، مدیر با دادن لینکِ منبع و پشتیبان،
+       همان نگاشتی را ثبت می‌کند که relay می‌ساخت تا failover کار کند. */
+    if (path==='/channel-mirror-add') {
+      const from=String(body.from), to=String(body.to);
+      if (!/^-100\d{6,20}$/.test(from) || !/^-100\d{6,20}$/.test(to) || from===to) return new Response('Invalid channel',{status:400});
+      if (!Number.isSafeInteger(body.fromMsgId) || body.fromMsgId<1 || !Number.isSafeInteger(body.toMsgId) || body.toMsgId<1) return new Response('Invalid message',{status:400});
+      const stored=await this.ctx.storage.get('channel-id');
+      if (stored && stored!==from) return new Response('Wrong channel',{status:400});
+      await this.ctx.storage.put('channel-id',from);
+      const mapKey='mirror-file:'+body.fromMsgId;
+      const mapping=await this.ctx.storage.get(mapKey) || {};
+      const existed=!!(mapping[to] && Number(mapping[to].msgId)===body.toMsgId);
+      mapping[to]={chatId:to,msgId:body.toMsgId};
+      await this.ctx.storage.put(mapKey,mapping);
+      const pair='mirror-pair:'+from+'/'+to;
+      if (!await this.ctx.storage.get(pair)) await this.ctx.storage.put(pair,true);
+      return Response.json({ok:true,existed});
+    }
+
     if (path==='/channel-relay') {
       const channel=String(body.channel), rule=contentChannelRules(this.env)[channel];
       if (!rule || !adminAllowed(this.env,body.actorId) || !Array.isArray(body.files) || body.files.length>20)
@@ -6819,6 +6841,29 @@ export class EditorSession {
       const result=await r.json();
       return this.say(chat,result.message || result.error || 'درخواست انجام شد.');
     }
+    /* /backup <لینک منبع> <لینک پشتیبان> — ثبت دستی نگاشت مخزن پشتیبان
+       برای یک فایلِ موجود (وقتی relay آن را ثبت نکرده است). لینک اول باید
+       کانالِ منبعِ ثبت‌شده در تنظیمات باشد؛ لینک دوم همان فایل در کانال
+       پشتیبان. بعد از این، اگر فایلِ منبع حذف شود، هنگام دریافت نسخهٔ
+       پشتیبان فرستاده می‌شود. */
+    const backupCmd=/^\/backup\s+(\S+)\s+(\S+)\s*$/.exec(text);
+    if (backupCmd || /^\/backup\b/.test(text)) {
+      const usage='طرز استفاده:\n/backup <لینک فایل در کانال منبع> <لینک همان فایل در کانال پشتیبان>\n\nمثال:\n/backup https://t.me/c/3991198857/430 https://t.me/c/4465249757/433\n\nلینک اول باید کانالِ ثبت‌شده در تنظیمات کانال (منبع) باشد و لینک دوم همان فایل در مخزن پشتیبان.';
+      if (!backupCmd) return this.say(chat,usage);
+      const a=parseTmeLink(backupCmd[1]), b=parseTmeLink(backupCmd[2]);
+      if (!a || !a.chatId || !a.private || !b || !b.chatId || !b.private) return this.say(chat,'هر دو باید لینک کانال خصوصی به شکل https://t.me/c/XXXX/شماره باشند.\n\n'+usage);
+      const from=normalizeChannelId(a.chatId), to=normalizeChannelId(b.chatId);
+      if (from===to) return this.say(chat,'کانال پشتیبان باید متفاوت از کانال منبع باشد.');
+      const rule=contentChannelRules(this.env)[from];
+      if (!rule || rule.adminId!==actor) return this.say(chat,'کانالِ لینکِ اول (منبع) به حساب مدیریت شما متصل نیست. لینک اول باید کانالِ ثبت‌شده در CONTENT_CHANNEL_RULES باشد؛ لینک دوم مخزن پشتیبان.');
+      const target=this.env.EDITOR.get(this.env.EDITOR.idFromName('channel:'+from));
+      const r=await target.fetch(new Request('https://editor.internal/channel-mirror-add',{method:'POST',body:JSON.stringify({from,fromMsgId:Number(a.msgId),to,toMsgId:Number(b.msgId)})}));
+      if (!r.ok) return this.say(chat,'ثبت نگاشت ناموفق بود ('+r.status+'). شناسه‌ها و شماره پیام‌ها را بررسی کنید.');
+      const res=await r.json();
+      return this.say(chat,(res.existed?'✓ این نگاشت از قبل ثبت شده بود.':'✅ نگاشت پشتیبان ثبت شد.')+
+        '\nمنبع: '+from+' / پیام '+a.msgId+'\nپشتیبان: '+to+' / پیام '+b.msgId+
+        '\n\nاز این پس اگر فایلِ کانال منبع حذف/غیرقابل‌دسترس شود، هنگام دریافت، نسخهٔ کانال پشتیبان برای کاربر ارسال می‌شود. مطمئن شوید ربات ارسال فایل در کانال پشتیبان هم ادمین است.');
+    }
     let d=await this.ctx.storage.get('draft');
     if (text==='وضعیت کانال‌ها') {
       const rules=contentChannelRules(this.env), ids=Object.keys(rules).filter(id=>rules[id].adminId===actor);
@@ -6849,7 +6894,7 @@ export class EditorSession {
       text='/assign '+text.replace(/[۰-۹]/g,c=>String('۰۱۲۳۴۵۶۷۸۹'.indexOf(c))); delete d.awaitingAssignment;
     }
     if (text === '/help' || text === '/start') return this.say(chat,
-      'سلام! شناسه تلگرام شما: '+actor+'\n\nبرای ثبت خودکار، سربرگ و فایل‌ها را در کانال تنظیم‌شده بگذارید؛ لازم نیست برای هر فایل فرمانی بفرستید. دکمه «وضعیت کانال‌ها» نتیجه را نشان می‌دهد. برای سافتساب با فایل زیرنویس جدا، #زیرنویس جدا را در سربرگ بگذارید؛ اول ویدئو، بعد زیرنویس هم‌نام یا پاسخ به همان ویدئو.\n\nبرای ثبت دستی، لینک صفحه فیلم یا سریال را بفرستید و با دکمه‌های پایین ادامه دهید: «مرحله بعد»، «پیش‌نمایش» و سپس «انتشار پس از بررسی».\nاگر نام فایل روشن نبود، «اصلاح فصل و کیفیت» را بزنید. دکمه «لغو پیش‌نویس» قبل از حذف تأیید می‌گیرد. فرمان‌های قبلی هم همچنان کار می‌کنند.');
+      'سلام! شناسه تلگرام شما: '+actor+'\n\nبرای ثبت خودکار، سربرگ و فایل‌ها را در کانال تنظیم‌شده بگذارید؛ لازم نیست برای هر فایل فرمانی بفرستید. دکمه «وضعیت کانال‌ها» نتیجه را نشان می‌دهد. برای سافتساب با فایل زیرنویس جدا، #زیرنویس جدا را در سربرگ بگذارید؛ اول ویدئو، بعد زیرنویس هم‌نام یا پاسخ به همان ویدئو.\n\nبرای ثبت دستی، لینک صفحه فیلم یا سریال را بفرستید و با دکمه‌های پایین ادامه دهید: «مرحله بعد»، «پیش‌نمایش» و سپس «انتشار پس از بررسی».\nاگر نام فایل روشن نبود، «اصلاح فصل و کیفیت» را بزنید. دکمه «لغو پیش‌نویس» قبل از حذف تأیید می‌گیرد. فرمان‌های قبلی هم همچنان کار می‌کنند.\n\nمخزن پشتیبان برای فایل‌های موجود: اگر همان فایل در دو کانال با شماره‌های متفاوت است و می‌خواهید در صورت حذف از یکی، از کانال دیگر ارسال شود، بنویسید:\n/backup <لینک فایل در کانال منبع> <لینک همان فایل در کانال پشتیبان>');
     if (d?.phase === 'publishing' && !['/confirm','/review'].includes(text)) return this.say(chat,'نتیجه انتشار هنوز قطعی نیست. ابتدا /confirm را دوباره بفرستید؛ لغو یا حذف فایل در این وضعیت مجاز نیست.');
     if (text === '/cancel') {
       if (d) await this.discard(d);
