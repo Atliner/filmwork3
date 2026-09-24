@@ -9520,36 +9520,33 @@ function showAdThen (res, done) {
   }, 1000);
 }
 
-/* پس از ثبت درخواست دانلود: علاوه بر باز کردن چت ربات دریافت، یک مودال
-   تأیید ماندگار داخل مینی‌اپ نشان می‌دهیم — چون وقتی کاربر از پیش در چتِ
-   ربات دریافت باشد، openTelegramLink هیچ حرکتی در صفحه ایجاد نمی‌کند
-   (مینی‌اپ جمع هم نمی‌شود) و کاربر فکر می‌کرد ارسال نشده است.
-   حالا در هر دو حالت، کاربر داخل مینی‌اپ می‌بیند فایل راه است. */
-function showDlBot (botLink, r) {
-  r = r || {};
-  var html =
-    '<div style="text-align:center;padding:8px 2px 2px">' +
-      '<div style="font-size:46px;line-height:1.15">📥</div>' +
-      '<p style="font-size:16px;font-weight:800;margin:10px 0 4px">درخواست دانلود شما ثبت شد ✓</p>' +
-      '<p class="note" style="margin:0 0 6px">فایل به چتِ <b>ربات دریافت</b> ارسال می‌شود.</p>' +
-      '<p class="note" style="margin:0 0 14px">اگر چت باز نشد، روی دکمهٔ پایین بزنید؛ اگر همین حالا در چت ربات هستید، فایل <b>همان‌جا</b> می‌رسد — بالای چت را بررسی کنید.</p>' +
-      '<div class="adm-row" style="justify-content:center;gap:8px;flex-wrap:wrap">' +
-        '<button type="button" class="btn btn-primary" id="dlbot-open">باز کردن ربات دریافت 🤖</button>' +
-        '<button type="button" class="btn btn-ghost" id="dlbot-copy">📋 کپی لینک</button>' +
-      '</div>' +
-      '<p class="note" style="margin:14px 0 2px" dir="ltr"><code style="word-break:break-all">' + esc(botLink) + '</code></p>' +
-      '<p class="note" style="margin:10px 0 0">⏳ این درخواست حدود ۱۰ دقیقه اعتبار دارد؛ اگر فایل نرسید، دوباره از سایت دکمهٔ دریافت را بزنید.</p>' +
-    '</div>';
-  openModal('فایل شما در راه است', html, function (wrap) {
-    var bOpen = $('#dlbot-open', wrap);
-    if (bOpen) bOpen.addEventListener('click', function () { openBot(botLink); });
-    var bCopy = $('#dlbot-copy', wrap);
-    if (bCopy) bCopy.addEventListener('click', function () { copyText(botLink, function () { toast('لینک کپی شد ✓', 'ok'); }); });
-  });
-  /* اگر کاربر در چت ربات دریافت نیست، همین حالا آن را باز می‌کنیم
-     (رفتار قبلی حفظ می‌شود و مینی‌اپ جمع می‌شود). اگر در چت باشد،
-     چیزی دیده نمی‌شود — اما مودال باز مانده و کاربر آگاه است. */
-  setTimeout(function () { openBot(botLink); }, 300);
+/* پس از ثبت درخواست دانلود: مینی‌اپ را می‌بندیم و کاربر را به چتِ ربات
+   دریافت می‌بریم تا فایل را همان‌جا ببیند. دو حالت را باید پوشش دهیم:
+     ۱) کاربر جای دیگری است (مثلاً چت ربات اصلی/کانال): با openTelegramLink
+        به چت ربات دریافت هدایت می‌شود و مینی‌اپ بسته می‌شود.
+     ۲) کاربر از پیش داخل چت ربات دریافت است: در این حالت openTelegramLink
+        روی همان چتِ باز هیچ حرکتی نمی‌کند و مینی‌اپ هم جمع نمی‌شد؛ پس
+        صراحتاً close() را صدا می‌زنیم تا مینی‌اپ بسته شود و کاربر به همان
+        چت برگردد و فایلِ رسیده را ببیند.
+   با انجام هر دو کار، در هر دو حالت مینی‌اپ بسته می‌شود و کاربر پیش ربات
+   دریافت می‌رسد. */
+function goToDlBot (botLink) {
+  if (!botLink) { toast('لینک تنظیم نشده', 'err'); return; }
+  var link = String(botLink);
+  haptic('light');
+  closeModal();
+  if (TG && typeof TG.openTelegramLink === 'function') {
+    try { TG.openTelegramLink(link); } catch (e) { }
+    /* اگر کاربر از پیش در همان چت بود openTelegramLink بی‌اثر است؛
+       پس مینی‌اپ را خودمان می‌بندیم تا حتماً جمع شود. */
+    setTimeout(function () {
+      if (TG && typeof TG.close === 'function') { try { TG.close(); return; } catch (e) { } }
+      try { location.assign(link); } catch (e) { }
+    }, 150);
+    return;
+  }
+  /* بدون SDK تلگرام: ناوبری مستقیم در همان تب. */
+  try { location.assign(link); } catch (e) { }
 }
 
 function requestDownload (itemId, opts, btn) {
@@ -9573,10 +9570,10 @@ function requestDownload (itemId, opts, btn) {
 
     closeModal();
     if (r.needAd && r.ad) {
-      showAdThen(r, function (g) { showDlBot(g.botLink, g); });
+      showAdThen(r, function (g) { goToDlBot(g.botLink); });
       return;
     }
-    showDlBot(r.botLink, r);
+    goToDlBot(r.botLink);
   }).catch(function (e) {
     release();
     if (e.data && e.data.needWallet) { toast('موجودی کافی نیست', 'err'); nav('#/wallet'); return; }
