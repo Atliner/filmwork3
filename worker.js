@@ -9520,33 +9520,54 @@ function showAdThen (res, done) {
   }, 1000);
 }
 
-/* پس از ثبت درخواست دانلود: مینی‌اپ را می‌بندیم و کاربر را به چتِ ربات
-   دریافت می‌بریم تا فایل را همان‌جا ببیند. دو حالت را باید پوشش دهیم:
-     ۱) کاربر جای دیگری است (مثلاً چت ربات اصلی/کانال): با openTelegramLink
-        به چت ربات دریافت هدایت می‌شود و مینی‌اپ بسته می‌شود.
-     ۲) کاربر از پیش داخل چت ربات دریافت است: در این حالت openTelegramLink
-        روی همان چتِ باز هیچ حرکتی نمی‌کند و مینی‌اپ هم جمع نمی‌شد؛ پس
-        صراحتاً close() را صدا می‌زنیم تا مینی‌اپ بسته شود و کاربر به همان
-        چت برگردد و فایلِ رسیده را ببیند.
-   با انجام هر دو کار، در هر دو حالت مینی‌اپ بسته می‌شود و کاربر پیش ربات
-   دریافت می‌رسد. */
+/* پس از ثبت درخواست دانلود: کاربر را به چتِ ربات دریافت می‌بریم و
+   مینی‌اپ را مینیمایز می‌کنیم (نه بسته). روی تلگرامِ مدرن (Bot API 7.0+)
+   خودِ openTelegramLink این کار را می‌کند: به چت می‌رود و مینی‌اپ را
+   مینیمایز نگه می‌دارد (زنده می‌ماند). تلگرام متدِ «مینیمایزِ برنامه‌ای»
+   عمومی ندارد، بنابراین:
+     ۱) کاربر جای دیگری است → openTelegramLink به چت ربات دریافت می‌رود و
+        مینی‌اپ خودکار مینیمایز می‌شود.
+     ۲) کاربر از پیش داخل همان چت است → openTelegramLink هیچ کاری نمی‌کند
+        و هیچ سیگنالی نمی‌آید؛ فقط در همین حالتِ خاص (که مینی‌اپ همچنان
+        دیده می‌شود) به‌عنوان آخرین چاره close() را صدا می‌زنیم تا کاربر
+        گیر نکند و به همان چت برگردد. */
 function goToDlBot (botLink) {
   if (!botLink) { toast('لینک تنظیم نشده', 'err'); return; }
   var link = String(botLink);
   haptic('light');
   closeModal();
-  if (TG && typeof TG.openTelegramLink === 'function') {
-    try { TG.openTelegramLink(link); } catch (e) { }
-    /* اگر کاربر از پیش در همان چت بود openTelegramLink بی‌اثر است؛
-       پس مینی‌اپ را خودمان می‌بندیم تا حتماً جمع شود. */
-    setTimeout(function () {
-      if (TG && typeof TG.close === 'function') { try { TG.close(); return; } catch (e) { } }
-      try { location.assign(link); } catch (e) { }
-    }, 150);
+  if (!(TG && typeof TG.openTelegramLink === 'function')) {
+    /* بدون SDK تلگرام: ناوبری مستقیم در همان تب. */
+    try { location.assign(link); } catch (e) { }
     return;
   }
-  /* بدون SDK تلگرام: ناوبری مستقیم در همان تب. */
-  try { location.assign(link); } catch (e) { }
+  try { TG.openTelegramLink(link); } catch (e) { }
+
+  /* آیا مینی‌اپ واقعاً مینیمایز/مخفی شد؟ اگر هر سیگنالی از مخفی‌شدن
+     بیاید یعنی مینیمایز رخ داده و نباید چیزی را ببندیم. */
+  var settled = false;
+  function markHidden () { settled = true; cleanup(); }
+  function onVis () { if (document.hidden) markHidden(); }
+  function cleanup () {
+    try { document.removeEventListener('visibilitychange', onVis); } catch (e) { }
+    try { window.removeEventListener('blur', markHidden); } catch (e) { }
+    try { window.removeEventListener('pagehide', markHidden); } catch (e) { }
+    if (TG && typeof TG.offEvent === 'function') { try { TG.offEvent('deactivated', markHidden); } catch (e) { } }
+  }
+  try { document.addEventListener('visibilitychange', onVis); } catch (e) { }
+  try { window.addEventListener('blur', markHidden); } catch (e) { }
+  try { window.addEventListener('pagehide', markHidden); } catch (e) { }
+  if (TG && typeof TG.onEvent === 'function') { try { TG.onEvent('deactivated', markHidden); } catch (e) { } }
+  /* Bot API 8.0+: اگر همین حالا غیرفعال (مینیمایز) شده باشد. */
+  if (TG && TG.isActive === false) markHidden();
+
+  setTimeout(function () {
+    cleanup();
+    if (settled) return; /* مینیمایز/مخفی شد — کاری لازم نیست */
+    /* هیچ اتفاقی نیفتاد (کاربر از پیش در همان چت بود): آخرین چاره. */
+    if (typeof TG.close === 'function') { try { TG.close(); return; } catch (e) { } }
+    try { location.assign(link); } catch (e) { }
+  }, 700);
 }
 
 function requestDownload (itemId, opts, btn) {

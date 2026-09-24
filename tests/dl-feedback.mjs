@@ -14,8 +14,9 @@ assert.ok(reqBody.includes('goToDlBot(r.botLink)'), 'مسیر مستقیم با�
 assert.ok(!/openBot\(r\.botLink\)/.test(reqBody), 'openBot خام نباید مستقیم در requestDownload باشد');
 assert.ok(!/openBot\(g\.botLink\)/.test(reqBody), 'openBot خام نباید در مسیر تبلیغ باشد');
 
-/* ── ۲) رفتار goToDlBot: مینی‌اپ بسته می‌شود و کاربر به ربات دریافت
-   هدایت می‌شود؛ نه مودال ماندگار ── */
+/* ── ۲) رفتار goToDlBot: کاربر به ربات دریافت هدایت می‌شود و مینی‌اپ
+   مینیمایز می‌شود (نه بسته)؛ فقط در حالتِ لبه‌ایِ «از پیش در همان چت»
+   که هیچ سیگنالی نمی‌آید، به‌عنوان آخرین چاره close() صدا زده می‌شود ── */
 const fnStart = source.indexOf('function goToDlBot (botLink) {');
 const fnEnd = source.indexOf('function requestDownload (itemId, opts, btn) {');
 assert.ok(fnStart > 0 && fnEnd > fnStart, 'goToDlBot not found');
@@ -23,47 +24,77 @@ const block = source.slice(fnStart, fnEnd);
 
 const LINK = 'https://t.me/FileBot?start=dl_x1';
 
-function runScenario(makeTg) {
+function runScenario(opts) {
+  opts = opts || {};
   const calls = { openTelegramLink: [], close: 0, assign: [], toast: [], haptic: [], closeModal: 0 };
-  const pending = [];
+  const timers = [];
+  const winL = {}, docL = {}, tgL = {};
+  function add(store, type, fn) { (store[type] = store[type] || []).push(fn); }
+  function remove(store, type, fn) { if (store[type]) store[type] = store[type].filter(f => f !== fn); }
+  function fire(store, type, ctx) { (store[type] || []).slice().forEach(fn => fn.call(ctx)); }
+
+  const documentObj = {
+    hidden: false,
+    addEventListener: (t, fn) => add(docL, t, fn),
+    removeEventListener: (t, fn) => remove(docL, t, fn),
+  };
+  const windowObj = {
+    addEventListener: (t, fn) => add(winL, t, fn),
+    removeEventListener: (t, fn) => remove(winL, t, fn),
+  };
+  const TG = opts.noTg ? null : {
+    openTelegramLink: (u) => { calls.openTelegramLink.push(u); },
+    onEvent: (t, fn) => add(tgL, t, fn),
+    offEvent: (t, fn) => remove(tgL, t, fn),
+    close: () => { calls.close += 1; },
+    isActive: opts.isActive === undefined ? true : opts.isActive,
+  };
   const sandbox = {
     toast: (m, t) => { calls.toast.push([m, t]); },
     haptic: (t) => { calls.haptic.push(t); },
     closeModal: () => { calls.closeModal += 1; },
-    setTimeout: (fn) => { pending.push(fn); },
+    setTimeout: (fn) => { timers.push(fn); },
     location: { assign: (u) => { calls.assign.push(u); } },
-    TG: makeTg(calls),
+    document: documentObj,
+    window: windowObj,
+    TG,
   };
   vm.createContext(sandbox);
   const { goToDlBot } = new vm.Script('(function(){' + block + '\nreturn { goToDlBot };})()').runInContext(sandbox);
   goToDlBot(LINK);
-  // اجرای callbackهای setTimeout (بخش بستن مینی‌اپ)
-  pending.forEach((fn) => fn());
+
+  // شبیه‌سازی مینیمایز/مخفی‌شدن قبل از اجرای تایمرِ آخرین‌چاره
+  if (opts.signal === 'visibility') { documentObj.hidden = true; fire(docL, 'visibilitychange', documentObj); }
+  if (opts.signal === 'blur') fire(winL, 'blur');
+  if (opts.signal === 'deactivated') fire(tgL, 'deactivated');
+
+  // اجرای callbackهای setTimeout (بخش آخرین‌چاره)
+  timers.forEach((fn) => fn());
   return calls;
 }
 
-/* حالت الف) کاربر جای دیگری است / SDK کامل تلگرام: به ربات دریافت هدایت
-   می‌شود و مینی‌اپ هم صراحتاً بسته می‌شود. */
-const full = runScenario((calls) => ({
-  openTelegramLink: (u) => { calls.openTelegramLink.push(u); },
-  close: () => { calls.close += 1; },
-}));
-assert.deepEqual(full.openTelegramLink, [LINK], 'باید به چت ربات دریافت هدایت کند');
-assert.equal(full.close, 1, 'مینی‌اپ باید صراحتاً بسته شود (حتی اگر کاربر از پیش در چت ربات باشد)');
-assert.equal(full.closeModal, 1, 'هر مودال بازی باید بسته شود');
-assert.equal(full.assign.length, 0, 'وقتی close موجود است نباید ناوبری خام همان‌تب انجام شود');
+/* حالت الف) مینیمایز موفق (سیگنال visibilitychange): کاربر به ربات دریافت
+   می‌رود و مینی‌اپ مینیمایز می‌شود — نباید بسته شود. */
+const vis = runScenario({ signal: 'visibility' });
+assert.deepEqual(vis.openTelegramLink, [LINK], 'باید به چت ربات دریافت هدایت کند');
+assert.equal(vis.close, 0, 'با مینیمایزِ موفق نباید مینی‌اپ بسته شود');
+assert.equal(vis.closeModal, 1, 'هر مودال بازی باید بسته شود');
+assert.equal(vis.assign.length, 0, 'وقتی مینیمایز شد نباید ناوبری خام انجام شود');
 
-/* حالت ب) shim سبک (بدون close واقعی): openTelegramLink خودش ناوبری
-   می‌کند؛ اگر close نبود، به ناوبری مستقیم برمی‌گردیم. */
-const noClose = runScenario((calls) => ({
-  openTelegramLink: (u) => { calls.openTelegramLink.push(u); },
-}));
-assert.deepEqual(noClose.openTelegramLink, [LINK], 'shim هم باید openTelegramLink را صدا بزند');
-assert.deepEqual(noClose.assign, [LINK], 'بدون close باید به ناوبری مستقیم برگردد');
+/* سیگنال‌های دیگرِ مخفی‌شدن هم باید جلوی بسته‌شدن را بگیرند. */
+assert.equal(runScenario({ signal: 'blur' }).close, 0, 'blur هم یعنی مینیمایز شد');
+assert.equal(runScenario({ signal: 'deactivated' }).close, 0, 'رویداد deactivated هم یعنی مینیمایز شد');
+assert.equal(runScenario({ isActive: false }).close, 0, 'isActive=false یعنی از پیش مینیمایز است');
+
+/* حالت ب) کاربر از پیش در همان چت است: openTelegramLink بی‌اثر، هیچ
+   سیگنالی نمی‌آید → آخرین چاره close(). */
+const stuck = runScenario({});
+assert.deepEqual(stuck.openTelegramLink, [LINK], 'باز هم باید openTelegramLink را امتحان کند');
+assert.equal(stuck.close, 1, 'در حالتِ گیرکرده باید به‌عنوان آخرین چاره بسته شود');
 
 /* حالت ج) اصلاً TG نیست: ناوبری مستقیم در همان تب. */
-const noTg = runScenario(() => null);
+const noTg = runScenario({ noTg: true });
 assert.deepEqual(noTg.assign, [LINK], 'بدون TG باید ناوبری مستقیم انجام شود');
 assert.equal(noTg.openTelegramLink.length, 0);
 
-console.log('PASS: download feedback (mini-app closes itself and routes the user to the delivery bot, covering the already-in-chat case).');
+console.log('PASS: download feedback (mini-app minimizes and routes to delivery bot; closes only as a last resort in the already-in-chat case).');
