@@ -53,6 +53,10 @@ assert(source.includes("$all('[data-vt]', root)") && source.includes("$all('[dat
 assert(source.includes("addEventListener('change', function () { saveVarRow(el); })"),
   'ذخیرهٔ خودکار نسخه باید روی رویداد change باشد');
 
+// ── ۷) فیلد بی‌استفادهٔ «لینک فایل تلگرام» از فرم ویرایش حذف شده باشد ──
+assert(!source.includes('id="e-source"'), 'فیلد لینک فایل تلگرام باید از فرم حذف شده باشد');
+assert(!source.includes('<label>لینک فایل تلگرام</label>'), 'برچسب لینک فایل تلگرام نباید در فرم بماند');
+
 // ── ۳) رابط کاربری: دکمهٔ سادهٔ افزودن به‌جای فیلد لینک ──
 assert(source.includes('افزودن محتوای جدید'), 'دکمهٔ افزودن محتوای جدید باید وجود داشته باشد');
 assert(!source.includes('افزودن از لینک پست تلگرام'), 'باکس افزودن از لینک باید حذف شده باشد');

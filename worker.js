@@ -11645,7 +11645,6 @@ function openItemEditor (it, prefillUrl) {
     '</div>' +
     '<div class="field"><label>لینک پوستر (هر سایت — http/https)</label><input id="e-poster" dir="ltr" value="' + esc(it.posterOverride || '') + '" placeholder="https://example.com/poster.jpg"></div>' +
     galleryEditorHtml(it) +
-    '<div class="field"><label>لینک فایل تلگرام</label><input id="e-source" value="' + esc(prefillUrl || sourceHref(it.source) || '') + '" placeholder="https://t.me/kanal/12345"></div>' +
     '<div class="field"><label>توضیحات</label><textarea id="e-desc">' + esc(it.description || '') + '</textarea></div>' +
     '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-bottom:12px"><input type="checkbox" id="e-featured" style="width:auto"' + (it.featured ? ' checked' : '') + '> ⭐ نمایش در هیرو صفحهٔ اصلی</label>' +
     (isSeries ? '' : ('<div class="d-sec-h">کیفیت‌ها و نوع صدا</div><p style="font-size:12px;color:var(--tx3);margin-bottom:8px">کیفیت اصلی فقط عنوان است (بدون لینک). زیر هر کیفیت با «نسخه دیگر» فایل را با عنوان و لینک اضافه کنید. ستاره یعنی فقط اشتراک.</p><div id="e-var">' + variantGridHtml(it, '') + '</div>')) +
@@ -11762,9 +11761,6 @@ function openItemEditor (it, prefillUrl) {
       }
       var poster = $('#e-poster', wrap);
       if (poster) body.posterUrl = poster.value.trim();
-      var srcEl = $('#e-source', wrap);
-      /* همیشه ارسال می‌شود (حتی خالی) تا پاک‌کردن/تغییر لینک فایل تلگرام ذخیره شود */
-      if (srcEl) body.sourceUrl = srcEl.value.trim();
       var btn = $('#e-save', wrap);
       btn.disabled = true; btn.textContent = 'در حال ذخیره…';
       api('/admin/item/' + it.id, { method: 'POST', body: body }).then(function () {
