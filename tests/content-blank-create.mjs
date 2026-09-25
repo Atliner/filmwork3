@@ -40,6 +40,11 @@ assert.equal(resaved.item.variants.sub['1080'].source.msgId, '371', 'ذخیره�
 const cleared = await app.adminUpsertItem(store(), set, { sourceUrl: '' }, withSrc.item);
 assert.equal(cleared.item.source, null, 'خالی‌کردن لینک فایل تلگرام باید منبع را پاک کند');
 
+// ── ۵) رابط کاربری: عنوان کیفیت باید قابل ویرایش/ذخیره باشد ──
+assert(source.includes("$all('[data-ql]', root)"), 'ورودی عنوان کیفیت باید هندلر ذخیره داشته باشد');
+assert(source.includes('qualityLabel: lab, setLabel: true'), 'تغییر عنوان کیفیت باید به سرور ارسال شود');
+assert(source.includes('body.setLabel'), 'سرور باید پرچم setLabel را برای پاک‌کردن عنوان پشتیبانی کند');
+
 // ── ۳) رابط کاربری: دکمهٔ سادهٔ افزودن به‌جای فیلد لینک ──
 assert(source.includes('افزودن محتوای جدید'), 'دکمهٔ افزودن محتوای جدید باید وجود داشته باشد');
 assert(!source.includes('افزودن از لینک پست تلگرام'), 'باکس افزودن از لینک باید حذف شده باشد');

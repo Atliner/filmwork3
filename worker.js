@@ -5864,6 +5864,9 @@ async function handleAdmin(store, url, request, adminUser) {
       ensureVariants(bag);
       if (!bag.variants[track][qk]) bag.variants[track][qk] = { source: null, sizeBytes: null, files: [] };
       bag.variants[track][qk].label = labelIn;
+    } else if (body.setLabel && bag.variants && bag.variants[track] && bag.variants[track][qk]) {
+      /* عنوان خالی شد → به عنوان پیش‌فرض کیفیت برگردد */
+      delete bag.variants[track][qk].label;
     }
     syncEpisodesFromSeasons(item);
     item.updatedAt = Date.now();
@@ -11870,6 +11873,17 @@ function openItemEditor (it, prefillUrl) {
             it = r.item;
             toast('کیفیت حذف شد', 'ok');
             rebindVar(root, epid);
+          }).catch(function (e) { toast(e.message, 'err'); });
+        });
+      });
+      $all('[data-ql]', root).forEach(function (b) {
+        b.addEventListener('change', function () {
+          var parts = b.getAttribute('data-ql').split('-');
+          var track = parts[0], q = parts[1], epid = parts[2] || epId || '';
+          var lab = b.value.trim();
+          api('/admin/item/' + it.id + '/variant', { method: 'POST', body: { track: track, quality: q, epId: epid, qualityLabel: lab, setLabel: true } }).then(function (r) {
+            it = r.item;
+            toast('عنوان کیفیت ذخیره شد ✓', 'ok');
           }).catch(function (e) { toast(e.message, 'err'); });
         });
       });
