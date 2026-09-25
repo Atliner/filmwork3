@@ -5079,6 +5079,10 @@ async function adminUpsertItem(store, set, body, existing) {
     } else {
       return { error: 'لینک منبع معتبر نیست (لینک t.me/کانال/شماره)' };
     }
+  } else if (body.sourceUrl !== undefined) {
+    /* لینک فایل تلگرام خالی شده → منبع اصلی پاک شود (قابل حذف/تغییر) */
+    item.source = null;
+    item.media = {};
   }
   item.updatedAt = Date.now();
   await saveItemRecord(store, item);
@@ -10773,12 +10777,10 @@ function adminTabHtml (tab, data, q) {
         '</div></div>';
     }).join('');
     return '<div class="adm-h">🎬 مدیریت محتوا <span class="badge">' + faNum(data.items.length) + '</span></div>' +
-      '<div class="adm-box"><h4>افزودن از لینک پست تلگرام</h4>' +
-      '<div class="adm-row"><input id="adm-url" placeholder="https://t.me/kanal/12345" style="flex:1;min-width:200px" value="' + (q.url ? esc(q.url) : '') + '">' +
-      '<button class="btn btn-ghost btn-sm" id="adm-preview">👁 پیش‌نمایش</button>' +
-      '<button class="btn btn-primary btn-sm" id="adm-add">➕ افزودن</button></div>' +
-      '<div id="adm-preview" style="margin-top:10px"></div></div>' +
-      (rows || '<div class="empty" style="padding:30px"><div class="ic">📭</div><p>محتوایی نیست. لینک پست تلگرام را در بالا بچسبانید.</p></div>');
+      '<div class="adm-box"><h4>افزودن محتوای جدید</h4>' +
+      '<p style="font-size:12.5px;color:var(--tx3);margin-bottom:8px">یک محتوای خالی ساخته می‌شود و صفحهٔ ویرایش باز می‌شود تا خودتان همهٔ فیلدها را پر کنید. برای گرفتن خودکار مشخصات از یک پست کانال، از دکمهٔ «پر کردن از پست کانال» داخل همان صفحهٔ ویرایش استفاده کنید.</p>' +
+      '<div class="adm-row"><button class="btn btn-primary btn-sm" id="adm-add">➕ افزودن محتوای جدید</button></div></div>' +
+      (rows || '<div class="empty" style="padding:30px"><div class="ic">📭</div><p>محتوایی نیست. با دکمهٔ «افزودن محتوای جدید» شروع کنید.</p></div>');
   }
   if (tab === 'ads') {
     var g = data.gate || {};
@@ -11331,35 +11333,15 @@ function bindAdminTab (tab, q) {
     });
   }
   if (tab === 'content') {
-    var urlIn = $('#adm-url');
-    var pvBox = $('#adm-preview');
-    function preview () {
-      var u = urlIn.value.trim();
-      if (!u) { toast('لینک را وارد کنید', 'err'); return; }
-      pvBox.innerHTML = '<div class="spin" style="margin:10px auto"></div>';
-      api('/admin/validate', { method: 'POST', body: { url: u } }).then(function (r) {
-        pvBox.innerHTML = '<div class="adm-item" style="margin-top:8px">' +
-          (r.thumb ? '<div class="th" style="background-image:url(' + r.thumb + ')"></div>' : '') +
-          '<div class="inf"><b>' + esc(r.caption ? r.caption.split(NL)[0].slice(0, 80) : (r.docName || 'محتوا')) + '</b><span>' +
-          '<em class="badge acc">' + esc(r.kind || '') + '</em>' +
-          (r.sizeBytes ? '<em class="badge">' + fmtBytes(r.sizeBytes) + '</em>' : '') +
-          (r.w ? '<em class="badge">' + r.w + '×' + r.h + '</em>' : '') +
-          '</span></div></div>';
-      }).catch(function (e) { pvBox.innerHTML = ''; toast(e.message, 'err'); });
-    }
-    $('#adm-preview').addEventListener('click', preview);
-    $('#adm-add').addEventListener('click', function () {
-      var u = urlIn.value.trim();
-      if (!u) { toast('لینک را وارد کنید', 'err'); return; }
-      var btn = $('#adm-add');
-      btn.disabled = true; btn.textContent = 'در حال دریافت…';
-      api('/admin/item', { method: 'POST', body: { url: u } }).then(function (r) {
-        toast('ثبت شد ✓', 'ok');
+    var addBtn = $('#adm-add');
+    if (addBtn) addBtn.addEventListener('click', function () {
+      addBtn.disabled = true; addBtn.textContent = 'در حال ساخت…';
+      api('/admin/item', { method: 'POST', body: {} }).then(function (r) {
+        toast('محتوای جدید ساخته شد ✓', 'ok');
         openItemEdit(r.item.id, null);
       }).catch(function (e) {
-        btn.disabled = false; btn.textContent = '➕ افزودن';
-        if (e.data && e.data.duplicate) toast('این پست قبلاً ثبت شده', 'err');
-        else toast(e.message, 'err');
+        addBtn.disabled = false; addBtn.textContent = '➕ افزودن محتوای جدید';
+        toast(e.message, 'err');
       });
     });
     $all('[data-edit]').forEach(function (b) {
@@ -11792,8 +11774,9 @@ function openItemEditor (it, prefillUrl) {
       }
       var poster = $('#e-poster', wrap);
       if (poster) body.posterUrl = poster.value.trim();
-      var su = $('#e-source', wrap).value.trim();
-      if (su) body.sourceUrl = su;
+      var srcEl = $('#e-source', wrap);
+      /* همیشه ارسال می‌شود (حتی خالی) تا پاک‌کردن/تغییر لینک فایل تلگرام ذخیره شود */
+      if (srcEl) body.sourceUrl = srcEl.value.trim();
       var btn = $('#e-save', wrap);
       btn.disabled = true; btn.textContent = 'در حال ذخیره…';
       api('/admin/item/' + it.id, { method: 'POST', body: body }).then(function () {
