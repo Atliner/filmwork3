@@ -23,12 +23,20 @@ assert.equal(it.source, null, 'منبع نباید خودکار تنظیم شو�
 assert.deepEqual(it.variants, { sub: {}, dub: {} }, 'هیچ کیفیت زیرنویس/دوبله‌ای نباید خودکار ساخته شود');
 assert.equal(Object.keys(it.variants.sub).length, 0, 'کیفیت زیرنویس باید خالی باشد');
 
-// ── ۲) تنظیم دستی لینک منبع، سپس پاک‌کردن آن باید ذخیره شود ──
+// ── ۲) تنظیم دستی لینک منبع نباید هیچ کیفیت/واریانتی (مثلاً 1080p) بسازد ──
 globalThis.fetch = async () => Response.json({ ok: true, result: {} });
-const withSrc = await app.adminUpsertItem(store(), set, { sourceUrl: 'https://t.me/kanal/12345' }, it);
+const withSrc = await app.adminUpsertItem(store(), set, { sourceUrl: 'https://t.me/c/3981503084/368' }, it);
 assert(withSrc.item.source, 'لینک منبع باید تنظیم شود');
+assert.equal(Object.keys(withSrc.item.variants.sub).length, 0, 'تنظیم لینک منبع نباید کیفیت زیرنویس بسازد');
+assert.equal(Object.keys(withSrc.item.variants.dub).length, 0, 'تنظیم لینک منبع نباید کیفیت دوبله بسازد');
 
-// حالا خالی می‌کنیم — باید پاک شود (باگ «حتی پاک هم نمی‌شه»)
+// ── ۳) کیفیت 1080p که ادمین دستی می‌سازد، با ذخیرهٔ مجدد فرم برنگردد (باگ ریورت) ──
+const manual = JSON.parse(JSON.stringify(withSrc.item));
+manual.variants.sub['1080'] = { source: { chatId: '3981503084', msgId: '371' }, sizeBytes: null, files: [] };
+const resaved = await app.adminUpsertItem(store(), set, { sourceUrl: 'https://t.me/c/3981503084/368' }, manual);
+assert.equal(resaved.item.variants.sub['1080'].source.msgId, '371', 'ذخیرهٔ فرم نباید کیفیت 1080p دستی را به لینک منبع برگرداند');
+
+// ── ۴) خالی‌کردن لینک منبع باید ذخیره شود (باگ «حتی پاک هم نمی‌شه») ──
 const cleared = await app.adminUpsertItem(store(), set, { sourceUrl: '' }, withSrc.item);
 assert.equal(cleared.item.source, null, 'خالی‌کردن لینک فایل تلگرام باید منبع را پاک کند');
 

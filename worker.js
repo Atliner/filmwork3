@@ -5054,24 +5054,10 @@ async function adminUpsertItem(store, set, body, existing) {
     if (p) {
       if (p.private) {
         item.source = sourceFromParsed(p);
-        ensureVariants(item);
-        const qkP = qualityKey(item.quality) || '1080';
-        item.variants.sub[qkP] = { source: item.source, sizeBytes: null };
         await store.set('src:c:' + p.chatId + '/' + p.msgId, item.id);
       } else {
         const res = await resolvePost(store, p.user, p.msgId, true);
         item.source = { user: p.user, msgId: p.msgId, tmeUrl: res.tmeUrl, chatId: null, fileId: '', mediaType: res.kind || '' };
-        ensureVariants(item);
-        const qk0 = qualityKey(item.quality) || qualityKey(guessQuality(res.w)) || '1080';
-        item.variants.sub[qk0] = { source: item.source, sizeBytes: res.sizeBytes || null };
-        if (res.kind === 'video' || res.kind === 'audio') {
-          item.media = { sizeBytes: res.sizeBytes, width: res.w, height: res.h, kind: res.kind };
-          if (!item.quality && res.w) item.quality = guessQuality(res.w);
-          if (!item.description && res.caption) item.description = res.caption.slice(0, 1200);
-          if (!item.title || item.title === 'بدون عنوان') item.title = res.caption.split('\n')[0].slice(0, 140) || item.title;
-        } else if (res.kind === 'document') {
-          item.media = { sizeBytes: res.sizeBytes, kind: 'document' };
-        }
         await store.set('src:' + p.user + '/' + p.msgId, item.id);
       }
     } else if (/^https:\/\//.test(String(body.sourceUrl).trim()) && isAllowedMediaUrl(String(body.sourceUrl).trim())) {
