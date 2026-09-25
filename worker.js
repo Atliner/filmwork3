@@ -11589,7 +11589,6 @@ function openItemEditor (it, prefillUrl) {
           return '<div class="var-extra">' +
             '<input data-vt="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="عنوان نسخه" value="' + esc(f.title || '') + '">' +
             '<input data-vu2="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی" value="' + esc(sourceHref(f.source) || '') + '" dir="ltr">' +
-            '<button type="button" class="btn btn-ghost btn-sm" data-vf="' + t.k + ':' + q + ':' + (epId || '') + ':' + esc(f.id) + '">ثبت</button>' +
             '<button type="button" class="btn btn-danger btn-sm" data-vd="' + t.k + ':' + q + ':' + (epId || '') + ':' + esc(f.id) + '">حذف</button></div>';
         }).join('');
         return '<div class="var-q">' +
@@ -11820,39 +11819,50 @@ function openItemEditor (it, prefillUrl) {
           var row = document.createElement('div');
           row.className = 'var-extra';
           row.innerHTML = '<input class="vf-new-t" placeholder="عنوان نسخه مثلاً دوبله دوم">' +
-            '<input class="vf-new-u" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی" dir="ltr">' +
-            '<button type="button" class="btn btn-primary btn-sm vf-new-go">ثبت</button>' +
+            '<input class="vf-new-u" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی؛ برای ذخیره از فیلد خارج شوید" dir="ltr">' +
             '<button type="button" class="btn btn-ghost btn-sm vf-new-x">انصراف</button>';
           b.parentNode.insertBefore(row, b);
           $('.vf-new-x', row).addEventListener('click', function () { row.remove(); });
-          $('.vf-new-go', row).addEventListener('click', function () {
+          var committing = false;
+          $('.vf-new-u', row).addEventListener('change', function () {
             var title = ($('.vf-new-t', row) && $('.vf-new-t', row).value.trim()) || '';
             var url = ($('.vf-new-u', row) && $('.vf-new-u', row).value.trim()) || '';
-            if (!url) { toast('لینک نسخه را وارد کنید', 'err'); return; }
+            if (!url || committing) return;
+            committing = true;
             api('/admin/item/' + it.id + '/variant', { method: 'POST', body: { track: track, quality: q, url: url, title: title, addFile: true, epId: epid } }).then(function (r) {
               it = r.item;
               toast('نسخه اضافه شد ✓', 'ok');
               rebindVar(root, epid);
-            }).catch(function (e) { toast(e.message, 'err'); });
+            }).catch(function (e) { committing = false; toast(e.message, 'err'); });
           });
+          $('.vf-new-t', row).focus();
         });
       });
-      $all('[data-vf]', root).forEach(function (b) {
-        b.addEventListener('click', function () {
-          var parts = b.getAttribute('data-vf').split(':');
-          var track = parts[0], q = parts[1], epid = parts[2] || epId || '', fid = parts[3] || '';
-          var titleEl = $('[data-vt="' + track + '-' + q + '-' + (epid || '') + '-' + fid + '"]', root);
-          var urlEl = $('[data-vu2="' + track + '-' + q + '-' + (epid || '') + '-' + fid + '"]', root);
-          api('/admin/item/' + it.id + '/variant', { method: 'POST', body: {
-            track: track, quality: q, epId: epid, fileId: fid,
-            title: titleEl ? titleEl.value.trim() : '',
-            url: urlEl ? urlEl.value.trim() : ''
-          } }).then(function (r) {
-            it = r.item;
-            toast('نسخه ذخیره شد ✓', 'ok');
-            rebindVar(root, epid);
-          }).catch(function (e) { toast(e.message, 'err'); });
-        });
+      /* ذخیرهٔ خودکار عنوان/لینک نسخه هنگام خارج‌شدن از فیلد (بدون دکمهٔ ثبت) */
+      function saveVarRow (el) {
+        var row = el.closest ? el.closest('.var-extra') : el.parentNode;
+        if (!row) return;
+        var titleEl = $('[data-vt]', row);
+        var urlEl = $('[data-vu2]', row);
+        var ident = ((urlEl && urlEl.getAttribute('data-vu2')) || (titleEl && titleEl.getAttribute('data-vt')) || '');
+        var parts = ident.split('-');
+        var track = parts[0], q = parts[1], epid = parts[2] || epId || '', fid = parts[3] || '';
+        var url = urlEl ? urlEl.value.trim() : '';
+        api('/admin/item/' + it.id + '/variant', { method: 'POST', body: {
+          track: track, quality: q, epId: epid, fileId: fid,
+          title: titleEl ? titleEl.value.trim() : '',
+          url: url
+        } }).then(function (r) {
+          it = r.item;
+          toast(url ? 'نسخه ذخیره شد ✓' : 'نسخه حذف شد', 'ok');
+          if (!url) rebindVar(root, epid); // ردیف خالی حذف شد → بازچینش
+        }).catch(function (e) { toast(e.message, 'err'); });
+      }
+      $all('[data-vt]', root).forEach(function (el) {
+        el.addEventListener('change', function () { saveVarRow(el); });
+      });
+      $all('[data-vu2]', root).forEach(function (el) {
+        el.addEventListener('change', function () { saveVarRow(el); });
       });
       $all('[data-vd]', root).forEach(function (b) {
         b.addEventListener('click', function () {

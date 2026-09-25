@@ -45,6 +45,14 @@ assert(source.includes("$all('[data-ql]', root)"), 'ورودی عنوان کیف
 assert(source.includes('qualityLabel: lab, setLabel: true'), 'تغییر عنوان کیفیت باید به سرور ارسال شود');
 assert(source.includes('body.setLabel'), 'سرور باید پرچم setLabel را برای پاک‌کردن عنوان پشتیبانی کند');
 
+// ── ۶) دکمهٔ «ثبت» نسخه حذف شده و عنوان/لینک با خارج‌شدن از فیلد ذخیره می‌شود ──
+assert(!source.includes('data-vf='), 'دکمهٔ ثبت نسخه باید حذف شده باشد');
+assert(!source.includes('vf-new-go'), 'دکمهٔ ثبت افزودن نسخه باید حذف شده باشد');
+assert(source.includes("$all('[data-vt]', root)") && source.includes("$all('[data-vu2]', root)"),
+  'عنوان و لینک نسخه باید هندلر change (ذخیره با خروج از فیلد) داشته باشند');
+assert(source.includes("addEventListener('change', function () { saveVarRow(el); })"),
+  'ذخیرهٔ خودکار نسخه باید روی رویداد change باشد');
+
 // ── ۳) رابط کاربری: دکمهٔ سادهٔ افزودن به‌جای فیلد لینک ──
 assert(source.includes('افزودن محتوای جدید'), 'دکمهٔ افزودن محتوای جدید باید وجود داشته باشد');
 assert(!source.includes('افزودن از لینک پست تلگرام'), 'باکس افزودن از لینک باید حذف شده باشد');
