@@ -143,9 +143,9 @@ const tgHash = '#tgWebAppData=' + encodeURIComponent(initData) + '&tgWebAppVersi
 assert(!html.includes("event: 'web_app_ready'"), 'the old, unsupported ready payload must be gone');
 const splashIdx = html.indexOf('<div id="app">');
 const splashReady = html.indexOf('window.__mvxSendReady', splashIdx);
-const mainScript = html.indexOf("var MVX_VER = 'v3.51'");
+const mainScript = html.indexOf("var MVX_VER = 'v3.52'");
 assert(splashIdx > 0 && splashReady > splashIdx && splashReady < mainScript, 'ready is sent right after the splash markup, before the heavy main script');
-assert(html.includes('<meta name="mvx-version" content="v3.51">'));
+assert(html.includes('<meta name="mvx-version" content="v3.52">'));
 assert(html.includes('loadTgScriptSoon();') && !/loadTgScript\(\);\s*var rq = currentRoute/.test(html), 'telegram.org SDK must not be requested during boot');
 assert(html.includes("tgPost('web_app_ready')") && html.includes("tgPost('web_app_expand')"), 'fallback shim speaks the real protocol');
 assert(html.includes('function tgInitData ()') && html.includes('initData: initData, existingOnly: true'), 'mini-app login uses the captured launch data');

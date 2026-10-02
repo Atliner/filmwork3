@@ -39,6 +39,18 @@
  *  • در موبایل با env(safe-area-inset-*) محتوا از نوار وضعیت (ساعت/باتری)
  *    و دکمه‌های پایین گوشی فاصله می‌گیرد (viewport-fit=cover).
  *
+ *  ── نسخهٔ 3.52 ─────────────────────────────────────────────────────
+ *  • محدودیت دانلود روزانه (۲۰ در روز) برداشته شد و «محدودیت دانلودِ
+ *    پشت‌سرهم» جایگزین آن شد: بعد از N دانلود پشت‌سرهم (پیش‌فرض ۱۰) کاربر
+ *    ۱ دقیقه صبر می‌کند؛ بار دوم ۲ دقیقه، سوم ۱۰ و چهارم ۳۰ دقیقه (برای
+ *    دفعات بعد همان ۳۰). همهٔ عددها از پنل ادمین (تنظیمات → «محدودیت دانلود
+ *    پشت‌سرهم») قابل تغییر است؛ مدیر و کاربر مادام‌العمر مستثنا هستند.
+ *  • این قانون هیچ‌جا به کاربران اعلام نمی‌شود؛ فقط کسی که به آن بخورد یک
+ *    پیام «n دقیقه صبر کنید» می‌گیرد و با درخواست مسدود سکه‌ای کم نمی‌شود.
+ *  • پایان انتظار: ربات یک پیام «محدودیت برداشته شد» برای همان کاربر می‌فرستد
+ *    (با Durable Object alarm روی همان بایندینگ EDITOR؛ از پنل خاموش‌شدنی است).
+ *  • سقف کل روزانهٔ ربات (dlDailyLimitBot، پیش‌فرض خاموش) بدون تغییر ماند.
+ *
  *  ── نسخهٔ 3.51 ─────────────────────────────────────────────────────
  *  • رفع «لینک مستقیم فیلم/سریال (t.me/bot/directlink?startapp=item_...) روی
  *    لودینگ می‌ماند و فقط با تاچ/بارگذاری مجدد باز می‌شود»:
@@ -104,8 +116,16 @@ const ECONOMY_DEFAULTS = {
   sub6m: 450,
   sub1y: 800,
   dlClickPrice: 2,
-  /* سقف روزانهٔ دانلود برای جلوگیری از سرقت/کپی انبوه منابع (0 = نامحدود) */
-  dlDailyLimit: 20,
+  /* محدودیت دانلودِ پشت‌سرهم (ضد سرقت/کپی انبوه منابع): بعد از dlBurstLimit دانلودِ پیاپی
+     کاربر باید dlCooldownSteps[مرحله] دقیقه صبر کند؛ هر بار که بلافاصله دوباره به سقف برسد
+     مرحلهٔ بعدی (آخرین عدد برای دفعات بعد تکرار می‌شود). dlBurstLimit = 0 → بدون محدودیت.
+     dlBurstResetMin: پس از این‌همه دقیقه بدون دانلود، شمارش و مرحله از اول شروع می‌شود.
+     dlLimitNotify: پس از پایان انتظار، از ربات به همان کاربر پیام برود.
+     dlDailyLimitBot: سقف کل دانلود روزانهٔ همهٔ کاربران (اختیاری، 0 = نامحدود). */
+  dlBurstLimit: 10,
+  dlCooldownSteps: [1, 2, 10, 30],
+  dlBurstResetMin: 60,
+  dlLimitNotify: true,
   dlDailyLimitBot: 0,
   refSignupBonus: 50,
   refPurchasePercent: 1,
@@ -1474,14 +1494,16 @@ async function botApi(token, method, params, timeoutMs) {
     opts.headers = { 'content-type': 'application/json' };
     opts.body = JSON.stringify(params);
   }
+  let timer;
   try {
     const ac = new AbortController();
-    const timer = setTimeout(function () { ac.abort(); }, Math.max(3000, Number(timeoutMs) || 8000));
+    timer = setTimeout(function () { ac.abort(); }, Math.max(3000, Number(timeoutMs) || 8000));
     opts.signal = ac.signal;
     const r = await fetch(url, opts);
     clearTimeout(timer);
     return await r.json();
   } catch (e) {
+    clearTimeout(timer);
     return { ok: false, description: String((e && e.message) || e) };
   }
 }
@@ -2241,8 +2263,6 @@ function publicEconomy(set) {
   return {
     unit: set.walletUnitName || 'سکه',
     dlClickPrice: Number(set.dlClickPrice) || 0,
-    dlDailyLimit: Math.max(0, Math.floor(Number(set.dlDailyLimit) || 0)),
-    dlDailyLimitBot: Math.max(0, Math.floor(Number(set.dlDailyLimitBot) || 0)),
     vanishSec: Number(set.vanishSec) || CONFIG.VANISH_SEC,
     refSignupBonus: Number(set.refSignupBonus) || 0,
     refPurchasePercent: Number(set.refPurchasePercent) || 0,
@@ -4256,9 +4276,19 @@ async function apiSubscribe(store, body, request) {
   return json({ ok: true, user: pubUser(fresh), wallet: fresh.wallet, subUntil: fresh.subUntil });
 }
 
-/* ═══════════════════ محدودیت دانلود روزانه (ضد سرقت/کپی انبوه) ═══════════════════ */
+/* ═══════════════════ محدودیت دانلودِ پشت‌سرهم (ضد سرقت/کپی انبوه) ═══════════════════
+   به‌جای سقف روزانه: هر کاربر می‌تواند dlBurstLimit دانلود (پیش‌فرض ۱۰) را پشت‌سرهم انجام
+   دهد؛ بعد از آن چند دقیقه باید صبر کند. اگر بلافاصله پس از پایان انتظار دوباره به سقف برسد،
+   انتظار بعدی طولانی‌تر است: dlCooldownSteps (پیش‌فرض ۱، ۲، ۱۰ و ۳۰ دقیقه؛ برای دفعات بعد
+   همان آخرین عدد). اگر کاربر dlBurstResetMin دقیقه (پیش‌فرض ۶۰) دانلود نکند، شمارش پشت‌سرهم
+   و مرحلهٔ انتظار از اول شروع می‌شود.
+   این قانون هیچ‌جا به کاربران اعلام نمی‌شود؛ فقط کسی که به آن بخورد پیام «n دقیقه صبر کنید»
+   می‌گیرد و (اگر dlLimitNotify روشن باشد) با پایان انتظار از ربات خبردار می‌شود.
+   وضعیت هر کاربر: dlc:st:<username> = { n, lvl, until, last, nfy, v }
+     n = دانلودهای این دور، lvl = چندمین بار محدود شده، until = پایان انتظار، last = آخرین
+     دانلود، nfy = پایانِ انتظاری که برایش پیام زمان‌بندی شده، v = نسخه (برای برگشت امن) */
 
-/* روز به وقت ایران (UTC+3:30) — شمارنده هر شب به وقت تهران صفر می‌شود */
+/* روز به وقت ایران (UTC+3:30) — فقط برای سقف کل روزانهٔ ربات (bot:<day>) */
 function tlrDayStamp (ms) {
   return new Date((ms || Date.now()) + 12600000).toISOString().slice(0, 10);
 }
@@ -4282,15 +4312,214 @@ async function dlCounterBump(store, key) {
   else await store.set(dlCounterKey(key), { n: n }, 172800);
   return n;
 }
-function dlLimitOf(set) {
-  return {
-    user: Math.max(0, Math.min(1000, Math.floor(Number(set && set.dlDailyLimit) || 0))),
-    bot: Math.max(0, Math.min(1000000, Math.floor(Number(set && set.dlDailyLimitBot) || 0))),
-  };
+function dlBotLimitOf(set) {
+  return Math.max(0, Math.min(1000000, Math.floor(Number(set && set.dlDailyLimitBot) || 0)));
 }
 function dlExempt(user) {
-  // مدیر و کاربر مادام‌العمر (premium) از سقف روزانه مستثنا هستند
+  // مدیر و کاربر مادام‌العمر (premium) از محدودیت دانلود مستثنا هستند
   return !!(user && (user.role === 'admin' || user.role === 'premium'));
+}
+
+const DL_STEPS_MAX = 10;
+const DL_STEP_MAX_MIN = 1440;
+function faDigits (v) {
+  return String(v).replace(/\d/g, function (d) { return '۰۱۲۳۴۵۶۷۸۹'.charAt(Number(d)); });
+}
+function enDigits (v) {
+  return String(v == null ? '' : v)
+    .replace(/[۰-۹]/g, function (d) { return String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)); })
+    .replace(/[٠-٩]/g, function (d) { return String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)); });
+}
+/* «1,2,10,30» / «۱،۲،۱۰،۳۰» / [1,2,10,30] → فهرست دقیقه‌ها (عدد صحیح ۱ تا ۱۴۴۰، حداکثر ۱۰ مرحله)؛ نامعتبر → null */
+function parseCooldownSteps (v) {
+  let parts;
+  if (Array.isArray(v)) parts = v.map(function (x) { return enDigits(x); });
+  else if (typeof v === 'string' || typeof v === 'number') parts = enDigits(v).split(/[\s,;،؛]+/);
+  else return null;
+  parts = parts.map(function (x) { return String(x).trim(); }).filter(Boolean);
+  if (!parts.length || parts.length > DL_STEPS_MAX) return null;
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (!/^\d{1,4}$/.test(parts[i])) return null;
+    const n = Number(parts[i]);
+    if (n < 1 || n > DL_STEP_MAX_MIN) return null;
+    out.push(n);
+  }
+  return out;
+}
+/* تنظیمات محدودیت با مقادیر امن (هر مقدار خراب → پیش‌فرض). زمان بازنشانی هرگز کمتر از آخرین
+   زمان انتظار نیست؛ وگرنه کاربر با کمی صبر کردن می‌توانست از مرحله‌های بالاتر فرار کند. */
+function dlBurstOf (set) {
+  const d = ECONOMY_DEFAULTS;
+  const raw = set && set.dlBurstLimit;
+  let limit = (raw === undefined || raw === null || raw === '') ? NaN : Number(raw);
+  if (!Number.isFinite(limit) || limit < 0) limit = d.dlBurstLimit;
+  limit = Math.min(1000, Math.floor(limit));
+  const steps = parseCooldownSteps(set && set.dlCooldownSteps) || d.dlCooldownSteps.slice();
+  const rawReset = set && set.dlBurstResetMin;
+  let reset = (rawReset === undefined || rawReset === null || rawReset === '') ? NaN : Number(rawReset);
+  if (!Number.isFinite(reset) || reset < 1) reset = d.dlBurstResetMin;
+  reset = Math.max(Math.min(1440, Math.floor(reset)), steps[steps.length - 1]);
+  return { limit: limit, steps: steps, resetMin: reset, resetMs: reset * 60000, notify: !(set && set.dlLimitNotify === false) };
+}
+function dlStateNormalize (raw) {
+  raw = raw && typeof raw === 'object' ? raw : {};
+  function num (x, max) { x = Math.floor(Number(x)); return Number.isFinite(x) && x > 0 ? Math.min(x, max) : 0; }
+  return { n: num(raw.n, 1e6), lvl: num(raw.lvl, 1000), until: num(raw.until, 8.64e15), last: num(raw.last, 8.64e15), nfy: num(raw.nfy, 8.64e15), v: num(raw.v, 1e12) };
+}
+/* منطق خالص (بدون ذخیره‌سازی/ساعت): وضعیت + زمان → «هنوز در انتظار است» یا وضعیتِ بعد از
+   یک دانلودِ مجاز. وقتی این دانلود به سقف برسد همان لحظه انتظار شروع می‌شود (until). */
+function dlBurstEvaluate (st, now, cfg) {
+  st = dlStateNormalize(st);
+  if (st.until > now) return { blocked: true, st: st, waitMs: st.until - now };
+  const quietFrom = Math.max(st.last, st.until);
+  const idle = quietFrom > 0 && now - quietFrom >= cfg.resetMs;
+  let n = idle ? 0 : st.n;
+  let lvl = idle ? 0 : st.lvl;
+  n += 1;
+  const next = { n: n, lvl: lvl, until: idle ? 0 : st.until, last: now, nfy: idle ? 0 : st.nfy, v: st.v + 1 };
+  let waitMs = 0;
+  if (n >= cfg.limit) {
+    lvl = Math.min(lvl + 1, 1000);
+    waitMs = cfg.steps[Math.min(lvl - 1, cfg.steps.length - 1)] * 60000;
+    next.n = 0; next.lvl = lvl; next.until = now + waitMs; next.nfy = 0;
+  }
+  return { blocked: false, prev: st, next: next, triggered: waitMs > 0, waitMs: waitMs };
+}
+function dlStateKey (username) { return dlCounterKey('st:' + username); }
+async function dlStateRead (store, username) {
+  const cache = store && store.env && store.env.CACHE_KV;
+  let raw = null;
+  if (cache && cache.get) {
+    const s = await cache.get(dlStateKey(username));
+    if (s) { try { raw = JSON.parse(s); } catch (e) { raw = null; } }
+  } else if (store && typeof store.localGet === 'function') {
+    raw = await store.localGet(dlStateKey(username)); // بدون کش «خواندنِ یک‌بار در هر درخواست»؛ همیشه آخرین مقدار
+  } else {
+    raw = await store.get(dlStateKey(username));
+  }
+  return dlStateNormalize(raw);
+}
+async function dlStateWrite (store, username, st, cfg) {
+  /* پس از until/last + زمان بازنشانی، وضعیت با یک رکورد خالی برابر است؛ پس می‌تواند منقضی شود */
+  const ms = Math.max(0, Math.max(st.last, st.until) + cfg.resetMs - Date.now()) + 120000;
+  const ttl = Math.max(120, Math.min(172800, Math.ceil(ms / 1000)));
+  const cache = store && store.env && store.env.CACHE_KV;
+  if (cache && cache.put) await cache.put(dlStateKey(username), JSON.stringify(st), { expirationTtl: ttl });
+  else await store.set(dlStateKey(username), st, ttl);
+}
+/* تایمر قابل‌لغو (تا در Node/Worker تایمر آویزان نماند) */
+function dlRace (promise, ms, fallback) {
+  let timer;
+  const timeout = new Promise(function (resolve) { timer = setTimeout(function () { resolve(fallback); }, ms); });
+  return Promise.race([promise, timeout]).finally(function () { clearTimeout(timer); });
+}
+/* نوبت‌بندی درخواست‌های هم‌زمانِ یک کاربر داخل همین isolate؛ بدون آن، ۳۰ درخواست موازی همه
+   پیش از ثبت اولین دانلود شمارنده را «صفر» می‌بینند. اگر دارندهٔ قبلی گیر کند، بعد از ۳ ثانیه
+   ادامه می‌دهیم (fail-open) تا دانلود کاربر هرگز قفل نشود. */
+const dlLocks = new Map();
+async function withDlLock (key, fn) {
+  const prev = dlLocks.get(key) || Promise.resolve();
+  let release;
+  const mine = new Promise(function (resolve) { release = resolve; });
+  const tail = prev.then(function () { return mine; });
+  dlLocks.set(key, tail);
+  try {
+    await dlRace(prev, 3000, null);
+    return await fn();
+  } finally {
+    release();
+    if (dlLocks.get(key) === tail) dlLocks.delete(key);
+  }
+}
+/* یک «جا» از دانلودهای پشت‌سرهم را رزرو می‌کند، یا می‌گوید کاربر هنوز باید صبر کند.
+   پیش از کسر سکه صدا زده می‌شود؛ اگر پرداخت ناموفق شد dlGateUndo جا را پس می‌دهد. */
+async function dlGateAcquire (store, set, user) {
+  const cfg = dlBurstOf(set);
+  if (cfg.limit <= 0 || dlExempt(user)) return { off: true, blocked: false };
+  const username = user.username;
+  return await withDlLock(username, async function () {
+    const st = await dlStateRead(store, username);
+    const ev = dlBurstEvaluate(st, Date.now(), cfg);
+    if (ev.blocked) return { off: false, blocked: true, cfg: cfg, st: ev.st, waitMs: ev.waitMs };
+    await dlStateWrite(store, username, ev.next, cfg);
+    return { off: false, blocked: false, cfg: cfg, prev: ev.prev, next: ev.next };
+  });
+}
+async function dlGateUndo (store, username, gate) {
+  if (!gate || gate.off || gate.blocked || !gate.next) return;
+  try {
+    await withDlLock(username, async function () {
+      const cur = await dlStateRead(store, username);
+      if (cur.v !== gate.next.v) return; // بین این دو لحظه کسی وضعیت را عوض کرده؛ دست نمی‌زنیم
+      await dlStateWrite(store, username, Object.assign({}, gate.prev, { v: cur.v + 1 }), gate.cfg);
+    });
+  } catch (e) { /* برگشتِ جا بهترین‌تلاش است */ }
+}
+/* زمان‌بندی پیامِ «محدودیت برداشته شد» در Durable Object (alarm دقیق)؛ نبودنِ EDITOR یعنی بدون پیام */
+async function dlNoticeSchedule (store, user, at, itemId) {
+  const env = store && store.env;
+  if (!env || !env.EDITOR || typeof env.EDITOR.get !== 'function' || typeof env.EDITOR.idFromName !== 'function') return false;
+  try {
+    const stub = env.EDITOR.get(env.EDITOR.idFromName('dln:' + String(user.tgId)));
+    const res = await dlRace(stub.fetch(new Request('https://editor.internal/dl-notify', {
+      method: 'POST',
+      body: JSON.stringify({ tgId: String(user.tgId), at: at, itemId: itemId || '' }),
+    })), 2500, null);
+    return !!(res && res.ok);
+  } catch (e) { return false; }
+}
+/* پاسخ به کاربری که هنوز در انتظار است: فقط یک متن «n دقیقه صبر کنید» (هیچ قانونی اعلام نمی‌شود) */
+async function dlBlockedResponse (store, user, gate, itemId) {
+  const waitSec = Math.max(1, Math.ceil(gate.waitMs / 1000));
+  const waitMin = Math.max(1, Math.ceil(gate.waitMs / 60000));
+  let willNotify = false;
+  if (gate.cfg.notify && user.tgId) {
+    if (gate.st.nfy && gate.st.nfy === gate.st.until) willNotify = true; // برای همین انتظار قبلاً زمان‌بندی شده
+    else if (await dlNoticeSchedule(store, user, gate.st.until, itemId)) {
+      willNotify = true;
+      try {
+        await withDlLock(user.username, async function () {
+          const cur = await dlStateRead(store, user.username);
+          if (cur.until === gate.st.until && cur.nfy !== cur.until) {
+            cur.nfy = cur.until; cur.v += 1;
+            await dlStateWrite(store, user.username, cur, gate.cfg);
+          }
+        });
+      } catch (e) { /* در بدترین حالت، درخواست بعدی دوباره زمان‌بندی می‌کند (idempotent) */ }
+    }
+  }
+  const msg = 'برای دریافت فایل بعدی باید ' + faDigits(waitMin) + ' دقیقه صبر کنید.' +
+    (willNotify ? ' وقتی دانلود دوباره فعال شد، برایتان پیام می‌فرستیم.' : '');
+  return json({ error: msg, dlWait: true, waitSec: waitSec, waitMin: waitMin, notify: willNotify }, 429, { 'retry-after': String(waitSec) });
+}
+/* پیام پایان انتظار: اول از ربات ارسال فایل (همان‌جا که فایل می‌گیرد)، اگر نشد از ربات اصلی.
+   خروجی: {ok:true} | {ok:false, retry:true, after} (خطای موقت) | {ok:false} (کاربر ربات را نبسته/بلاک کرده) */
+async function sendDlNotice (store, job) {
+  const set = await getSettings(store);
+  if (set.dlLimitNotify === false) return { ok: true, skipped: true };
+  const itemId = /^i_[a-z0-9]{1,40}$/.test(String(job.itemId || '')) ? String(job.itemId) : '';
+  const text = '✅ محدودیت دانلود شما برداشته شد.\nمی‌توانید دوباره فایل مورد نظرتان را دریافت کنید.';
+  const markup = { inline_keyboard: [[{
+    text: itemId ? '🎬 بازگشت به این اثر' : '🎬 بازگشت به مینی‌اپ',
+    url: CONFIG.MINI_APP_URL + (itemId ? '?startapp=item_' + itemId : ''),
+  }]] };
+  const tokens = [];
+  const fileTok = fileBotToken(set);
+  if (fileTok) tokens.push(fileTok);
+  if (set.botToken && set.botToken !== fileTok) tokens.push(set.botToken);
+  let transient = false, retryAfter = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const r = await botApi(tokens[i], 'sendMessage', { chat_id: Number(job.tgId) || job.tgId, text: text, reply_markup: markup }, 6000);
+    if (r && r.ok) return { ok: true };
+    const code = Number(r && r.error_code) || 0;
+    // 400/403 = کاربر این ربات را شروع نکرده یا بلاک کرده → ربات بعدی؛ شبکه/۵xx/۴۲۹ = خطای موقت
+    if (!code || code === 429 || code >= 500) {
+      transient = true;
+      retryAfter = Math.max(retryAfter, Number(r && r.parameters && r.parameters.retry_after) || 0);
+    }
+  }
+  return transient ? { ok: false, retry: true, after: retryAfter } : { ok: false };
 }
 
 async function apiDlRequest(store, body, request) {
@@ -4312,29 +4541,22 @@ async function apiDlRequest(store, body, request) {
   }
   const fresh = await getUser(store, user.username);
   const sub = hasActiveSub(fresh);
-  /* ── محدودیت دانلود روزانه: پیش از کسر سکه بررسی می‌شود ── */
-  const limits = dlLimitOf(set);
   const exempt = dlExempt(fresh);
-  let usedToday = 0, botUsedToday = 0;
-  if (!exempt) {
-    const day = tlrDayStamp();
-    if (limits.user > 0) {
-      usedToday = await dlCounterRead(store, fresh.username + ':' + day);
-      if (usedToday >= limits.user) {
-        return json({ error: 'سقف دانلود امروز شما (' + limits.user + ' بار) تکمیل شده است. برای جلوگیری از کپی منابع، فردا (به وقت ایران) دوباره می‌توانید دریافت کنید.', dlLimit: true, limit: limits.user, used: usedToday }, 403);
-      }
-    }
-    if (limits.bot > 0) {
-      botUsedToday = await dlCounterRead(store, 'bot:' + day);
-      if (botUsedToday >= limits.bot) {
-        return json({ error: 'سقف دانلود امروز ربات تکمیل شده است. لطفاً چند ساعت دیگر دوباره تلاش کنید.', dlLimit: true, botLimit: limits.bot }, 403);
-      }
-    }
+  /* ── سقف کل دانلود روزانهٔ ربات (اختیاری، پیش‌فرض خاموش) ── */
+  const botCap = dlBotLimitOf(set);
+  if (!exempt && botCap > 0 && (await dlCounterRead(store, 'bot:' + tlrDayStamp())) >= botCap) {
+    return json({ error: 'سقف دانلود امروز ربات تکمیل شده است. لطفاً چند ساعت دیگر دوباره تلاش کنید.', dlLimit: true, botLimit: botCap }, 403);
   }
+  /* ── محدودیت دانلودِ پشت‌سرهم: پیش از کسر سکه؛ یک «جا» رزرو می‌شود یا کاربر باید صبر کند ── */
+  const gate = await dlGateAcquire(store, set, fresh);
+  if (gate.blocked) return await dlBlockedResponse(store, fresh, gate, item.id);
   const price = downloadPrice(fresh, set);
   if (price > 0) {
     const d = await payFromWallet(store, fresh, price, 'download', 'دانلود: ' + (item.title || ''));
-    if (d.error) return json(Object.assign(d, { needWallet: true }), 402);
+    if (d.error) {
+      await dlGateUndo(store, fresh.username, gate); // دانلودی انجام نشد؛ جا پس داده می‌شود
+      return json(Object.assign(d, { needWallet: true }), 402);
+    }
   }
   const id = randomHex(8);
   const rec = {
@@ -4352,13 +4574,9 @@ async function apiDlRequest(store, body, request) {
   };
   await store.set('dl:' + id, rec, 700);
 
-  /* درخواست دانلود ثبت شد؛ شمارندهٔ روزانه را (بعد از ثبت) افزایش می‌دهیم.
-     هر نسخه/فایل داخل یک درخواست، یک دانلود محسوب می‌شود. */
-  if (!exempt) {
-    const day = tlrDayStamp();
-    if (limits.user > 0) usedToday = await dlCounterBump(store, fresh.username + ':' + day);
-    if (limits.bot > 0) botUsedToday = await dlCounterBump(store, 'bot:' + day);
-  }
+  /* درخواست دانلود ثبت شد؛ سقف کل روزانهٔ ربات (اگر روشن باشد) بعد از ثبت افزایش می‌یابد.
+     هر نسخه/فایل داخل یک درخواست، یک دانلود محسوب می‌شود. (جای محدودیت پشت‌سرهم پیش‌تر رزرو شده.) */
+  if (!exempt && botCap > 0) await dlCounterBump(store, 'bot:' + tlrDayStamp());
 
   const botLink = fileBotLink(set, 'dl_' + id);
   const out = {
@@ -4370,8 +4588,6 @@ async function apiDlRequest(store, body, request) {
     vanishSec: Number(set.vanishSec) || CONFIG.VANISH_SEC,
     hasSub: sub,
     gateInfo: adGateInfo(set),
-    dlLimit: exempt ? 0 : limits.user,
-    dlUsed: exempt ? 0 : usedToday,
   };
 
   // کاربران دارای اشتراک هیچ تبلیغی نمی‌بینند
@@ -5376,8 +5592,12 @@ async function handleAdmin(store, url, request, adminUser) {
       signupBonus: signupBonusOf(set),
       sub1m: set.sub1m, sub3m: set.sub3m, sub6m: set.sub6m, sub1y: set.sub1y,
       dlClickPrice: set.dlClickPrice, refSignupBonus: set.refSignupBonus, refPurchasePercent: set.refPurchasePercent,
-      dlDailyLimit: Math.max(0, Math.floor(Number(set.dlDailyLimit) || 0)),
-      dlDailyLimitBot: Math.max(0, Math.floor(Number(set.dlDailyLimitBot) || 0)),
+      dlBurstLimit: dlBurstOf(set).limit,
+      dlCooldownSteps: dlBurstOf(set).steps,
+      dlBurstResetMin: dlBurstOf(set).resetMin,
+      dlLimitNotify: dlBurstOf(set).notify,
+      dlNoticeReady: !!(store.env && store.env.EDITOR),
+      dlDailyLimitBot: dlBotLimitOf(set),
       vanishSec: set.vanishSec,
       k2kEnabled: !!set.k2kEnabled,
       k2kCardNumber: set.k2kCardNumber || '',
@@ -5441,16 +5661,35 @@ async function handleAdmin(store, url, request, adminUser) {
         if (isFinite(n) && n >= 0) set[k] = n;
       }
     });
-    if (body.dlDailyLimit !== undefined) {
-      const n = Number(body.dlDailyLimit);
-      if (!Number.isSafeInteger(n) || n < 0 || n > 1000) return json({ error: 'محدودیت دانلود روزانه باید عدد صحیح بین 0 تا 1000 باشد (0 = نامحدود)' }, 400);
-      set.dlDailyLimit = n;
+    /* محدودیت دانلودِ پشت‌سرهم: همه‌چیز اول اعتبارسنجی می‌شود، بعد یک‌جا اعمال (تغییر نیمه‌کاره نمی‌ماند) */
+    const dlPatch = {};
+    if (body.dlBurstLimit !== undefined) {
+      const n = Number(body.dlBurstLimit);
+      if (body.dlBurstLimit === '' || body.dlBurstLimit === null || typeof body.dlBurstLimit === 'boolean' || !Number.isSafeInteger(n) || n < 0 || n > 1000) {
+        return json({ error: 'تعداد دانلود پشت‌سرهم باید عدد صحیح بین 0 تا 1000 باشد (0 = بدون محدودیت)' }, 400);
+      }
+      dlPatch.dlBurstLimit = n;
     }
+    if (body.dlCooldownSteps !== undefined) {
+      const steps = parseCooldownSteps(body.dlCooldownSteps);
+      if (!steps) return json({ error: 'زمان‌های انتظار را به‌صورت عدد صحیح دقیقه (1 تا ' + DL_STEP_MAX_MIN + ') و با ویرگول جدا کنید؛ حداکثر ' + DL_STEPS_MAX + ' مرحله. مثال: 1,2,10,30' }, 400);
+      dlPatch.dlCooldownSteps = steps;
+    }
+    if (body.dlBurstResetMin !== undefined) {
+      const n = Number(body.dlBurstResetMin);
+      if (body.dlBurstResetMin === '' || body.dlBurstResetMin === null || typeof body.dlBurstResetMin === 'boolean' || !Number.isSafeInteger(n) || n < 1 || n > 1440) {
+        return json({ error: 'زمان بازنشانی باید عدد صحیح بین 1 تا 1440 دقیقه باشد' }, 400);
+      }
+      dlPatch.dlBurstResetMin = n;
+    }
+    if (body.dlLimitNotify !== undefined) dlPatch.dlLimitNotify = !!body.dlLimitNotify;
     if (body.dlDailyLimitBot !== undefined) {
       const n = Number(body.dlDailyLimitBot);
       if (!Number.isSafeInteger(n) || n < 0 || n > 1000000) return json({ error: 'سقف دانلود روزانه ربات باید عدد صحیح بین 0 تا 1000000 باشد (0 = نامحدود)' }, 400);
-      set.dlDailyLimitBot = n;
+      dlPatch.dlDailyLimitBot = n;
     }
+    Object.assign(set, dlPatch);
+    delete set.dlDailyLimit; // سقف روزانهٔ هر کاربر حذف شده؛ مقدار قدیمی دیگر استفاده نمی‌شود
     if (body.fileCaption !== undefined) set.fileCaption = String(body.fileCaption).slice(0, 1000);
     if (body.adEnabled !== undefined) set.adEnabled = !!body.adEnabled;
     if (body.adButtonText !== undefined) set.adButtonText = String(body.adButtonText).slice(0, 64);
@@ -6468,6 +6707,7 @@ export class EditorSession {
       try { return Response.json(await runD1Migration(this.env,(await request.json()).action)); }
       catch(e) { return Response.json({error:e.message},{status:e.status || 400}); }
     }
+    if (new URL(request.url).pathname==='/dl-notify') return this.dlNoticeSchedule(request);
     if (storagePaused(this.env)) return new Response('Storage maintenance',{status:503,headers:{'Retry-After':'60'}});
     if (new URL(request.url).pathname.startsWith('/channel-')) return this.channelRequest(request);
     // All publications from this bot are routed through a single durable coordinator.
@@ -7020,8 +7260,37 @@ export class EditorSession {
     if (d.files.length) await tg(this.env,'deleteMessages',{chat_id:d.vault,message_ids:d.files.map(f=>f.msgId)});
     await this.ctx.storage.delete('draft'); await this.ctx.storage.deleteAlarm();
   }
+  /* پیام «محدودیت دانلود برداشته شد»: هر کاربر یک نمونهٔ جدا (dln:<tgId>) با فقط یک کلید dln؛
+     alarm دقیقاً پس از پایان انتظار فعال می‌شود و بعد از ارسال، رکورد پاک می‌شود. */
+  async dlNoticeSchedule(request) {
+    let body; try { body=await request.json(); } catch { return new Response('Bad request',{status:400}); }
+    const tgId=String(body && body.tgId || ''), at=typeof (body && body.at)==='number' ? body.at : NaN;
+    if (!/^\d{1,20}$/.test(tgId) || !Number.isFinite(at)) return new Response('Bad request',{status:400});
+    const now=Date.now(), when=Math.min(Math.max(at,now),now+DAY), cur=await this.ctx.storage.get('dln');
+    const itemId=/^i_[a-z0-9]{1,40}$/.test(String(body.itemId || '')) ? String(body.itemId) : '';
+    const job={tgId,at:cur ? Math.max(Number(cur.at) || 0,when) : when,itemId,tries:0};
+    await this.ctx.storage.put('dln',job);
+    await this.ctx.storage.setAlarm(job.at+1000); // یک ثانیه فاصله تا پیام قبل از پایان واقعیِ انتظار نرسد
+    return Response.json({ok:true,at:job.at});
+  }
+  async dlNoticeFire() {
+    const storage=this.ctx.storage, job=await storage.get('dln');
+    if (!job) return;
+    if (storagePaused(this.env)) { await storage.setAlarm(Date.now()+60000); return; }
+    if (Number(job.at)-Date.now()>3000) { await storage.setAlarm(Number(job.at)+1000); return; } // alarm زودتر رسید
+    let res;
+    try { res=await sendDlNotice(new Store(this.env.KV,this.env),job); } catch { res={ok:false,retry:true}; }
+    if (!res.ok && res.retry && (job.tries || 0)<4) {
+      job.tries=(job.tries || 0)+1;
+      await storage.put('dln',job);
+      await storage.setAlarm(Date.now()+Math.max(5,Math.min(60,res.after || 10*job.tries))*1000);
+      return;
+    }
+    await storage.delete('dln'); // ارسال شد یا کاربر ربات را بسته است؛ کار تمام است
+  }
   async alarm() {
     const run=this.tail.then(async()=>{
+      if (await this.ctx.storage.get('dln')) { await this.dlNoticeFire(); return; }
       if (storagePaused(this.env)) { await this.ctx.storage.setAlarm(Date.now()+60000); return; }
       if (await this.ctx.storage.get('channel-id')) {
         const deadline=Date.now()+15000;
@@ -7343,7 +7612,7 @@ const APP_HTML = `<!doctype html>
 })();
 </script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="mvx-version" content="v3.51">
+<meta name="mvx-version" content="v3.52">
 <meta name="theme-color" content="#0b0e14">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -8133,7 +8402,7 @@ button.dp-slide{cursor:zoom-in}
 (function () {
 'use strict';
 
-var MVX_VER = 'v3.51';
+var MVX_VER = 'v3.52';
 /*
  * نکتهٔ معماری: کل این کد داخل یک template-literal در worker.js زندگی می‌کند.
  * لایهٔ template هر بک‌اسلش را مصرف می‌کند، بنابراین در کلاینت هیچ‌وقت
@@ -8605,12 +8874,12 @@ function nav (hash) {
   else location.hash = hash;
 }
 
-function toast (msg, type) {
+function toast (msg, type, ms) {
   var el = document.createElement('div');
   el.className = 'toast ' + (type || '');
   el.textContent = msg;
   $('#toasts').appendChild(el);
-  setTimeout(function () { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(function () { el.remove(); }, 320); }, 3200);
+  setTimeout(function () { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(function () { el.remove(); }, 320); }, ms || 3200);
 }
 /* مرجع بسته‌شدن مودالِ باز؛ تا کدهای دیگر (مثل تبلیغ) بتوانند تمیز ببندندش. */
 var MODAL_CLOSE = null;
@@ -9548,19 +9817,12 @@ function viewItem (data, id) {
     ? '<section class="d-sec"><div class="d-sec-h">عوامل ' + (isSeries ? 'سریال' : 'فیلم') + ' ' + esc(tFa) + '</div><div class="people">' + directors.map(function (d) { return personHtml(d, 'کارگردان'); }).join('') + '</div></section>'
     : '';
 
-  var dlLim = Number((APP.economy && APP.economy.dlDailyLimit) || 0);
-  var dlExempt = !!(APP.user && (APP.user.role === 'admin' || APP.user.role === 'premium'));
-  var dlLimitLine = '';
-  if (dlLim > 0 && !dlExempt) {
-    dlLimitLine = '<br>🔒 برای جلوگیری از کپی منابع، هر کاربر حداکثر <b>' + faNum(dlLim) + ' دانلود در روز</b> (به وقت ایران) دارد.';
-  }
   var note = '<div class="note">🛡 پخش آنلاین وجود ندارد. فایل فقط داخل ربات ارسال می‌شود و بعد از <b>' + faNum(vanish) + ' ثانیه</b> پاک می‌گردد.' +
     (data.hasSub
-      ? '<br>👑 اشتراک فعال — بدون کسر سکه.' + (dlLim > 0 && !dlExempt ? ' (سقف روزانه: ' + faNum(dlLim) + ' دانلود)' : ' دانلود نامحدود.')
+      ? '<br>👑 اشتراک فعال — بدون کسر سکه. دانلود نامحدود.'
       : (price > 0
-        ? '<br>بدون اشتراک، هر دانلود <b>' + faMoney(price) + ' ' + unitName() + '</b> از کیف پول.' + (dlLim > 0 && !dlExempt ? ' با اشتراک، کسر سکه حذف می‌شود؛ سقف روزانه برای همه یکسان است.' : ' با اشتراک، دانلود نامحدود و بدون کسر سکه است.')
+        ? '<br>بدون اشتراک، هر دانلود <b>' + faMoney(price) + ' ' + unitName() + '</b> از کیف پول. با اشتراک، دانلود نامحدود و بدون کسر سکه است.'
         : '')) +
-    dlLimitLine +
     '</div>';
   var lockNote = '';
   if (APP.user && !canPlay) lockNote = '<div class="note">👑 این اثر ویژهٔ مشترکین است. <a href="#/subscribe" style="color:var(--acc2);font-weight:800">خرید اشتراک</a> · <a href="#/wallet" style="color:var(--acc2);font-weight:800">کیف پول</a></div>';
@@ -9794,10 +10056,6 @@ function requestDownload (itemId, opts, btn) {
       ? (faMoney(r.charged) + ' ' + unitName() + ' کسر شد.')
       : (r.unlimited ? 'اشتراک فعال — بدون کسر سکه.' : '');
     if (chargeMsg) toast(chargeMsg, 'ok');
-    if (Number(r.dlLimit) > 0 && r.dlUsed != null) {
-      var left = Math.max(0, Number(r.dlLimit) - Number(r.dlUsed));
-      if (left <= 3) toast('🔒 امروز ' + faNum(left) + ' دانلود دیگر برایتان مانده است (سقف روزانه: ' + faNum(r.dlLimit) + ')', 'err');
-    }
 
     closeModal();
     if (r.needAd && r.ad) {
@@ -9809,6 +10067,8 @@ function requestDownload (itemId, opts, btn) {
     release();
     if (e.data && e.data.needWallet) { toast('موجودی کافی نیست', 'err'); nav('#/wallet'); return; }
     if (e.data && e.data.needSub) { nav('#/subscribe'); return; }
+    /* به محدودیت خورده: فقط یک پیام «n دقیقه صبر کنید» (کمی بیشتر روی صفحه می‌ماند تا خوانده شود) */
+    if (e.data && e.data.dlWait) { haptic(); toast(e.message, 'err', 7000); return; }
     toast(e.message, 'err');
   });
 }
@@ -10616,9 +10876,7 @@ function openK2kInvoice(inv) {
 function viewSubscribe () {
   if (!APP.user) return emptyHtml('👑', 'وارد نشده‌اید', 'برای خرید اشتراک ابتدا وارد شوید.', '<a class="btn btn-primary" href="#/auth">ورود با تلگرام</a>');
   var plans = (APP.economy && APP.economy.plans) || {};
-  var lim = Number((APP.economy && APP.economy.dlDailyLimit) || 0);
-  var exempt = (APP.user.role === 'admin' || APP.user.role === 'premium');
-  var dlWord = (lim > 0 && !exempt) ? ('دانلود رایگان تا ' + faNum(lim) + ' بار در روز') : 'دانلود نامحدود';
+  var dlWord = 'دانلود نامحدود';
   var items = [
     ['1m', 'یک‌ماهه', '۳۰ روز ' + dlWord + ' بدون کسر سکه'],
     ['3m', 'سه‌ماهه', '۹۰ روز ' + dlWord + ' — به‌صرفه‌تر'],
@@ -10630,9 +10888,7 @@ function viewSubscribe () {
     return '<div class="plan"><h4>' + p[1] + '</h4><div class="pr">' + faMoney(price) + ' <span style="font-size:13px;font-weight:600">' + unitName() + '</span></div><div class="ds">' + p[2] + '</div>' +
       '<button class="btn btn-primary btn-block" data-plan="' + p[0] + '">خرید از کیف پول</button></div>';
   }).join('');
-  var subDesc = (lim > 0 && !exempt)
-    ? ('با اشتراک، همهٔ فیلم‌ها و سریال‌ها را بدون کسر سکه دانلود می‌کنید (سقف روزانه برای همه کاربران: ' + faNum(lim) + ' دانلود، به وقت ایران). سکه فقط از کاربران بدون اشتراک بابت هر دانلود کم می‌شود. خودِ اشتراک از کیف پول پرداخت می‌شود.')
-    : 'با اشتراک، همهٔ فیلم‌ها و سریال‌ها را نامحدود و بدون کسر سکه دانلود می‌کنید. سکه فقط از کاربران بدون اشتراک بابت هر دانلود کم می‌شود. خودِ اشتراک از کیف پول پرداخت می‌شود.';
+  var subDesc = 'با اشتراک، همهٔ فیلم‌ها و سریال‌ها را نامحدود و بدون کسر سکه دانلود می‌کنید. سکه فقط از کاربران بدون اشتراک بابت هر دانلود کم می‌شود. خودِ اشتراک از کیف پول پرداخت می‌شود.';
   return '<div class="acc"><h2 style="font-size:20px;font-weight:900;margin-bottom:8px">👑 اشتراک</h2>' +
     '<p style="color:var(--tx2);font-size:13.5px;margin-bottom:16px">' + subDesc + '</p>' +
     (hasSub() ? '<div class="note">اشتراک فعلی تا <b>' + faDate(APP.user.subUntil) + '</b> فعال است. خرید جدید به انتهای همان تاریخ اضافه می‌شود.</div>' : '') +
@@ -11109,8 +11365,6 @@ function adminTabHtml (tab, data, q) {
       '<div class="field"><label>نام واحد کیف پول</label><input id="set-unit" value="' + esc(data.walletUnitName || 'سکه') + '"></div>' +
       '<div class="field"><label>هدیه سکه اولین ثبت‌نام (صفر = بدون هدیه)</label><input id="set-signup-bonus" type="number" min="0" step="1" value="' + esc(data.signupBonus) + '"><small>فقط برای حساب‌های جدید؛ مستقل از پاداش دعوت.</small></div>' +
       '<div class="field"><label>قیمت هر دانلود (فقط کاربر بدون اشتراک)</label><input id="set-dlp" type="number" value="' + esc(data.dlClickPrice) + '"></div>' +
-      '<div class="field"><label>محدودیت دانلود روزانه هر کاربر (0 = نامحدود)</label><input id="set-dlmax" type="number" min="0" max="1000" value="' + esc(data.dlDailyLimit != null ? data.dlDailyLimit : 20) + '"><small>برای جلوگیری از سرقت/کپی انبوه منابع؛ مدیران و کاربران مادام‌العمر مستثنا. روز به وقت ایران.</small></div>' +
-      '<div class="field"><label>سقف کل دانلود روزانه ربات (0 = نامحدود)</label><input id="set-dlmaxbot" type="number" min="0" max="1000000" value="' + esc(data.dlDailyLimitBot != null ? data.dlDailyLimitBot : 0) + '"><small>مجموع دانلود همهٔ کاربران در یک روز (به وقت ایران).</small></div>' +
       '<div class="field"><label>اشتراک ۱ ماهه</label><input id="set-s1" type="number" value="' + esc(data.sub1m) + '"></div>' +
       '<div class="field"><label>اشتراک ۳ ماهه</label><input id="set-s3" type="number" value="' + esc(data.sub3m) + '"></div>' +
       '<div class="field"><label>اشتراک ۶ ماهه</label><input id="set-s6" type="number" value="' + esc(data.sub6m) + '"></div>' +
@@ -11129,6 +11383,17 @@ function adminTabHtml (tab, data, q) {
       }).join('&#10;') +
       '</textarea></div>' +
       '<div class="note">زرین‌پال نداریم. سه مورد اول استارز در کیف پول دیده می‌شود؛ بقیه پشت «دیدن بیشتر». کارت‌به‌کارت ریالی باکس بعدی است.</div>' +
+      '</div>' +
+      '<div class="adm-box"><h4>محدودیت دانلود پشت‌سرهم (ضد کپی)</h4>' +
+      '<div class="note">برای جلوگیری از کپی انبوه منابع. بعد از «تعداد دانلود پشت‌سرهم»، کاربر باید به‌اندازهٔ مرحلهٔ اول صبر کند؛ اگر بلافاصله پس از پایان انتظار دوباره به همان تعداد برسد، مرحلهٔ دوم، سوم و… اعمال می‌شود. <b>این قانون هیچ‌جا به کاربران نمایش داده نمی‌شود</b>؛ فقط کسی که به آن بخورد پیام «n دقیقه صبر کنید» می‌گیرد. مدیران و کاربران مادام‌العمر مستثنا هستند.</div>' +
+      '<div class="form-2col">' +
+      '<div class="field"><label>تعداد دانلود پشت‌سرهم تا اعمال محدودیت (0 = بدون محدودیت)</label><input id="set-dlburst" type="number" min="0" max="1000" value="' + esc(data.dlBurstLimit != null ? data.dlBurstLimit : 10) + '"></div>' +
+      '<div class="field"><label>زمان انتظار هر مرحله (دقیقه، با ویرگول جدا کنید)</label><input id="set-dlsteps" dir="ltr" value="' + esc((data.dlCooldownSteps || [1, 2, 10, 30]).join(',')) + '" placeholder="1,2,10,30"><small>مثال 1,2,10,30: بار اول ۱ دقیقه، دوم ۲، سوم ۱۰ و چهارم ۳۰ دقیقه؛ برای دفعات بعد همان آخرین عدد. تعداد مرحله‌ها دلخواه است (۱ تا ۱۰).</small></div>' +
+      '<div class="field"><label>بازنشانی شمارش پس از چند دقیقه بدون دانلود</label><input id="set-dlreset" type="number" min="1" max="1440" value="' + esc(data.dlBurstResetMin != null ? data.dlBurstResetMin : 60) + '"><small>اگر کاربر این‌قدر دانلود نکند، شمارش و مرحله از اول شروع می‌شود. اگر کمتر از آخرین زمان انتظار باشد، همان آخرین زمان اعمال می‌شود.</small></div>' +
+      '<div class="field"><label>سقف کل دانلود روزانه ربات (0 = نامحدود)</label><input id="set-dlmaxbot" type="number" min="0" max="1000000" value="' + esc(data.dlDailyLimitBot != null ? data.dlDailyLimitBot : 0) + '"><small>اختیاری: مجموع دانلود همهٔ کاربران در یک روز (به وقت ایران).</small></div>' +
+      '</div>' +
+      '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-top:8px"><input type="checkbox" id="set-dlnotify" style="width:auto"' + (data.dlLimitNotify !== false ? ' checked' : '') + '> پس از پایان انتظار، از ربات به کاربر پیام بده (فقط به کسی که به محدودیت خورده)</label>' +
+      (data.dlNoticeReady === false ? '<div class="note">⚠️ اتصال Durable Object با نام <code dir="ltr">EDITOR</code> برقرار نیست؛ پیام پایان انتظار فرستاده نمی‌شود (خودِ محدودیت درست کار می‌کند).</div>' : '') +
       '</div>' +
       '<div class="adm-box"><h4>کارت‌به‌کارت ریالی (تأیید دستی)</h4>' +
       '<div class="note">کاربر مبلغ یکتا را واریز می‌کند و با یک کلیک اعلام واریز می‌کند. فقط با استفاده از مبلغ یکتا در پیامک بانک تطبیق دهید و تأیید کنید.</div>' +
@@ -11641,7 +11906,10 @@ function bindAdminTab (tab, q) {
         walletUnitName: $('#set-unit').value.trim(),
         signupBonus: $('#set-signup-bonus').value,
         dlClickPrice: $('#set-dlp').value,
-        dlDailyLimit: ($('#set-dlmax') && $('#set-dlmax').value) || '0',
+        dlBurstLimit: $('#set-dlburst') ? $('#set-dlburst').value : undefined,
+        dlCooldownSteps: $('#set-dlsteps') ? $('#set-dlsteps').value : undefined,
+        dlBurstResetMin: $('#set-dlreset') ? $('#set-dlreset').value : undefined,
+        dlLimitNotify: $('#set-dlnotify') ? $('#set-dlnotify').checked : undefined,
         dlDailyLimitBot: ($('#set-dlmaxbot') && $('#set-dlmaxbot').value) || '0',
         sub1m: $('#set-s1').value, sub3m: $('#set-s3').value, sub6m: $('#set-s6').value, sub1y: $('#set-s12').value,
         refSignupBonus: $('#set-refb').value, refPurchasePercent: $('#set-refp').value,
