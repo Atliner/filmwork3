@@ -3819,8 +3819,12 @@ async function sendMiniAppReturn(token, chatId, isNew, isAdmin, signupBonus) {
     ? ('✅ ثبت‌نام انجام شد' + (isAdmin ? ' — شما مدیر سایت هستید' : '') + '.')
     : '✅ ورود انجام شد.';
   if (isNew && signupBonus > 0) text += '\n🎁 ' + signupBonus.toLocaleString('fa-IR') + ' سکه هدیهٔ اولین ثبت‌نام به کیف پول شما اضافه شد.';
-  text += '\nبرای ادامه، روی دکمهٔ «ورود به مینی‌اپ» بزنید.';
-  return tgSend(token, chatId, text, {
+
+  // Reply keyboards are persistent in Telegram.  The inline keyboard for the
+  // mini-app cannot be combined with ReplyKeyboardRemove in the same message,
+  // so remove the contact keyboard first and then send the inline action.
+  await tgSend(token, chatId, text, { reply_markup: { remove_keyboard: true } });
+  return tgSend(token, chatId, 'برای ادامه، روی دکمهٔ «ورود به مینی‌اپ» بزنید.', {
     reply_markup: { inline_keyboard: [[{ text: 'ورود به مینی‌اپ', url: CONFIG.MINI_APP_URL }]] },
   });
 }
