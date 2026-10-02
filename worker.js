@@ -39,6 +39,19 @@
  *  • در موبایل با env(safe-area-inset-*) محتوا از نوار وضعیت (ساعت/باتری)
  *    و دکمه‌های پایین گوشی فاصله می‌گیرد (viewport-fit=cover).
  *
+ *  ── نسخهٔ 3.51 ─────────────────────────────────────────────────────
+ *  • رفع «لینک مستقیم فیلم/سریال (t.me/bot/directlink?startapp=item_...) روی
+ *    لودینگ می‌ماند و فقط با تاچ/بارگذاری مجدد باز می‌شود»:
+ *    ۱) پارامترهای لانچ تلگرام (initData، نسخه، پلتفرم، startapp) قبل از
+ *       بازنویسی هش ثبت می‌شوند؛ ورود خودکار برای لینک فیلم هم کار می‌کند.
+ *    ۲) رویداد web_app_ready با قالب واقعی تلگرام (TelegramWebviewProxy /
+ *       postMessage به iframe) درست پس از اسپلش فرستاده می‌شود؛ لودینگ تلگرام
+ *       دیگر منتظر تصاویر/فونت/اسکرپت telegram.org نمی‌ماند.
+ *    ۳) صفحهٔ فیلم: تلاش مجدد خودکار، خطای واضح + دکمهٔ «تلاش مجدد»، یک
+ *       درخواست مشترک به‌جای ۳ درخواست، و رندر تازه وقتی درخواست اول گیر کند.
+ *    ۴) SDK رسمی بعد از لود صفحه تزریق می‌شود؛ تاچ‌گیر بوت دوباره‌فعال می‌شود.
+ *    ۵) شمارندهٔ بازدید فیلم دیگر پاسخ را منتظر/خراب نمی‌کند (waitUntil + catch).
+ *
  *  ── نسخهٔ 3.50 ─────────────────────────────────────────────────────
  *  • ظاهر شیشه‌ای (iOS-like): دکمه‌های گرد، backdrop-filter، مودال شیت پایین.
  *  • صفحهٔ فیلم/سریال به سبک نماوا: بنر تمام‌عرض، عنوان و متادیتا وسط،
@@ -3519,7 +3532,7 @@ async function apiCatalog(store, url, request) {
   });
 }
 
-async function apiItem(store, id, request) {
+async function apiItem(store, id, request, ctx) {
   const set = await getSettings(store);
   const item = await getItem(store, id);
   if (!item) return json({ error: 'یافته نشد' }, 404);
@@ -3529,7 +3542,13 @@ async function apiItem(store, id, request) {
   const lastV = viewsThrottle.get(item.id) || 0;
   if (Date.now() - lastV > 300000) {
     viewsThrottle.set(item.id, Date.now());
-    await store.set('it:' + item.id, item);
+    /* شمارندهٔ بازدید کم‌اهمیت است: نه باید باز شدن صفحه را منتظر نوشتن در دیتابیس نگه دارد
+       و نه با خطای ذخیره‌سازی (سهمیه/شبکه) کل پاسخ را ۵۰۰ کند. */
+    const writeViews = Promise.resolve().then(function () { return store.set('it:' + item.id, item); }).catch(function (e) {
+      console.warn('[views] item view write failed:', e && e.message);
+    });
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(writeViews);
+    else await writeViews;
   }
   const views = item.views;
   let out;
@@ -7061,7 +7080,7 @@ async function handleApi(request, url, store, ctx) {
   }
 
   mm = p.match(/^item\/(i_[a-z0-9]+)$/);
-  if (mm && m === 'GET') return await apiItem(store, mm[1], request);
+  if (mm && m === 'GET') return await apiItem(store, mm[1], request, ctx);
 
   if (p === 'auth/bootstrap' && m === 'POST') return await apiBootstrap(store, await readBody(request), request);
   if (p === 'auth/login' && m === 'POST') return await apiLegacyLogin(store, await readBody(request), request);
@@ -7215,33 +7234,116 @@ const APP_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <script>
-/* ══ رفع باگ لودینگ مینی‌اپ در موبایل ═══════════════════════════════
-   تلگرام صفحهٔ لودینگ خود را تا زمانی که رویداد web_app_ready را از
-   مینی‌اپ دریافت نکند، بالا نگه می‌دارد. در نسخهٔ قبل این رویداد فقط
-   توسط اسکرپت telegram-web-app.js (از telegram.org) ارسال می‌شد؛ وقتی
-   آن اسکرپت در شبکهٔ موبایل کند یا در دسترس نبود، کاربر تا ابد در
-   لودینگ تلگرام می‌ماند (مگر تاچ/رفرش شانسی آن را برمی‌گرداند).
-   حالا با اولین بایت‌های صفحه — حتی قبل از بقیهٔ HTML/CSS/JS —
-   رویداد آماده‌شدن را می‌فرستیم تا لودینگ تلگرام فوراً برداشته شود.
-   (همان کاری که WebApp.ready() از SDK رسمی انجام می‌دهد.) */
+/* ══ مینی‌اپ تلگرام: ثبت پارامترهای لانچ + اعلام واقعی «آماده‌ام» به تلگرام ══
+   باگِ «لینک مستقیم فیلم/سریال روی لودینگ می‌ماند» چند علت هم‌زمان داشت:
+   ۱) پارامترهای لانچ تلگرام (tgWebAppData = initData، نسخه، پلتفرم و ...) در
+      هش URL می‌آیند. سایت برای رفتن به صفحهٔ فیلم هش را بازنویسی می‌کرد و
+      initData پیش از خوانده‌شدن از بین می‌رفت؛ نتیجه: ورود خودکار مینی‌اپ و
+      هر چیزی که به initData وابسته بود برای لینک فیلم کار نمی‌کرد.
+      حالا این اسکرپت — اولین کد صفحه — همه‌چیز را همین‌جا ثبت می‌کند
+      (window.__mvxLaunch) و نسخهٔ مطمئن در sessionStorage می‌گذارد تا با
+      «بارگذاری مجدد» تلگرام (که URL بازنویسی‌شده را دوباره باز می‌کند) هم
+      نشست از دست نرود.
+   ۲) تلگرام صفحهٔ لودینگ خود را تا دریافت web_app_ready یا پایان کامل لود
+      صفحه (تصاویر، فونت، اسکرپت telegram.org) نگه می‌دارد. نسخهٔ قبلی این
+      رویداد را با قالبی می‌فرستاد که هیچ کلاینت تلگرامی نمی‌فهمید. قالب
+      درست (همان که SDK رسمی می‌فرستد) این است:
+        • اندروید/iOS/دسکتاپ: TelegramWebviewProxy.postEvent(نوع، JSON داده)
+        • تلگرام وب (iframe): parent.postMessage(JSON با eventType/eventData)
+      این رویداد درست بعد از رسیدن اسپلش صفحه (و با چند پشتیبان زمانی) می‌رود
+      تا لودینگ تلگرام وابسته به کندترین تصویر/فونت/اسکرپت خارجی نباشد. */
 (function () {
   'use strict';
-  try { window.__mvxT0 = Date.now(); } catch (e) { }
-  function mvxSendReady () {
-    var payload = { event: 'web_app_ready' };
-    try {
-      if (window.parent && window.parent !== window) window.parent.postMessage(payload, '*');
-      else window.postMessage(payload, '*');
-    } catch (e) { }
-    try { if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.ready) window.Telegram.WebApp.ready(); } catch (e2) { }
+  var W = window;
+  try { W.__mvxT0 = Date.now(); } catch (e) { }
+
+  function dec (s) {
+    try { return decodeURIComponent(String(s).split('+').join('%20')); } catch (e) { return String(s); }
   }
-  mvxSendReady();
-  // اگر SDK رسمی تلگرام زودتر از حد انتظار بارگذاری شده بود، یک‌بار دیگر اطمینان می‌گیریم
-  setTimeout(mvxSendReady, 1500);
+  /* مثل Telegram.Utils.urlParseHashParams ولی مقدارهایی که '=' دارند را نمی‌برد */
+  function parseParams (raw) {
+    var out = {};
+    var s = String(raw || '');
+    if (s.charAt(0) === '#') s = s.slice(1);
+    var q = s.indexOf('?');
+    if (q >= 0) s = s.slice(q + 1);
+    else if (s.indexOf('=') < 0) return out;
+    var parts = s.split('&');
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i];
+      if (!part) continue;
+      var eq = part.indexOf('=');
+      out[dec(eq >= 0 ? part.slice(0, eq) : part)] = eq >= 0 ? dec(part.slice(eq + 1)) : '';
+    }
+    return out;
+  }
+
+  var LAUNCH = { initData: '', startParam: '', version: '', platform: '', restored: false };
+  var KEY = 'mvx_tg_launch';
+  try {
+    var qp = parseParams(W.location.search);
+    var hp = parseParams(W.location.hash);
+    LAUNCH.initData = hp.tgWebAppData || qp.tgWebAppData || '';
+    LAUNCH.version = hp.tgWebAppVersion || qp.tgWebAppVersion || '';
+    LAUNCH.platform = hp.tgWebAppPlatform || qp.tgWebAppPlatform || '';
+    /* تلگرام پارامتر startapp را هم در query (GET) و هم داخل initData می‌دهد */
+    LAUNCH.startParam = qp.tgWebAppStartParam || hp.tgWebAppStartParam || '';
+    if (LAUNCH.initData) {
+      if (!LAUNCH.startParam) LAUNCH.startParam = parseParams('?' + LAUNCH.initData).start_param || '';
+      try { W.sessionStorage.setItem(KEY, JSON.stringify({ d: LAUNCH.initData, v: LAUNCH.version, p: LAUNCH.platform })); } catch (e1) { }
+    } else {
+      /* URL بدون پارامتر تلگرام = «بارگذاری مجدد» پس از بازنویسی هش؛ نشست را برمی‌گردانیم
+         (startParam عمداً برنمی‌گردد تا رفرش صفحهٔ دیگری را به فیلم نپراند) */
+      try {
+        var saved = JSON.parse(W.sessionStorage.getItem(KEY) || 'null');
+        if (saved && saved.d) {
+          LAUNCH.initData = String(saved.d);
+          LAUNCH.version = String(saved.v || '');
+          LAUNCH.platform = String(saved.p || '');
+          LAUNCH.restored = true;
+        }
+      } catch (e2) { }
+    }
+  } catch (e0) { }
+  W.__mvxLaunch = LAUNCH;
+
+  /* ارسال رویداد به کلاینت تلگرام — همان منطق Telegram.WebView.postEvent در SDK رسمی */
+  function post (type, data) {
+    var payload = data === undefined ? '' : data;
+    try {
+      var proxy = W.TelegramWebviewProxy;
+      if (proxy !== undefined && proxy !== null) { proxy.postEvent(type, JSON.stringify(payload)); return 'native'; }
+    } catch (e3) { }
+    try {
+      if (W.external && 'notify' in W.external) { W.external.notify(JSON.stringify({ eventType: type, eventData: payload })); return 'external'; }
+    } catch (e4) { }
+    try {
+      if (W.parent && W.parent !== W) { W.parent.postMessage(JSON.stringify({ eventType: type, eventData: payload }), '*'); return 'iframe'; }
+    } catch (e5) { }
+    return '';
+  }
+  W.__mvxPostEvent = post;
+
+  var expanded = false;
+  function sendReady () {
+    var how = post('web_app_ready');
+    if (how && !expanded) { expanded = true; post('web_app_expand'); }
+    try {
+      var wa = W.Telegram && W.Telegram.WebApp;
+      if (wa && !wa.__fallback && typeof wa.ready === 'function') wa.ready();
+    } catch (e6) { }
+    return how;
+  }
+  W.__mvxSendReady = sendReady;
+  /* پشتیبان‌ها: اگر اسپلش بدنه دیر برسد یا پل بومی دیرتر آماده شود */
+  try { document.addEventListener('DOMContentLoaded', sendReady); } catch (e7) { }
+  try { W.addEventListener('load', sendReady); } catch (e8) { }
+  setTimeout(sendReady, 3000);
+  setTimeout(sendReady, 7000);
 })();
 </script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="mvx-version" content="v3.50">
+<meta name="mvx-version" content="v3.51">
 <meta name="theme-color" content="#0b0e14">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -8026,11 +8128,12 @@ button.dp-slide{cursor:zoom-in}
 <div id="app"><div style="text-align:center;padding-top:40px"><div style="font-size:24px;font-weight:900;margin-bottom:16px">@@SITE@@</div><div class="spin"></div><div style="color:var(--tx3);font-size:13px;margin-top:12px">در حال بارگذاری…</div></div></div>
 <div id="toasts"></div>
 <div id="modal-root"></div>
+<script>try { if (window.__mvxSendReady) window.__mvxSendReady(); } catch (e) { }</script>
 <script>
 (function () {
 'use strict';
 
-var MVX_VER = 'v3.50';
+var MVX_VER = 'v3.51';
 /*
  * نکتهٔ معماری: کل این کد داخل یک template-literal در worker.js زندگی می‌کند.
  * لایهٔ template هر بک‌اسلش را مصرف می‌کند، بنابراین در کلاینت هیچ‌وقت
@@ -8040,6 +8143,11 @@ var NL = String.fromCharCode(10);
 var APP = { user: null, tg: null, catalog: null, siteName: '@@SITE@@', tagline: '@@TAG@@', economy: { unit: 'سکه', dlClickPrice: 2, plans: {}, botUsername: '' } };
 var TG = (window.Telegram && window.Telegram.WebApp) || null;
 var TG_READY = false;
+/* پارامترهای لانچ تلگرام که اسکرپت ابتدای صفحه، پیش از بازنویسی هش، ثبت کرده */
+var LAUNCH = window.__mvxLaunch || { initData: '', startParam: '', version: '', platform: '', restored: false };
+function tgPost (type, data) {
+  try { return window.__mvxPostEvent ? window.__mvxPostEvent(type, data) : ''; } catch (e) { return ''; }
+}
 
 /* ══ مینی‌اپ تلگرام بدون وابستگی به telegram.org ═════════════════════
    اسکرپت رسمی SDK (telegram-web-app.js) از دامنهٔ telegram.org لود می‌شود.
@@ -8058,25 +8166,22 @@ function tgInitDataFromUrl () {
       return p.get('tgWebAppData') || '';
     } catch (e) { return ''; }
   }
-  return grab(location.search) || grab(location.hash);
+  return grab(location.search) || grab(location.hash) || (LAUNCH && LAUNCH.initData) || '';
 }
 function buildTgFallback () {
   var raw = tgInitDataFromUrl();
   var un = {};
   try { new URLSearchParams(raw).forEach(function (v, k) { un[k] = v; }); } catch (e) { }
+  /* initData بازیابی‌شده (بعد از «بارگذاری مجدد» تلگرام) فقط برای ورود است؛ start_param آن
+     نباید کاربری را که الان در صفحهٔ دیگری است دوباره به فیلمِ لانچ اول بپراند. */
+  if (LAUNCH && LAUNCH.restored) delete un.start_param;
   var noop = function () { };
   return {
     initData: raw,
     initDataUnsafe: un,
     colorScheme: 'dark',
-    ready: function () {
-      var payload = { event: 'web_app_ready' };
-      try {
-        if (window.parent && window.parent !== window) window.parent.postMessage(payload, '*');
-        else window.postMessage(payload, '*');
-      } catch (e) { }
-    },
-    expand: noop,
+    ready: function () { tgPost('web_app_ready'); },
+    expand: function () { tgPost('web_app_expand'); },
     close: noop,
     setHeaderColor: noop,
     setBackgroundColor: noop,
@@ -8126,8 +8231,8 @@ function startWatchdog () {
       var app = document.getElementById('app');
       if (!app || app.innerHTML.indexOf('در حال بارگذاری') < 0) return;
       app.innerHTML = '<div class="empty" style="padding:50px 20px"><div class="ic">⏳</div>' +
-        '<h3>صفحه کامل بارگذاری نشد</h3>' +
-        '<p style="margin-top:8px">' + (__bootErr ? 'خطای ثبت‌شده: <b style="color:var(--err);direction:ltr;display:inline-block">' + esc(__bootErr) + '</b>' : 'خطایی ثبت نشده — احتمالاً مشکل موقت شبکه است.') + '</p>' +
+        '<h3>بارگذاری کندتر از حد معمول است</h3>' +
+        '<p style="margin-top:8px">' + (__bootErr ? 'خطای ثبت‌شده: <b style="color:var(--err);direction:ltr;display:inline-block">' + esc(__bootErr) + '</b>' : 'اتصال کند است؛ خودکار دوباره تلاش می‌کنیم. اگر باز نشد «تلاش مجدد» را بزنید.') + '</p>' +
         '<div id="diag-server" style="margin-top:14px;font-size:13px;color:var(--tx2)">در حال بررسی سرور…</div>' +
         '<div style="margin-top:20px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
         '<button class="btn btn-primary" onclick="location.reload()">🔄 تلاش مجدد</button>' +
@@ -8140,6 +8245,9 @@ function startWatchdog () {
         var d = document.getElementById('diag-server');
         if (d) d.innerHTML = '❌ ارتباط با سرور برقرار نشد: <span style="direction:ltr">' + esc(String((e && e.message) || e)) + '</span>';
       });
+      /* درخواست اول احتمالاً گیر کرده؛ بدون منتظر ماندن برای تایم‌اوت، تلاش تازه می‌زنیم
+         (اگر همان درخواست اول زودتر برسد، همان صفحه را رندر می‌کند). */
+      forceRender();
     } catch (e2) { }
   }, 6000);
 }
@@ -8272,11 +8380,19 @@ function burstPeek () {
 
 }
 var __miniLoginBusy = false;
+var __miniLoginAt = 0;
+var __miniLoginGap = 0;
+/* SDK رسمی بعد از بازنویسی هش بارگذاری می‌شود و initData ندارد؛ نسخهٔ ثبت‌شدهٔ لانچ جایگزین است */
+function tgInitData () { return (TG && TG.initData) || (LAUNCH && LAUNCH.initData) || ''; }
 function loginMiniApp () {
-  if (!TG || !TG.initData || APP.user || __miniLoginBusy) return;
+  var initData = tgInitData();
+  if (!initData || APP.user || __miniLoginBusy) return;
+  /* رویدادهای viewport/activated زیاد تکرار می‌شوند؛ «حساب ندارد» را ۱۵ ثانیه و خطا را ۳ ثانیه
+     دوباره نمی‌پرسیم (پس از جایگزینی TG با SDK رسمی هم initData از نسخهٔ ثبت‌شدهٔ لانچ می‌آید). */
+  if (Date.now() - __miniLoginAt < __miniLoginGap) return;
   __miniLoginBusy = true;
-  return api('/auth/tg', { method: 'POST', body: { initData: TG.initData, existingOnly: true } }).then(function (r) {
-    if (r.needsSignup) return;
+  return api('/auth/tg', { method: 'POST', body: { initData: initData, existingOnly: true } }).then(function (r) {
+    if (r.needsSignup) { __miniLoginAt = Date.now(); __miniLoginGap = 15000; return; }
     if (!r.token || !r.user) throw new Error('ورود مینی‌اپ ناموفق بود');
     setToken(r.token);
     APP.user = r.user;
@@ -8285,6 +8401,8 @@ function loginMiniApp () {
     hideLoginWait();
     render();
   }).catch(function (e) {
+    __miniLoginAt = Date.now();
+    __miniLoginGap = 3000;
     captureErr('/auth/tg: ' + (e.message || ''));
     toast(e.message || 'ورود مینی‌اپ ناموفق بود', 'err');
   }).then(function () { __miniLoginBusy = false; });
@@ -8307,36 +8425,34 @@ function bindLoginResume () {
 }
 bindLoginResume();
 /* ══ «تاچ = ادامهٔ بارگذاری» ══════════════════════════════════════════
-   تا پیش از این، اگر بارگذاری اولیه در موبایل گیر می‌کرد، تاچ کاربر
-   «شانسی» باعث می‌شد سایت بالا بیاید. حالا هر تاچ اول وقتی هنوز صفحه
-   اولیهٔ «در حال بارگذاری» نمایش داده می‌شود، به‌طور قطع یا بارگذاری را
-   از سر می‌گیرد یا (در صورت خطای ثبت‌شده) صفحه را تازه می‌کند. */
+   اگر بارگذاری اولیه گیر کند، تاچ کاربر آن را از سر می‌گیرد. نسخهٔ قبلی
+   هر سه شنونده را در اولین رویداد برمی‌داشت؛ پس تاچِ زودهنگام (کمتر از ۴ ثانیه)
+   مصرف می‌شد و تاچ‌های بعدی هیچ اثری نداشتند. حالا تا وقتی چیزی روی صفحه
+   نیامده شنونده می‌ماند، با فاصلهٔ ۳ ثانیه، و بعد از اولین رندر خودش را برمی‌دارد. */
 function bindBootKick () {
   if (window.__bootKickBound) return;
   window.__bootKickBound = true;
+  var lastKick = 0;
+  var evs = ['pointerdown', 'touchstart', 'click'];
+  function stop () {
+    for (var i = 0; i < evs.length; i++) window.removeEventListener(evs[i], kick, true);
+  }
   function kick () {
-    window.removeEventListener('pointerdown', kick);
-    window.removeEventListener('touchstart', kick);
-    window.removeEventListener('click', kick);
     try {
+      if (window.__mvxPainted) { stop(); return; }
+      var now = Date.now();
+      if (now - (window.__mvxT0 || now) < 4000) return;
+      if (now - lastKick < 3000) return;
       var app = document.getElementById('app');
       if (!app || app.innerHTML.indexOf('در حال بارگذاری') < 0) return;
-      if (Date.now() - (window.__mvxT0 || Date.now()) < 4000) return;
+      lastKick = now;
       if (__bootErr) { location.reload(); return; }
-      api('/me').then(function (r) {
-        if (document.getElementById('app').innerHTML.indexOf('در حال بارگذاری') < 0) return;
-        if (r.user) APP.user = r.user;
-        if (r.site) { APP.siteName = r.site.siteName; APP.tagline = r.site.tagline || APP.tagline; }
-        if (r.economy) APP.economy = r.economy;
-        applySiteBranding();
-        render();
-      }).catch(function () { });
+      loadMe();
+      forceRender();
     } catch (e) { }
   }
   try {
-    window.addEventListener('pointerdown', kick, { once: true, capture: true });
-    window.addEventListener('touchstart', kick, { once: true, capture: true });
-    window.addEventListener('click', kick, { once: true, capture: true });
+    for (var i = 0; i < evs.length; i++) window.addEventListener(evs[i], kick, true);
   } catch (e) { }
 }
 /* اسکرپت اصلی همین حالا (پیش از DOMContentLoaded) اجرا می‌شود، پس تاچ‌گیر را
@@ -8365,6 +8481,60 @@ function api (path, opts) {
     throw e;
   }).finally(function () { clearTimeout(timeout); });
 }
+
+/* @@retry-helpers-begin */
+/* خطای شبکه/timeout (بدون status) و 5xx/429/408 قابل تلاش مجدد است؛ 4xx نه */
+function isRetryableErr (e) {
+  var st = e && e.status;
+  if (!st) return true;
+  return st >= 500 || st === 429 || st === 408;
+}
+function retryAsync (fn, opts) {
+  opts = opts || {};
+  var tries = opts.tries || 3;
+  var delays = opts.delays || [800, 2000];
+  var retryable = opts.retryable || isRetryableErr;
+  return new Promise(function (resolve, reject) {
+    var n = 0;
+    function attempt () {
+      var p;
+      try { p = Promise.resolve(fn(n)); } catch (e) { p = Promise.reject(e); }
+      p.then(resolve, function (err) {
+        n += 1;
+        if (n >= tries || !retryable(err)) { reject(err); return; }
+        setTimeout(attempt, delays[Math.min(n - 1, delays.length - 1)]);
+      });
+    }
+    attempt();
+  });
+}
+/* اولین موفقیتِ دو درخواست هم‌زمان؛ فقط وقتی هر دو شکست بخورند رد می‌شود */
+function firstSuccess (a, b) {
+  return new Promise(function (resolve, reject) {
+    var failed = 0;
+    function bad (err) { failed += 1; if (failed >= 2) reject(err); }
+    a.then(resolve, bad);
+    b.then(resolve, bad);
+  });
+}
+/* اگر p تا ms میلی‌ثانیه جواب نداد، یک درخواست موازی هم می‌زنیم (hedge)؛ اولین موفقیت برنده است.
+   اگر p زودتر شکست بخورد، همان خطا برمی‌گردد و درخواست دوم زده نمی‌شود. */
+function hedge (p, make, ms) {
+  return new Promise(function (resolve, reject) {
+    var done = false, failed = 0, total = 1;
+    function ok (v) { if (!done) { done = true; resolve(v); } }
+    function bad (err) { failed += 1; if (!done && failed >= total) { done = true; reject(err); } }
+    p.then(ok, bad);
+    setTimeout(function () {
+      if (done) return;
+      total = 2;
+      var q;
+      try { q = Promise.resolve(make()); } catch (e) { q = Promise.reject(e); }
+      q.then(ok, bad);
+    }, ms);
+  });
+}
+/* @@retry-helpers-end */
 
 function qs (q) {
   var o = {};
@@ -8400,8 +8570,10 @@ function applyMiniAppItemLaunch () {
   }
   var query = new URLSearchParams(location.search || '');
   var fragment = new URLSearchParams(hash.slice(1));
+  // LAUNCH is captured by the head script before any URL rewrite (query, hash or signed initData).
+  var launched = (typeof LAUNCH !== 'undefined' && LAUNCH && LAUNCH.startParam) || '';
   var start = (TG && TG.initDataUnsafe && TG.initDataUnsafe.start_param) ||
-    query.get('tgWebAppStartParam') || fragment.get('tgWebAppStartParam') || '';
+    query.get('tgWebAppStartParam') || fragment.get('tgWebAppStartParam') || launched;
   // This is a navigation hint only; authentication still verifies Telegram initData server-side.
   var route = itemRouteFromStart(start);
   if (route) {
@@ -11997,9 +12169,67 @@ function refreshAfterAdmin () {
   }
 }
 
+/* ═══════════ بارگذاری صفحهٔ فیلم/سریال ═══════════
+   مسیر #/item/<id> تا پیش از این هر خطایی جز 404 را بی‌صدا می‌بلعید و کاربر
+   تا ابد روی «در حال بارگذاری…» می‌ماند (لینک‌های مستقیم تلگرام دقیقاً از همین
+   مسیر باز می‌شوند). حالا: تلاش مجدد خودکار، پیام خطای واضح با دکمهٔ تلاش
+   مجدد، اشتراک یک درخواست بین رندرهای هم‌زمان (به‌جای ۳ درخواست و ۳ بازدید)،
+   و رندرِ تازهٔ بدون انتظار برای تایم‌اوت وقتی درخواست اول گیر کرده. */
+var __renderSeq = 0;
+var __forceFresh = false;
+var __itemReq = null;
+function startItemChain (id) {
+  return retryAsync(function (n) {
+    return api('/item/' + id, { timeout: n === 0 ? 9000 : 15000 }).then(function (d) {
+      if (!d || !d.item) { var bad = new Error('پاسخ نامعتبر از سرور'); bad.status = 502; throw bad; }
+      return d;
+    });
+  }, { tries: 3, delays: [800, 2000] });
+}
+function loadItemData (id, fresh) {
+  var tok = getToken();
+  var cur = __itemReq;
+  if (cur && cur.id === id && cur.tok === tok) {
+    if (!fresh) return cur.p;
+    /* درخواست قبلی هنوز در جریان است: موازی یکی دیگر می‌زنیم و اولین موفقیت برنده است */
+    cur.p = firstSuccess(cur.p, startItemChain(id));
+    return cur.p;
+  }
+  /* درخواست‌های سه‌گانهٔ قدیمیِ بوت حالا یکی شده‌اند؛ برای اینکه یک اتصال معیوب کار را نخواباند،
+     اگر تا ۳ ثانیه جواب نیامد، موازی یکی دیگر می‌زنیم و اولین پاسخ موفق را رندر می‌کنیم. */
+  var rec = { id: id, tok: tok, p: null };
+  rec.p = hedge(startItemChain(id), function () {
+    /* اگر در این فاصله درخواست تازه‌تری (مثلاً بعد از ورود) جایگزین این شده، دوباره‌کاری نکن */
+    if (__itemReq !== rec) return Promise.reject(new Error('superseded'));
+    return startItemChain(id);
+  }, 3000);
+  var clear = function () { if (__itemReq === rec) __itemReq = null; };
+  rec.p.then(clear, clear);
+  __itemReq = rec;
+  return rec.p;
+}
+function forceRender () { __forceFresh = true; render(); }
+function itemErrorHtml (e) {
+  var msg = (e && e.message) ? String(e.message) : 'خطای ناشناخته';
+  return emptyHtml('⚠️', 'صفحه باز نشد', msg,
+    '<button type="button" class="btn btn-primary" id="item-retry">🔄 تلاش مجدد</button> <a class="btn btn-ghost" href="#/">صفحهٔ اصلی</a>');
+}
+function bindItemRetry () {
+  var b = $('#item-retry');
+  if (!b) return;
+  b.addEventListener('click', function () {
+    b.disabled = true;
+    b.textContent = 'کمی صبر کنید…';
+    forceRender();
+  });
+}
+
 /* ═══════════ رندر اصلی ═══════════ */
 function render () {
   stopHero();
+  var seq = ++__renderSeq;
+  var fresh = __forceFresh;
+  __forceFresh = false;
   var r = currentRoute();
   var path = r.path;
   var app = $('#app');
@@ -12013,6 +12243,10 @@ function render () {
 
   function shell (inner, opts) {
     opts = opts || {};
+    if (!window.__mvxPainted) {
+      window.__mvxPainted = true;
+      try { if (window.__mvxSendReady) window.__mvxSendReady(); } catch (eReady) { }
+    }
     app.innerHTML = headerHtml(opts.active || active, { float: !!opts.float }) + '<main' + (opts.float ? ' class="m-full"' : '') + '>' + inner + '</main>';
     bindHeader();
     /* مثل بات‌فادر: دکمهٔ اصلی تلگرام (مثل «خانه» پایین) اصلاً نمایش داده
@@ -12059,12 +12293,18 @@ function render () {
   }
   var m;
   if ((m = path.match(new RegExp('^/item/(i_[a-z0-9]+)$')))) {
-    api('/item/' + m[1]).then(function (d) {
+    var itemId = m[1];
+    loadItemData(itemId, fresh).then(function (d) {
+      if (seq !== __renderSeq) return; /* رندر جدیدتری (ناوبری/ورود) این را کنار زده است */
       if (d.economy) APP.economy = d.economy;
-      shell(viewItem(d, m[1]), { active: '', back: true, float: true });
-      bindItem(d.item, d);
+      shell(viewItem(d, itemId), { active: '', back: true, float: true });
+      try { bindItem(d.item, d); } catch (eBind) { captureErr('bindItem: ' + ((eBind && eBind.message) || '')); }
     }).catch(function (e) {
-      if (e.status === 404) shell(emptyHtml('😕', 'یافته نشد', 'این صفحه وجود ندارد.'), { active: '' });
+      if (seq !== __renderSeq) return;
+      if (e && e.status === 404) { shell(emptyHtml('😕', 'یافته نشد', 'این صفحه وجود ندارد.'), { active: '' }); return; }
+      captureErr('item: ' + ((e && e.message) || ''));
+      shell(itemErrorHtml(e), { active: '' });
+      bindItemRetry();
     });
     return;
   }
@@ -12212,23 +12452,39 @@ function loadTgScript () {
   } catch (e) { __tgLoading = false; }
 }
 
+/* SDK رسمی تلگرام فقط یک امکان جانبی است (shim داخلی همهٔ نیازها را پوشش می‌دهد و
+   «آماده‌ام» را خودش می‌فرستد). پس تا پایان لود صفحه (حداکثر ۸ ثانیه) صبر می‌کنیم تا
+   درخواست آن، اگر telegram.org کند یا فیلتر بود، با رندر اول و رویداد load رقابت نکند. */
+function loadTgScriptSoon () {
+  var started = false;
+  function go () { if (started) return; started = true; loadTgScript(); }
+  if (document.readyState === 'complete') setTimeout(go, 0);
+  else window.addEventListener('load', function () { setTimeout(go, 0); });
+  setTimeout(go, 8000);
+}
+function loadMe () {
+  return api('/me').then(function (r) {
+    var had = !!APP.user;
+    if (r.user) APP.user = r.user;
+    if (r.site) { APP.siteName = r.site.siteName; APP.tagline = r.site.tagline || APP.tagline; }
+    if (r.economy) APP.economy = r.economy;
+    applySiteBranding();
+    if (!r.user) { loginMiniApp(); startLoginWatch(); }
+    /* بازرندر فقط وقتی لازم است: هنوز چیزی نمایش داده نشده، یا وضعیت ورود عوض شده */
+    if (!window.__mvxPainted || (!had && r.user)) render();
+  }).catch(function (e) { captureErr('/me: ' + (e.message || '')); });
+}
+
 function boot () {
   try {
     applyMiniAppItemLaunch();
     if (!TG) TG = buildTgFallback();
     if (TG && !TG_READY) initTg(TG);
-    loadTgScript();
+    loadTgScriptSoon();
     var rq = currentRoute();
     if (rq.query.ref) setRef(rq.query.ref);
     if (rq.query.ticket) setTick(rq.query.ticket);
-    api('/me').then(function (r) {
-      if (r.user) APP.user = r.user;
-      if (r.site) { APP.siteName = r.site.siteName; APP.tagline = r.site.tagline || APP.tagline; }
-      if (r.economy) APP.economy = r.economy;
-      applySiteBranding();
-      if (!r.user) { loginMiniApp(); startLoginWatch(); }
-      render();
-    }).catch(function (e) { captureErr('/me: ' + (e.message || '')); });
+    loadMe();
     window.addEventListener('hashchange', render);
     render();
     startLoginWatch();

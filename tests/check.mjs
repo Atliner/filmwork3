@@ -49,13 +49,15 @@ assert(mod.APP_HTML.includes("starPacksText: $('#set-star-packs').value"));
 console.log('PASS: Stars package editor; Persian/Arabic digits; valid custom prices; invalid and oversized lists rejected.');
 const launchCode = mod.APP_HTML.slice(mod.APP_HTML.indexOf('function isTgWebHash'), mod.APP_HTML.indexOf('function currentRoute'))
   .replaceAll('@@MINI_APP_URL@@', 'https://t.me/movie_shatelup_bot/directlink');
-function launchContext(search = '', hash = '', start = '') {
+function launchContext(search = '', hash = '', start = '', launch = undefined) {
   const location = {search, hash, pathname:'/'};
-  const context = vm.createContext({URLSearchParams, location, TG:{initDataUnsafe:{start_param:start}}, history:{replaceState(_s,_t,url) {
+  const globals = {URLSearchParams, location, TG:{initDataUnsafe:{start_param:start}}, history:{replaceState(_s,_t,url) {
     const parsed = new URL(url, 'https://example.com');
     location.hash = parsed.hash;
     location.search = parsed.search;
-  }}});
+  }}};
+  if (launch) globals.LAUNCH = launch; // captured by the head script before the URL is rewritten
+  const context = vm.createContext(globals);
   vm.runInContext(launchCode, context);
   return context;
 }
@@ -81,6 +83,22 @@ delayed.applyMiniAppItemLaunch();
 delayed.TG.initDataUnsafe.start_param = 'item_i_abc123';
 delayed.applyMiniAppItemLaunch();
 assert.equal(delayed.location.hash, '#/item/i_abc123');
+{
+  // The start param captured before the URL rewrite (e.g. from signed initData) opens the item even when
+  // the query/hash/SDK no longer carry it; it never overrides in-app navigation or a later reload.
+  const captured = launchContext('', '#/', '', {startParam:'item_i_abc123'});
+  captured.applyMiniAppItemLaunch();
+  assert.equal(captured.location.hash, '#/item/i_abc123');
+  const tgHash = launchContext('', '#tgWebAppData=x&tgWebAppVersion=9.0', '', {startParam:'item_i_abc123'});
+  tgHash.applyMiniAppItemLaunch();
+  assert.equal(tgHash.location.hash, '#/item/i_abc123');
+  const navigated = launchContext('', '#/wallet', '', {startParam:'item_i_abc123'});
+  navigated.applyMiniAppItemLaunch();
+  assert.equal(navigated.location.hash, '#/wallet');
+  const evil = launchContext('', '#/', '', {startParam:'item_../../admin'});
+  evil.applyMiniAppItemLaunch();
+  assert.equal(evil.location.hash, '#/');
+}
 console.log('PASS: Mini App share URL; SDK/query/hash launch; delayed SDK; one-time routing; invalid payloads and existing navigation.');
 // A real Store wrapper over an instrumented KV, including pagination and errors.
 function fakeKV(initial = {}) {
