@@ -39,6 +39,16 @@
  *  • در موبایل با env(safe-area-inset-*) محتوا از نوار وضعیت (ساعت/باتری)
  *    و دکمه‌های پایین گوشی فاصله می‌گیرد (viewport-fit=cover).
  *
+ *  ── نسخهٔ 3.54 ─────────────────────────────────────────────────────
+ *  • عوض‌کردن ربات‌ها فقط با Runtime variables و secrets کار می‌کند:
+ *    ۱) اگر توکن ربات عوض شود (BOT_TOKEN / DELIVERY_BOT_TOKEN)، وبهوکِ ربات
+ *       جدید خودکار دوباره ثبت می‌شود (GET بعدی سایت یا cron) — قبلاً پرچم
+ *       webhookOk قدیمی می‌ماند و ربات جدید هیچ پیامی نمی‌گرفت.
+ *    ۲) لینک مینی‌اپ (دکمهٔ «ورود به مینی‌اپ»، اعلان دانلود، لینک اشتراک)
+ *       از یوزرنیم فعلی ربات ساخته می‌شود؛ دیگر به ربات قدیمیِ ثابت در کد
+ *       اشاره نمی‌کند. کوتاهِ Mini App باید در BotFather برای ربات جدید
+ *       همان «directlink» تنظیم شود.
+ *
  *  ── نسخهٔ 3.53 ─────────────────────────────────────────────────────
  *  • کارت‌های آرشیو در موبایل (سبک VOD حرفه‌ای):
  *    ۱) نشان IMDb و برچسب «در حال پخش» دیگر روی هم نمی‌افتند — برچسب پخش
@@ -2424,6 +2434,26 @@ function fileBotLink(set, payload) {
   if (!u) return '';
   return 'https://t.me/' + u + (payload ? ('?start=' + encodeURIComponent(payload)) : '');
 }
+/* آدرس مینی‌اپ از یوزرنیم «فعلی» ربات ساخته می‌شود (نه یوزرنیم ثابت قدیمی).
+   «directlink» همان کوتاهِ Mini App است که در BotFather برای ربات تنظیم می‌شود. */
+function miniAppUrl(set) {
+  const u = String((set && set.botUsername) || '').replace(/^@/, '').trim();
+  if (u) return 'https://t.me/' + u + '/directlink';
+  return CONFIG.MINI_APP_URL;
+}
+/* آیا وبهوک باید دوباره ثبت شود؟ (مثلاً بعد از عوض‌شدن ربات‌ها از Runtime
+   variables — توکن جدید وبهوک ندارد و تلگرام چیزی نمی‌فرستد). */
+function webhookStale(set) {
+  if (!set || !set.botToken) return false;
+  const bid = set.botId || botIdFromToken(set.botToken);
+  if (!set.webhookOk || (bid && set.webhookBotId !== bid)) return true;
+  const ft = fileBotToken(set);
+  if (ft && ft !== set.botToken) {
+    const fid = botIdFromToken(ft);
+    if (fid && set.fileWebhookBotId !== fid) return true;
+  }
+  return false;
+}
 function escapeRe(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -3828,7 +3858,7 @@ async function askOwnPhone(token, chatId, set, extraLine) {
   const text = (extraLine ? extraLine + '\n\n' : '') + phoneAskText(set);
   return tgSend(token, chatId, text, { reply_markup: contactKeyboard() });
 }
-async function sendMiniAppReturn(token, chatId, isNew, isAdmin, signupBonus) {
+async function sendMiniAppReturn(token, chatId, isNew, isAdmin, signupBonus, set) {
   let text = isNew
     ? ('✅ ثبت‌نام انجام شد' + (isAdmin ? ' — شما مدیر سایت هستید' : '') + '.')
     : '✅ ورود انجام شد.';
@@ -3839,7 +3869,7 @@ async function sendMiniAppReturn(token, chatId, isNew, isAdmin, signupBonus) {
   // so remove the contact keyboard first and then send the inline action.
   await tgSend(token, chatId, text, { reply_markup: { remove_keyboard: true } });
   return tgSend(token, chatId, 'برای ادامه، روی دکمهٔ «ورود به مینی‌اپ» بزنید.', {
-    reply_markup: { inline_keyboard: [[{ text: 'ورود به مینی‌اپ', url: CONFIG.MINI_APP_URL }]] },
+    reply_markup: { inline_keyboard: [[{ text: 'ورود به مینی‌اپ', url: miniAppUrl(set) }]] },
   });
 }
 function isOwnAccountContact(msg, tgId) {
@@ -3977,7 +4007,7 @@ async function handleStartPayload(store, ctx, set, from, chatId, payload, token)
       await saveUser(store, user);
       user = await ensureTgAdmin(store, user);
       await completeTicket(store, ticket, user);
-      await sendMiniAppReturn(token, chatId, false, user.role === 'admin');
+      await sendMiniAppReturn(token, chatId, false, user.role === 'admin', 0, set);
       return;
     }
     await store.set('tgstate:' + tgId, { mode: 'wait_contact', ticket: ticket, refCode: rec.refCode || '' }, 1800);
@@ -4092,7 +4122,7 @@ async function finishNewUserFromState(store, set, from, chatId, state, phone, na
   }
   await completeTicket(store, ticket, user);
   await store.del('tgstate:' + tgId);
-  await sendMiniAppReturn(token, chatId, isNew, user.role === 'admin', user.signupBonusGranted);
+  await sendMiniAppReturn(token, chatId, isNew, user.role === 'admin', user.signupBonusGranted, set);
   return user;
 }
 
@@ -4520,7 +4550,7 @@ async function sendDlNotice (store, job) {
   const text = '✅ محدودیت دانلود شما برداشته شد.\nمی‌توانید دوباره فایل مورد نظرتان را دریافت کنید.';
   const markup = { inline_keyboard: [[{
     text: itemId ? '🎬 بازگشت به این اثر' : '🎬 بازگشت به مینی‌اپ',
-    url: CONFIG.MINI_APP_URL + (itemId ? '?startapp=item_' + itemId : ''),
+    url: miniAppUrl(set) + (itemId ? '?startapp=item_' + itemId : ''),
   }]] };
   const tokens = [];
   const fileTok = fileBotToken(set);
@@ -5343,6 +5373,7 @@ async function maybeSetWebhook(store, set, origin) {
     });
     set.webhookOk = !!r.ok;
     set.webhookError = r.ok ? '' : (r.description || '');
+    if (r.ok) set.webhookBotId = set.botId || botIdFromToken(set.botToken);
   }
   if (set.botToken) {
     if (!set.botId) set.botId = botIdFromToken(set.botToken);
@@ -5362,6 +5393,7 @@ async function maybeSetWebhook(store, set, origin) {
     });
     set.fileWebhookOk = !!rf.ok;
     set.fileWebhookError = rf.ok ? '' : (rf.description || '');
+    if (rf.ok) set.fileWebhookBotId = botIdFromToken(ft);
     const mef = await botApi(ft, 'getMe');
     if (mef.ok && mef.result && mef.result.username && !set.deliveryUserFromEnv) {
       set.deliveryBotUsername = mef.result.username;
@@ -7422,7 +7454,7 @@ function faviconSvg() {
 
 function htmlPage(settings) {
   const html = APP_HTML
-    .replace(/@@MINI_APP_URL@@/g, CONFIG.MINI_APP_URL)
+    .replace(/@@MINI_APP_URL@@/g, miniAppUrl(settings))
     .replace(/@@SITE@@/g, htmlEscape(settings.siteName))
     .replace(/@@TAG@@/g, htmlEscape(settings.tagline || ''));
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' } });
@@ -7473,6 +7505,11 @@ export default {
       try {
         const store = new Store(env.KV, env);
         const set = await getSettings(store);
+        /* عوض‌شدن ربات‌ها از Runtime variables: وبهوکِ ربات جدید خودکار ثبت می‌شود */
+        if (set.botToken && webhookStale(set)) {
+          try { await maybeSetWebhook(store, set, set.publicUrl || ''); } catch (eW) { console.error('cron webhook error', eW); }
+          await writeSettings(store, set);
+        }
         if (set.autoSync && set.botToken && !set.webhookOk) await runSync(store);
       } catch (e) { console.error('cron sync error', e); }
       return new Response('ok');
@@ -7490,7 +7527,7 @@ export default {
       }
       if (url.pathname.indexOf('/api/') === 0) return await handleApi(request, url, store, ctx);
       const set = await getSettings(store);
-      if (request.method === 'GET' && set.botToken && !set.webhookOk) {
+      if (request.method === 'GET' && set.botToken && webhookStale(set)) {
         const origin = set.publicUrl || url.origin;
         if (!set.publicUrl && origin) set.publicUrl = origin;
         const job = maybeSetWebhook(store, set, origin).then(function () { return writeSettings(store, set); });
