@@ -39,6 +39,20 @@
  *  • در موبایل با env(safe-area-inset-*) محتوا از نوار وضعیت (ساعت/باتری)
  *    و دکمه‌های پایین گوشی فاصله می‌گیرد (viewport-fit=cover).
  *
+ *  ── نسخهٔ 3.53 ─────────────────────────────────────────────────────
+ *  • کارت‌های آرشیو در موبایل (سبک VOD حرفه‌ای):
+ *    ۱) نشان IMDb و برچسب «در حال پخش» دیگر روی هم نمی‌افتند — برچسب پخش
+ *       بالای پوستر و چیپ IMDb پایین-چپ آن، با گرادیان ملایم برای خوانایی.
+ *    ۲) عنوان فیلم/سریال حداکثر در ۲ خط نمایش داده می‌شود (عنوان کوتاه و
+ *       بلند هر دو مرتب)، ارتفاع کارت‌ها در گرید یکسان می‌ماند و متادیتا
+ *       تک‌خطی با «…» بریده می‌شود.
+ *  • فیلترهای جستجوی حرفه‌ای به‌صورت ایجکسی فقط نتایج را تازه می‌کنند؛
+ *    صفحه از نو رندر نمی‌شود و اسکرول کاربر به بالا نمی‌پرد.
+ *  • فیلدهای «کارگردان» و «بازیگران» از فرم جستجو حذف شدند (جستجوی متنی
+ *    همچنان نام عوامل را هم پوشش می‌دهد).
+ *  • بازهٔ «سال ساخت» بدون جداکنندهٔ هزارگان نمایش داده می‌شود
+ *    («۲۰۲۶ — ۲۰۲۰» به‌جای «۲٬۰۲۶ — ۲٬۰۲۰»).
+ *
  *  ── نسخهٔ 3.52 ─────────────────────────────────────────────────────
  *  • محدودیت دانلود روزانه (۲۰ در روز) برداشته شد و «محدودیت دانلودِ
  *    پشت‌سرهم» جایگزین آن شد: بعد از N دانلود پشت‌سرهم (پیش‌فرض ۱۰) کاربر
@@ -7751,21 +7765,23 @@ main{min-height:calc(100vh - var(--hdr-h));min-height:calc(100dvh - var(--hdr-h)
 .hscroll::-webkit-scrollbar{height:6px}
 .card{flex:none;width:150px;scroll-snap-align:start;cursor:pointer;background:var(--glass);border-radius:var(--rad);overflow:hidden;border:1px solid var(--glass-line);transition:transform .16s,border-color .16s,box-shadow .16s}
 .card:hover{transform:translateY(-4px);border-color:rgba(255,122,26,.55);box-shadow:0 10px 26px rgba(0,0,0,.45)}
-.card-live{position:absolute;top:8px;right:8px;z-index:2;display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:800;padding:3px 8px;border-radius:999px;background:rgba(255,59,92,.85);color:#fff;backdrop-filter:blur(6px);box-shadow:0 4px 12px rgba(255,59,92,.4)}
-.card-live:before{content:'';width:5px;height:5px;border-radius:50%;background:#fff;animation:pulse 1.4s infinite}
+.card-live{position:absolute;top:8px;right:8px;z-index:3;display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:800;padding:3px 8px;border-radius:999px;background:rgba(255,59,92,.88);color:#fff;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);box-shadow:0 4px 12px rgba(255,59,92,.4);max-width:calc(100% - 16px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-live:before{content:'';width:5px;height:5px;border-radius:50%;background:#fff;flex:none;animation:pulse 1.4s infinite}
 .card-p{position:relative;aspect-ratio:2/3;background-size:cover;background-position:center top;background-color:var(--card2)}
+.card-p:after{content:'';position:absolute;inset:auto 0 0 0;height:52px;z-index:1;background:linear-gradient(180deg,transparent,rgba(5,7,11,.62));pointer-events:none}
 .card-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:44px;font-weight:900;background:linear-gradient(160deg,#1c2333,#121722);color:#333d52}
 .card-p .ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:44px;font-weight:900;color:#39445c}
-.card-ov{position:absolute;inset:0;background:rgba(8,10,15,.45);display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .18s}
+.card-ov{position:absolute;inset:0;z-index:2;background:rgba(8,10,15,.45);display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .18s}
 .card:hover .card-ov{opacity:1}
 .card-ov span{width:48px;height:48px;border-radius:50%;background:var(--grad);color:#14100a;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 6px 20px rgba(255,122,26,.5)}
 .card-b1{position:absolute;top:8px;right:8px}
 .card-b2{position:absolute;bottom:8px;left:8px}
-.card-t{padding:9px 10px 3px;font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.card-m{padding:0 10px 10px;font-size:11.5px;color:var(--tx3);display:flex;gap:6px;align-items:center}
+.card-t{padding:9px 10px 2px;font-size:13px;font-weight:700;line-height:1.55;min-height:calc(2 * 1.55em);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;word-break:break-word}
+.card-m{padding:0 10px 11px;font-size:11.5px;color:var(--tx3);display:flex;gap:6px;align-items:center;min-width:0}
+.card-m span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
-.grid .card{width:auto}
+.grid .card{width:auto;min-width:0}
 
 .filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px;align-items:center}
 .chip{padding:7px 15px;border-radius:999px;background:var(--glass);border:1px solid var(--glass-line);font-size:13px;font-weight:600;color:var(--tx2);cursor:pointer;transition:all .15s;white-space:nowrap}
@@ -8132,8 +8148,8 @@ button.dp-slide{cursor:zoom-in}
 .ep-star{min-width:40px;opacity:.38;font-size:15px}
 .ep-star.on{opacity:1;filter:drop-shadow(0 0 6px rgba(255,176,31,.75))}
 
-.card-imdb{position:absolute;top:8px;left:8px;z-index:2;background:rgba(8,10,15,.82);border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:4px 7px;text-align:center;line-height:1.15;min-width:42px}
-.card-imdb b{display:block;font-size:13px;font-weight:900}
+.card-imdb{position:absolute;bottom:8px;left:8px;z-index:3;background:rgba(8,10,15,.82);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:3px 7px;text-align:center;line-height:1.15;min-width:42px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+.card-imdb b{display:block;font-size:13px;font-weight:900;color:#fff}
 .card-imdb i{display:block;font-style:normal;font-size:9px;font-weight:800;color:#f5c518;letter-spacing:.04em}
 .pro-search{display:grid;grid-template-columns:150px 1fr;gap:16px;background:var(--glass);border:1px solid var(--glass-line);border-radius:22px;padding:16px;margin:0 0 22px;box-shadow:var(--shadow);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur)}
 .pro-side{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:8px 10px;border-inline-end:1px solid var(--line);text-align:center}
@@ -8171,6 +8187,9 @@ button.dp-slide{cursor:zoom-in}
 .ps-dual input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;pointer-events:auto;width:18px;height:18px;margin-top:-6px;background:var(--acc);border:3px solid #fff;border-radius:50%;cursor:pointer;box-shadow:0 1px 6px rgba(0,0,0,.45)}
 .ps-dual input[type=range]::-moz-range-thumb{pointer-events:auto;width:18px;height:18px;background:var(--acc);border:3px solid #fff;border-radius:50%;cursor:pointer}
 .pro-count{font-size:13px;color:var(--tx3);margin:-8px 0 14px}
+/* نتایج آرشیو: تازه‌سازی ایجکسی بدون رندر کل صفحه */
+#catalog-results{transition:opacity .18s}
+#catalog-results.is-loading{opacity:.4;pointer-events:none}
 
 .share-box{display:flex;gap:8px;align-items:stretch;margin-bottom:14px}
 .share-box input{flex:1;min-width:0;direction:ltr;text-align:left;font-size:12px;padding:10px 12px}
@@ -8226,7 +8245,12 @@ button.dp-slide{cursor:zoom-in}
   .hero-title{font-size:20px}
   .card{width:128px}
   .grid{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px}
-  .card-t{font-size:12px}
+  .card-t{font-size:12px;min-height:calc(2 * 1.55em)}
+  /* نشان‌های پوستر در موبایل فشرده‌تر؛ IMDb پایین و پخش بالا — بدون هم‌پوشانی */
+  .card-live{top:6px;right:6px;font-size:9px;padding:2px 7px;max-width:calc(100% - 12px)}
+  .card-imdb{bottom:6px;left:6px;min-width:36px;padding:2px 6px}
+  .card-imdb b{font-size:11.5px}
+  .card-imdb i{font-size:8px}
   .form-2col{grid-template-columns:1fr}
   .airing-fields{grid-template-columns:1fr}
   .d-info h1{font-size:19px}
@@ -9158,7 +9182,7 @@ function cardHtml (it) {
     : '<div class="card-p">' + imdb + live + '<div class="card-ov"><span>📥</span></div></div>';
   var yl = yearLabel(it);
   var sub = isAiring(it) && it.airingSeason ? ('فصل ' + faNum(it.airingSeason)) : typeLabel(it.type);
-  return '<a class="card" href="#/item/' + it.id + '">' + inner +
+  return '<a class="card" href="#/item/' + it.id + '" title="' + esc(it.title) + '">' + inner +
     '<div class="card-t">' + esc(it.title) + '</div>' +
     '<div class="card-m"><span>' + sub + (yl ? ' • ' + yl : '') + '</span></div></a>';
 }
@@ -9319,8 +9343,6 @@ function proSearchHtml (c, q) {
     '<button type="button" class="ps-type' + (q.type === 'movie' ? ' on' : '') + '" data-type="movie">فیلم</button>' +
     '<button type="button" class="ps-type' + (q.type === 'series' ? ' on' : '') + '" data-type="series">سریال</button>' +
     '</div></div>' +
-    '<div class="ps-field"><label>کارگردان</label><input id="f-dir" placeholder="مثلاً Christopher Nolan" value="' + esc(q.director || '') + '"></div>' +
-    '<div class="ps-field"><label>بازیگران</label><input id="f-act" placeholder="مثلاً Leonardo DiCaprio" value="' + esc(q.actor || '') + '"></div>' +
     '<div class="ps-field ps-multi"><label>کشور</label>' + checkListHtml('f-country', f.countries, q.country) + '</div>' +
     '<div class="ps-field ps-multi"><label>رده سنی</label>' + checkListHtml('f-age', f.ages, q.age) + '</div>' +
     '<div class="ps-field ps-multi"><label>ژانر</label>' + checkListHtml('f-genre', f.genres, q.genre) + '</div>' +
@@ -9331,7 +9353,7 @@ function proSearchHtml (c, q) {
     '<option value="year"' + (q.sort === 'year' ? ' selected' : '') + '>سال ساخت</option>' +
     '<option value="imdb"' + (q.sort === 'imdb' ? ' selected' : '') + '>بالاترین امتیاز</option>' +
     '<option value="title"' + (q.sort === 'title' ? ' selected' : '') + '>الفبا</option></select></div>' +
-    '<div class="ps-field ps-range"><div class="ps-range-h"><span>سال ساخت</span><b id="yr-lab">' + faNum(y1) + ' — ' + faNum(y0) + '</b></div>' +
+    '<div class="ps-field ps-range"><div class="ps-range-h"><span>سال ساخت</span><b id="yr-lab">' + faYear(y1) + ' — ' + faYear(y0) + '</b></div>' +
     '<div class="ps-dual"><div class="ps-track"><div class="ps-fill" id="yr-fill"></div></div>' +
     '<input type="range" id="f-y0" min="' + f.yearMin + '" max="' + f.yearMax + '" value="' + y0 + '">' +
     '<input type="range" id="f-y1" min="' + f.yearMin + '" max="' + f.yearMax + '" value="' + y1 + '"></div></div>' +
@@ -9339,7 +9361,7 @@ function proSearchHtml (c, q) {
     '<div class="ps-dual"><div class="ps-track"><div class="ps-fill" id="sc-fill"></div></div>' +
     '<input type="range" id="f-s0" min="1" max="10" step="0.1" value="' + s0 + '">' +
     '<input type="range" id="f-s1" min="1" max="10" step="0.1" value="' + s1 + '"></div></div>' +
-    '<div class="ps-searchrow"><input id="f-q" type="search" placeholder="جستجوی نام فیلم، بازیگر، کارگردان…" value="' + esc(q.q || '') + '">' +
+    '<div class="ps-searchrow"><input id="f-q" type="search" placeholder="جستجوی نام فیلم یا سریال…" value="' + esc(q.q || '') + '">' +
     '<button class="btn btn-primary" type="submit" id="f-go">جستجو</button></div>' +
     '<div class="ps-toggles" style="grid-column:1/-1">' +
     '<button type="button" class="ps-tog' + (q.dubbed === '1' ? ' on' : '') + '" data-f="dubbed">دوبله فارسی</button>' +
@@ -9351,8 +9373,13 @@ function readProQuery () {
   var q = {};
   var t = $('.ps-type.on');
   if (t && t.getAttribute('data-type')) q.type = t.getAttribute('data-type');
-  var dir = $('#f-dir'); if (dir && dir.value.trim()) q.director = dir.value.trim();
-  var act = $('#f-act'); if (act && act.value.trim()) q.actor = act.value.trim();
+  /* فیلدهای کارگردان/بازیگران از فرم حذف شده‌اند؛ اگر از صفحهٔ اثر با
+     لینک ?director= / ?actor= آمده باشیم، همان فیلتر حین تازه‌سازی حفظ می‌شود */
+  try {
+    var rq = currentRoute().query || {};
+    if (rq.director) q.director = rq.director;
+    if (rq.actor) q.actor = rq.actor;
+  } catch (eRq) { }
   var country = readCheckList('f-country'); if (country) q.country = country;
   var age = readCheckList('f-age'); if (age) q.age = age;
   var genre = readCheckList('f-genre'); if (genre) q.genre = genre;
@@ -9386,13 +9413,13 @@ function syncDual (a, b, fill, lab, kind) {
   if (fill) { fill.style.left = l + '%'; fill.style.width = Math.max(0, r - l) + '%'; }
   if (lab) {
     if (kind === 'score') lab.textContent = y.toFixed(1) + ' — ' + x.toFixed(1);
-    else lab.textContent = faNum(y) + ' — ' + faNum(x);
+    else lab.textContent = faYear(y) + ' — ' + faYear(x);
   }
 }
 function bindProSearch () {
   var form = $('#pro-search');
   if (!form) return;
-  function go () { nav(applyCatalogQuery(readProQuery())); }
+  function go () { submitCatalogQuery(readProQuery()); }
   form.addEventListener('submit', function (e) { e.preventDefault(); go(); });
   $all('.ps-type').forEach(function (b) {
     b.addEventListener('click', function () {
@@ -9422,7 +9449,7 @@ function bindProSearch () {
       go();
     });
   });
-  ['f-dir', 'f-act', 'f-q'].forEach(function (id) {
+  ['f-q'].forEach(function (id) {
     var el = $('#' + id);
     if (el) el.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); go(); } });
   });
@@ -9440,16 +9467,45 @@ function bindProSearch () {
   hookDual('f-s0', 'f-s1', 'sc-fill', 'sc-lab', 'score');
 }
 function bindCatalogFilters () { bindProSearch(); }
-function viewCatalog (c, q) {
+function catalogResultsHtml (c, q) {
   q = q || {};
   var n = (c.total != null ? c.total : (c.items || []).length);
   var title = q.q ? ('جستجوی «' + q.q + '»') : (q.airing === '1' ? 'سریال‌های در حال پخش' : (q.type ? typeLabel(q.type) : 'آرشیو'));
   var body = (c.items && c.items.length)
     ? gridHtml(c.items)
     : emptyHtml('🔍', 'چیزی پیدا نشد', 'فیلترها را عوض کنید یا عبارت دیگری جستجو کنید.');
+  return '<div class="pro-count">' + esc(title) + ' — ' + faNum(n) + ' عنوان</div>' + body;
+}
+/* تازه‌سازی نتایج آرشیو به‌صورت ایجکسی: فقط جعبهٔ نتایج عوض می‌شود؛ فرم،
+   اسکرول و جای کاربر ثابت می‌ماند و صفحه از نو رندر/به بالا پرش نمی‌کند. */
+var __catSeq = 0, __catTimer = null;
+function submitCatalogQuery (q) {
+  var box = $('#catalog-results');
+  var hash = applyCatalogQuery(q);
+  if (!box) { nav(hash); return; } /* صفحهٔ خانه: رفتن به آرشیو */
+  var seq = ++__catSeq;
+  if (__catTimer) clearTimeout(__catTimer);
+  __catTimer = setTimeout(function () {
+    __catTimer = null;
+    box.classList.add('is-loading');
+    api('/catalog?' + new URLSearchParams(q).toString()).then(function (c) {
+      if (seq !== __catSeq) return;
+      if (c.economy) APP.economy = c.economy;
+      box.innerHTML = catalogResultsHtml(c, q);
+      box.classList.remove('is-loading');
+      try { history.replaceState(null, '', location.pathname + location.search + hash); } catch (e) { }
+    }).catch(function (e) {
+      if (seq !== __catSeq) return;
+      box.classList.remove('is-loading');
+      toast(((e && e.message) || 'خطا در بارگذاری نتایج'), 'err');
+    });
+  }, 140);
+}
+function viewCatalog (c, q) {
+  q = q || {};
   return proSearchHtml(c, q) +
-    '<div class="pro-count">' + esc(title) + ' — ' + faNum(n) + ' عنوان</div>' +
-    body + footerHtml();
+    '<div id="catalog-results">' + catalogResultsHtml(c, q) + '</div>' +
+    footerHtml();
 }
 function viewSearch (c, q) { return viewCatalog(c, q); }
 
