@@ -2750,10 +2750,11 @@ function streamEpisodeInfo(item, bag) {
   };
 }
 function streamWatermarkOf(user) {
-  /* واترمارک فقط یک شناسه نشان می‌دهد: آیدی تلگرام (@یوزرنیم و اگر نبود شناسهٔ عددی).
-     قبلاً «@یوزرنیم · شناسه» با هم نمایش داده می‌شد و متن خیلی بلند می‌شد. */
-  if (user && user.tgUsername) return '@' + user.tgUsername;
+  /* واترمارک فقط یک شناسه نشان می‌دهد: اولویت با شناسهٔ عددی تلگرام است
+     و اگر شناسهٔ عددی نبود، آیدی تلگرام (@یوزرنیم) و بعد نام کاربری قدیمی.
+     شناسهٔ عددی ثابت است و با تغییر یوزرنیم عوض نمی‌شود. */
   if (user && user.tgId) return String(user.tgId);
+  if (user && user.tgUsername) return '@' + user.tgUsername;
   return String((user && user.username) || '');
 }
 async function streamBuild(store, set, user, item, picked, sid, request, avoid) {
@@ -9868,8 +9869,12 @@ function MVX_PLAYER_MODULE(W) {
       if (b.hasAttribute('data-ep')) return gotoEp(b.getAttribute('data-ep'));
     });
     q('.mvp-big', r).addEventListener('click', function (e) { e.stopPropagation(); togglePlay(); });
-    /* لایهٔ لمس: یک ضربه = نمایش کنترل‌ها، دوبار ضربه چپ/راست = ±۱۰ ثانیه، دوبار وسط = تمام‌صفحه */
-    var tap = q('.mvp-tap', r), lastTap = 0, tapT = 0;
+    /* لایهٔ لمس: یک ضربه = نمایش/مخفی کنترل‌ها، دوبار ضربه چپ/راست = ±۱۰ ثانیه، دوبار وسط = تمام‌صفحه */
+    var tap = q('.mvp-tap', r), lastTap = 0, tapT = 0, tapUi = false;
+    /* وضعیت کنترل‌ها را همان ابتدای لمس ثبت می‌کنیم؛ مرورگر موبایل با هر لمس یک
+       mousemove مصنوعی می‌فرستد و showUi را اجرا می‌کند — اگر به آن تکی کنیم،
+       تشخیص تک‌ضربه کنترل‌های تازه‌نمایش‌داده‌شده را بلافاصله مخفی می‌کرد. */
+    tap.addEventListener('touchstart', function () { tapUi = r.classList.contains('ui'); }, { passive: true });
     tap.addEventListener('click', function (e) {
       if (P.panel) { closePanels(); return; }
       var now = Date.now();
@@ -9884,7 +9889,12 @@ function MVX_PLAYER_MODULE(W) {
       tapT = setTimeout(function () {
         if (!P) return;
         var touch = W.matchMedia && W.matchMedia('(hover:none)').matches;
-        if (touch) { if (r.classList.contains('ui')) r.classList.remove('ui'); else showUi(); }
+        if (touch) {
+          /* تک‌ضربه: اگر کنترل‌ها موقع لمس پیدا بودند مخفی شوند؛
+             اگر پنهان بودند با تایمر کامل ۶٫۵ ثانیه بمانند (مثل کلیک روی عنوان) */
+          if (tapUi) r.classList.remove('ui');
+          else showUi();
+        }
         else togglePlay();
       }, 280);
     });
