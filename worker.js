@@ -9764,41 +9764,25 @@ function MVX_PLAYER_MODULE(W) {
   function tgApp() {
     try { return (W.Telegram && W.Telegram.WebApp) || (P && P.host && P.host.tg) || null; } catch (e) { return null; }
   }
-  function isFs() {
-    var tg = tgApp();
-    return !!(D.fullscreenElement || D.webkitFullscreenElement) || !!(P && P.tgFsOn) || !!(tg && tg.isFullscreen);
-  }
-  /* آیا واقعاً داخل مینی‌اپ تلگرام هستیم؟ (SDK رسمی یا پل بومی کلاینت)
-     در مرورگر معمولی باید از Fullscreen خود مرورگر استفاده کرد. */
-  function tgNative() {
-    var tg = tgApp();
-    if (!tg) return null;
-    if (!tg.__fallback) return tg;
-    try { if (W.TelegramWebviewProxy !== undefined && W.TelegramWebviewProxy !== null) return tg; } catch (e) { }
-    try { if (W.webkit && W.webkit.messageHandlers && W.webkit.messageHandlers.TelegramWebviewProxy) return tg; } catch (e) { }
-    try { if (W.external && 'notify' in W.external) return tg; } catch (e) { }
-    return null;
-  }
+  function isFs() { return !!(D.fullscreenElement || D.webkitFullscreenElement) || !!(P && P.tgFsOn); }
   function toggleFs() {
     var r = P.root;
-    var tg = tgNative();
     if (isFs()) {
-      if (tg || (P && P.tgFsOn)) tgFs(false);
-      else if (D.fullscreenElement || D.webkitFullscreenElement) { try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { } }
+      if (D.fullscreenElement || D.webkitFullscreenElement) {
+        try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { }
+      }
+      if (P.tgFsOn) tgFs(false);
       try { if (W.screen.orientation && W.screen.orientation.unlock) W.screen.orientation.unlock(); } catch (e) { }
-      if (P) P.tgFsOn = false;
+      P.tgFsOn = false;
       syncFs();
       return;
     }
-    /* در مینی‌اپ تلگرام اولویت با Fullscreen خود تلگرام است؛
-       Browser API داخل وب‌ویو تلگرام (مخصوصاً iOS) یا اصلاً نیست یا بی‌صدا کار نمی‌کند. */
-    if (tg) tgFs(true);
-    else {
-      var req = r.requestFullscreen || r.webkitRequestFullscreen;
-      var ok = false;
-      if (req) { try { var pr = req.call(r, { navigationUI: 'hide' }); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(true); }); } catch (e) { ok = false; } }
-      if (!ok) tgFs(true);
-    }
+    /* اول Fullscreen مرورگر/وب‌ویو (در دسکتاپ و اندروید همین کار می‌کند)؛
+       فقط اگر نبود یا ناموفق بود، سراغ Fullscreen خود تلگرام می‌رویم. */
+    var req = r.requestFullscreen || r.webkitRequestFullscreen;
+    var ok = false;
+    if (req) { try { var pr = req.call(r, { navigationUI: 'hide' }); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(true); }); } catch (e) { ok = false; } }
+    if (!ok) tgFs(true);
     try { if (W.screen.orientation && W.screen.orientation.lock) W.screen.orientation.lock('landscape').catch(function () { }); } catch (e) { }
   }
   function tgFs(on) {
@@ -9809,7 +9793,7 @@ function MVX_PLAYER_MODULE(W) {
       else if (!on && tg && typeof tg.exitFullscreen === 'function') { tg.exitFullscreen(); did = true; }
     } catch (e) { }
     if (!did && on) {
-      /* کلاینت از تمام‌صفحه پشتیبانی نمی‌کند — پیام مناسب */
+      /* نه مرورگر و نه تلگرام — پیام مناسب */
       try { if (tg && tg.expand) tg.expand(); } catch (e) { }
       toast('تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود');
     }
