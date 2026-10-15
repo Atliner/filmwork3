@@ -59,3 +59,10 @@ CONTENT_ADMIN_IDS = "REPLACE_WITH_NUMERIC_TELEGRAM_ADMIN_ID"
 # شارد‌های D1 اکانت‌های دیگر از داخل پنل سایت (تنظیمات ← ذخیره‌سازی و فدراسیون D1)
 # اضافه می‌شوند: Worker قالب scripts/shard-proxy-worker.js روی اکانت دیگر
 # (نصب خودکار: node scripts/shard-installer.mjs). هیچ Binding جدیدی در این فایل لازم نیست.
+
+# ── پخش آنلاین و تبلیغات خودکار (نسخهٔ 3.60) — هیچ Binding تازه‌ای لازم نیست ──
+# • روشن/خاموش‌کردن پخش و لبه‌ها از پنل: تنظیمات ← «🎬 پخش آنلاین» (docs/ONLINE-PLAYER.md)
+#   لبه‌ها Worker جدای scripts/stream-edge-worker.js هستند (wrangler.edge.example.toml).
+# • پلتفرم تبلیغ‌دهندگان، Worker جدای ads.js است (wrangler.ads.example.toml،
+#   docs/ADS-PLATFORM.md). کلید اتصال را می‌توانید به‌جای پنل، اینجا Secret کنید:
+#   ADNET_SECRET (Secret)

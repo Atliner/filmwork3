@@ -161,7 +161,8 @@ async function setWallet(e, n) { const u = await getUser(e.store, e.user.usernam
 
 // ── ۵. پله‌ها در درخواست واقعی: بدون اعلام قانون، بدون کسر سکه در درخواست مسدود ──
 {
-  const e = await env({ dlBurstLimit: 3, dlCooldownSteps: '1,2', dlBurstResetMin: 60, dlClickPrice: 5 });
+  // مدل قدیمیِ «سکه به ازای هر دانلود» فقط با dlChargeEnabled روشن می‌شود (پیش‌فرض: دانلود رایگان)
+  const e = await env({ dlBurstLimit: 3, dlCooldownSteps: '1,2', dlBurstResetMin: 60, dlClickPrice: 5, dlChargeEnabled: true });
   await setWallet(e, 100);
   for (let i = 0; i < 3; i++) {
     const r = await dl(e);
@@ -210,9 +211,23 @@ async function setWallet(e, n) { const u = await getUser(e.store, e.user.usernam
   assert.equal((await r7.json()).waitMin, 1);
 }
 
+// ── ۵ب. مدل جدید: دانلود برای همه رایگان است، حتی اگر قیمت قدیمی در تنظیمات مانده باشد ──
+{
+  const e = await env({ dlBurstLimit: 0, dlClickPrice: 5 });
+  await setWallet(e, 0);
+  for (let i = 0; i < 3; i++) {
+    const r = await dl(e);
+    assert.equal(r.status, 200, JSON.stringify(await r.clone().json()));
+    const b = await r.json();
+    assert.equal(b.charged, 0);
+    assert.ok(b.botLink || b.needAd, 'بلیت دانلود بدون سکه صادر شود');
+  }
+  assert.equal(await wallet(e), 0, 'دانلود رایگان سکه کم نمی‌کند');
+}
+
 // ── ۶. دانلودِ ناموفق (کیف پول خالی) یک «جا» مصرف نمی‌کند ──
 {
-  const e = await env({ dlBurstLimit: 2, dlCooldownSteps: '1', dlClickPrice: 5 });
+  const e = await env({ dlBurstLimit: 2, dlCooldownSteps: '1', dlClickPrice: 5, dlChargeEnabled: true });
   await setWallet(e, 0);
   for (let i = 0; i < 6; i++) {
     const r = await dl(e);

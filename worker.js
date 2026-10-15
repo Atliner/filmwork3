@@ -2,8 +2,8 @@
  * =====================================================================
  *  🎬 سینماگرام v3 — یک‌فایلی | Cloudflare Worker + ربات/مینی‌اپ تلگرام
  * =====================================================================
- *  محتوا از کانال تلگرام شماست. پخش آنلاین وجود ندارد (ضد کپی).
- *  کاربر با ربات وارد می‌شود و فایل را همان‌جا، فقط ۱۰ ثانیه، دریافت می‌کند.
+ *  محتوا از کانال تلگرام شماست. کاربر با ربات وارد می‌شود و فایل را همان‌جا،
+ *  فقط ۱۰ ثانیه، دریافت می‌کند؛ پخش آنلاین (اختیاری) با پلیر امن سایت انجام می‌شود.
  *
  *  ── نصب ────────────────────────────────────────────────────────────
  *  1) dash.cloudflare.com → Workers & Pages → Create Worker
@@ -38,6 +38,21 @@
  *    --content-w کش می‌آید و وسط‌چین می‌شود (دیگر ستون ثابت ۴۸۰px نیست).
  *  • در موبایل با env(safe-area-inset-*) محتوا از نوار وضعیت (ساعت/باتری)
  *    و دکمه‌های پایین گوشی فاصله می‌گیرد (viewport-fit=cover).
+ *
+ *  ── نسخهٔ 3.60 ─────────────────────────────────────────────────────
+ *  • پخش آنلاین (docs/ONLINE-PLAYER.md): پلیر شبیه VLC با انتخاب دوبله/زیرنویس و
+ *    کیفیت داخل پلیر، زیرنویس جدا، قسمت بعد، ادامهٔ پخش و میانبرها؛ کنار هر کیفیت
+ *    دو دکمهٔ «دانلود» و «پخش آنلاین». کل سیستم و دکمه از پنل روشن/خاموش می‌شود.
+ *  • ربات سوم: بخش اختیاری «🎬 لینک پخش آنلاین» برای هر قسمت؛ پنل: ویرایش لینک‌ها.
+ *  • ضددانلود: لینک واقعی فقط در توکن AES-GCM کوتاه‌مدت (گره به IP و مرورگر)،
+ *    بررسی Sec-Fetch روی «لبهٔ پخش»، بدون کنترل بومی/PiP، واترمارک متحرک کاربر.
+ *    لبه‌ها (scripts/stream-edge-worker.js) روی اکانت‌های دیگر سهمیه را پخش می‌کنند.
+ *  • تبلیغات خودکار (docs/ADS-PLATFORM.md): پلتفرم تبلیغ‌دهندگان ads.js روی Worker
+ *    دیگر (کیف پول استارز/کارت‌به‌کارت، تأیید مدیر، آمار دقیق)؛ سایت ویدئو/بنر را
+ *    پیش از دانلود و داخل پلیر (پیش از پخش، پیش از هر تعویض، بنر و بنر توقف) و
+ *    دکمهٔ لینک را زیر فایل‌های ربات خودکار نمایش می‌دهد؛ تبلیغ دستی جایگزین می‌ماند.
+ *  • مدل جدید: دانلود و پخش برای همه رایگان؛ اشتراک = محتوای ویژه + بدون تبلیغ.
+ *  • dl:/adg:/tgstate:/stm: روی D1 (نه KV با سقف ۱۰۰۰ نوشتن روزانه).
  *
  *  ── نسخهٔ 3.54 ─────────────────────────────────────────────────────
  *  • عوض‌کردن ربات‌ها فقط با Runtime variables و secrets کار می‌کند:
@@ -389,8 +404,39 @@ function mergeSettings(s) {
     widgetDomain: '',
     /* شارد‌های D1 دور (اکانت‌های دیگر) برای تقسیم آثار؛ هر قلم: {id,url,secret} */
     shards: [],
+    /* ── پخش آنلاین ── streamEnabled = کل سیستم؛ streamPublic = نمایش دکمه برای کاربران
+       (خاموش = فقط مدیران برای تست). لبه‌ها (stream edges) Workerهای پراکسی روی اکانت‌های
+       دیگرند تا سهمیهٔ درخواست Worker اصلی مصرف نشود؛ بدون لبه، خود سایت پراکسی می‌کند. */
+    streamEnabled: false,
+    streamPublic: true,
+    streamEdges: [],
+    streamSecret: '',
+    streamTokenMin: 180,
+    streamMaxSessions: 2,
+    streamBindIp: true,
+    streamWatermark: true,
+    /* ── شبکهٔ تبلیغات خودکار (ads.js روی Worker/اکانت دیگر) ── */
+    adNetEnabled: false,
+    adNetUrl: '',
+    adNetSecret: '',
+    adNetHouseFallback: true,
+    adNetBotLinks: true,
+    /* تبلیغات داخل پلیر (فقط کاربران بدون اشتراک) */
+    plAdPre: true,
+    plAdSwitch: true,
+    plAdSwitchGap: 0,
+    plAdBanner: true,
+    plAdBannerFirst: 120,
+    plAdBannerEvery: 600,
+    plAdBannerSec: 15,
+    plAdPause: true,
+    plAdSkip: 5,
+    plAdMidroll: 0,
+    /* مدل جدید: دانلود برای همه رایگان است؛ دریافت سکه بابت دانلود فقط با روشن‌کردن این گزینه */
+    dlChargeEnabled: false,
   }, ECONOMY_DEFAULTS, s || {});
   if (!Array.isArray(out.shards)) out.shards = [];
+  if (!Array.isArray(out.streamEdges)) out.streamEdges = [];
   if (!Array.isArray(out.starPacks) || !out.starPacks.length) out.starPacks = ECONOMY_DEFAULTS.starPacks.slice();
   if (!Array.isArray(out.rialPacks)) out.rialPacks = [];
   if (!Array.isArray(out.starShops) || !out.starShops.length) out.starShops = (ECONOMY_DEFAULTS.starShops || []).slice();
@@ -766,7 +812,9 @@ class D1Backend {
    Cache API : کش ۶۰ ثانیه‌ای صفحه/فهرست عمومی — خواندن D1 را کاهش می‌دهد
    اگر D1 وصل نباشد یا آماده نشده باشد، همه‌چیز روی KV می‌ماند
    (سازگاری کامل با حالت قدیم) — اگر KV نباشد، همه‌چیز روی D1. */
-const HEAVY_PREFIXES = ['u:', 'it:', 'src:', 'sub:', 'code:', 'pay:', 'refcode:', 'tg:', 'tgu:', 'ph:', 'k2k:', 'dlc:', 'bot:', 'rl:', 'views:', 'stars:', 'tick:', 'adstat:'];
+/* dl: / adg: / tgstate: / stm: رکوردهای پرتکرار هر دانلود، ورود و جلسهٔ پخش آنلاین‌اند؛
+   روی KV (فقط ~۱۰۰۰ نوشتن در روز) سهمیه در چند صد دانلود تمام می‌شد. */
+const HEAVY_PREFIXES = ['u:', 'it:', 'src:', 'sub:', 'code:', 'pay:', 'refcode:', 'tg:', 'tgu:', 'ph:', 'k2k:', 'dlc:', 'bot:', 'rl:', 'views:', 'stars:', 'tick:', 'adstat:', 'dl:', 'adg:', 'tgstate:', 'stm:'];
 const HEAVY_KEYS = new Set(['idx']);
 function isHeavyKey (k) {
   if (HEAVY_KEYS.has(k)) return true;
@@ -1832,6 +1880,7 @@ function publicSeasons(item) {
           sizeBytes: e.sizeBytes || null,
           premium: !!e.premium,
           variants: publicVariantMap(e, item.quality),
+          stm: publicStreamMap(e, item),
         };
       }),
     };
@@ -2059,6 +2108,1151 @@ function adGateInfo(set) {
   };
 }
 
+/* ═══════════════════════ پخش آنلاین (Online streaming) ═══════════════════════
+   مدل داده: هر «کیسه» (فیلم = خود اثر، سریال = هر قسمت) دو فهرست اختیاری دارد:
+     bag.streams    = [{id:'v_…', track:'sub'|'dub', quality, url, fmt, label, at}]
+     bag.streamSubs = [{id:'t_…', lang:'fa', label, url}]   ← زیرنویس جدا (srt/vtt) روی هر نسخه
+   لینک واقعی هرگز به مرورگر کاربر نمی‌رسد: پلیر یک توکن رمزنگاری‌شده (AES-GCM) می‌گیرد که
+   فقط «لبهٔ پخش» (همین Worker زیر /sv یا Workerهای stream-edge روی اکانت‌های دیگر) می‌تواند
+   بازش کند. توکن کوتاه‌مدت است و به IP/مرورگر کاربر گره می‌خورد.
+   صرفه‌جویی در سهمیه: MP4 با یک درخواست Range ادامه‌دار پخش می‌شود (نه صدها قطعهٔ HLS)،
+   پس هر تماشا معمولاً ۳ تا ۲۰ درخواست به لبه می‌زند؛ Worker اصلی فقط ۱–۳ درخواست JSON می‌بیند. */
+
+const STREAM_MAX_PER_BAG = 24;
+const STREAM_SUBS_MAX = 6;
+const STREAM_FMTS = ['mp4', 'hls', 'webm', 'mkv', 'auto'];
+
+function streamFmtOf(url) {
+  let path = '';
+  try { path = new URL(url).pathname.toLowerCase(); } catch (e) { return 'auto'; }
+  if (/\.m3u8$/.test(path)) return 'hls';
+  if (/\.(mp4|m4v|mov)$/.test(path)) return 'mp4';
+  if (/\.webm$/.test(path)) return 'webm';
+  if (/\.mkv$/.test(path)) return 'mkv';
+  return 'auto';
+}
+function streamIsSubtitleUrl(url) {
+  try { return /\.(srt|vtt)$/i.test(new URL(url).pathname); } catch (e) { return false; }
+}
+function streamTrackWord(word) {
+  const w = String(word || '').toLowerCase().replace(/[\u200c\u200f\u200e\s_\-.]+/g, '');
+  if (!w) return '';
+  if (/^(دوبله|دوبلهفارسی|dub|dubbed|duble|farsidub|persiandub|dublefarsi)$/.test(w)) return 'dub';
+  if (/^(زیرنویس|زیرنویسفارسی|زیرنویسچسبیده|هاردساب|سافتساب|زباناصلی|اصلی|sub|subs|subbed|hardsub|softsub|original|orig)$/.test(w)) return 'sub';
+  return '';
+}
+function streamTrackFromName(name) {
+  const n = String(name || '').toLowerCase();
+  if (/(^|[._\- ])(dubbed|duble|dub|farsi[._\- ]?dub)([._\- ]|$)/.test(n)) return 'dub';
+  if (/(^|[._\- ])(hardsub|softsub|subbed|sub)([._\- ]|$)/.test(n)) return 'sub';
+  return '';
+}
+function streamDigits(s) {
+  return String(s == null ? '' : s)
+    .replace(/[۰-۹]/g, function (d) { return String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)); })
+    .replace(/[٠-٩]/g, function (d) { return String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)); });
+}
+function streamSafeUrl(raw) {
+  const s = String(raw || '').trim();
+  if (!s || s.length > 1500) return '';
+  if (!/^https?:\/\//i.test(s) || !isPublicHttpUrl(s)) return '';
+  try { return new URL(s).href; } catch (e) { return ''; }
+}
+function streamLabelClean(v) {
+  return String(v || '').replace(/[\r\n\t]+/g, ' ').replace(/[<>]/g, '').trim().slice(0, 64);
+}
+/* یک متن چندخطی (پیام ربات یا فیلد پنل) → فهرست لینک‌ها.
+   قالب هر خط: [S01E05 | فصل ۱ قسمت ۵] [کیفیت] [دوبله|زیرنویس] لینک [| عنوان]
+   خط‌های «#نوع دوبله»، «#کیفیت 720»، «#فصل 2» پیش‌فرض خط‌های بعدی‌اند.
+   «حذف S01E05 [720] [دوبله]» یعنی حذف لینک(های) پخش همان قسمت. */
+function parseStreamLines(text, opts) {
+  opts = opts || {};
+  const series = opts.type === 'series';
+  const out = { entries: [], removes: [], errors: [], warnings: [] };
+  const defs = { track: '', quality: '', season: 0 };
+  const lines = String(text || '').replace(/\r/g, '').split('\n');
+  function seasonEp(s) {
+    let m = s.match(/(?:^|[\s._\-\[(])s(\d{1,3})\s*[._\-]?\s*e(\d{1,4})(?!\d)/i);
+    if (m) return { season: +m[1], episode: +m[2] };
+    m = s.match(/(?:^|\s)(\d{1,3})x(\d{1,4})(?!\d)/i);
+    if (m) return { season: +m[1], episode: +m[2] };
+    m = s.match(/فصل\s*(\d{1,3})\s*(?:،|,)?\s*قسمت\s*(\d{1,4})/);
+    if (m) return { season: +m[1], episode: +m[2] };
+    m = s.match(/(?:^|\s)(?:قسمت|ep|e)\s*(\d{1,4})(?!\d)/i);
+    if (m) return { season: 0, episode: +m[1] };
+    return null;
+  }
+  function qualityOf(s) {
+    const m = s.match(/(?:^|[\s._\-\[(])(2160|1440|1080|720|576|540|480|360|4k)p?(?=$|[\s._\-\])])/i);
+    if (!m) return '';
+    const v = m[1].toLowerCase();
+    if (v === '2160' || v === '4k') return '4k';
+    if (v === '576' || v === '540' || v === '360') return '480';
+    if (v === '1440') return '1080';
+    return v;
+  }
+  function trackOf(s) {
+    const parts = s.split(/\s+/);
+    for (let i = 0; i < parts.length; i++) { const t = streamTrackWord(parts[i]); if (t) return t; }
+    return '';
+  }
+  for (let i = 0; i < lines.length && i < 600; i++) {
+    let line = streamDigits(lines[i]).replace(/[\u200f\u200e]/g, '').trim();
+    if (!line) continue;
+    line = line.replace(/^[•\-*–—▪️✅🔹🔸\d]+[.)]\s+/, '').trim();
+    const norm = line.replace(/زبان\s+اصلی/g, 'original').replace(/دوبله\s+فارسی/g, 'دوبله')
+      .replace(/زیرنویس\s+فارسی/g, 'زیرنویس').replace(/سافت\s*ساب/g, 'softsub').replace(/هارد\s*ساب/g, 'hardsub');
+    const urlM = norm.match(/https?:\/\/[^\s|<>"'«»]+/i);
+    const lineNo = i + 1;
+    const head = urlM ? norm.slice(0, urlM.index) : norm;
+    /* خط‌های پیش‌فرض (بدون لینک) */
+    if (!urlM) {
+      const d = norm.match(/^#?\s*(نوع|کیفیت|فصل)\s*[:：]?\s*(.+)$/);
+      if (d) {
+        if (d[1] === 'نوع') { const t = trackOf(d[2]); if (t) defs.track = t; else out.errors.push({ line: lineNo, error: 'نوع باید دوبله یا زیرنویس باشد' }); }
+        else if (d[1] === 'کیفیت') { const q = qualityOf(' ' + d[2] + ' '); if (q) defs.quality = q; else out.errors.push({ line: lineNo, error: 'کیفیت نامعتبر است' }); }
+        else { const n = parseInt(d[2], 10); if (n >= 1 && n <= 200) defs.season = n; else out.errors.push({ line: lineNo, error: 'شمارهٔ فصل نامعتبر است' }); }
+        continue;
+      }
+      const del = norm.match(/^(?:\/streamdel|حذف)\s*(.*)$/i);
+      if (del) {
+        const rest = ' ' + del[1] + ' ';
+        const se = seasonEp(rest);
+        const rm = { season: 1, episode: 1, track: trackOf(rest), quality: qualityOf(rest) };
+        if (series) {
+          if (!se) { out.errors.push({ line: lineNo, error: 'برای حذف، قسمت را مشخص کنید؛ مثال: حذف S01E05' }); continue; }
+          rm.season = se.season || defs.season || 1; rm.episode = se.episode;
+        }
+        out.removes.push(rm);
+        continue;
+      }
+      if (/^#/.test(norm)) continue; // توضیح
+      out.errors.push({ line: lineNo, error: 'لینک http یا https در این خط نیست' });
+      continue;
+    }
+    const url = streamSafeUrl(urlM[0].replace(/[),.;،]+$/, ''));
+    if (!url) { out.errors.push({ line: lineNo, error: 'لینک نامعتبر یا داخلی است (فقط http/https عمومی)' }); continue; }
+    const after = norm.slice(urlM.index + urlM[0].length);
+    const pipe = after.indexOf('|');
+    const label = streamLabelClean(pipe >= 0 ? after.slice(pipe + 1) : '');
+    const meta = ' ' + head + ' ' + (pipe >= 0 ? after.slice(0, pipe) : after) + ' ';
+    let fileName = '';
+    try { fileName = decodeURIComponent(new URL(url).pathname.split('/').pop() || ''); } catch (e) { fileName = ''; }
+    const fromName = parseFilename(fileName);
+    const se = seasonEp(meta) || (fromName.season ? { season: fromName.season, episode: fromName.episode } : null);
+    const subtitle = streamIsSubtitleUrl(url);
+    const entry = { kind: subtitle ? 'subtitle' : 'video', season: 1, episode: 1, url: url, label: label };
+    if (series) {
+      if (!se || !se.episode) { out.errors.push({ line: lineNo, error: 'فصل و قسمت مشخص نیست؛ مثال: S01E05 720 دوبله لینک' }); continue; }
+      entry.season = se.season || defs.season || 1;
+      entry.episode = se.episode;
+      if (entry.season < 1 || entry.season > 200 || entry.episode < 1 || entry.episode > 10000) { out.errors.push({ line: lineNo, error: 'شمارهٔ فصل/قسمت خارج از محدوده است' }); continue; }
+    }
+    if (subtitle) {
+      entry.lang = /(^|[._\- ])(en|eng|english)([._\- ]|$)/i.test(fileName) || /انگلیسی|english/i.test(meta) ? 'en' : 'fa';
+      if (!entry.label) entry.label = entry.lang === 'en' ? 'English' : 'فارسی';
+      out.entries.push(entry);
+      continue;
+    }
+    entry.quality = qualityOf(meta) || fromName.quality || defs.quality;
+    entry.track = trackOf(meta) || streamTrackFromName(fileName) || defs.track;
+    if (!entry.quality) { out.errors.push({ line: lineNo, error: 'کیفیت (480/720/1080/4K) مشخص نیست' }); continue; }
+    if (!entry.track) { out.errors.push({ line: lineNo, error: 'نوع نسخه مشخص نیست؛ «دوبله» یا «زیرنویس» بنویسید' }); continue; }
+    entry.fmt = streamFmtOf(url);
+    if (entry.fmt === 'mkv') out.warnings.push({ line: lineNo, warning: 'MKV فقط در برخی مرورگرها (کدک H.264) پخش می‌شود؛ برای اطمینان MP4 یا HLS بدهید' });
+    out.entries.push(entry);
+  }
+  return out;
+}
+function streamBagFor(item, season, episode, create) {
+  if (item.type !== 'series') return item;
+  if (!(item.seasons || []).length && (item.episodes || []).length) item.seasons = [{ n: 1, title: 'فصل ۱', episodes: item.episodes }];
+  let s = (item.seasons || []).find(function (x) { return Number(x.n || 1) === Number(season); });
+  if (!s) { if (!create) return null; s = ensureSeason(item, season); }
+  s.episodes = s.episodes || [];
+  let ep = s.episodes.find(function (e) { return Number(e.n) === Number(episode); });
+  if (!ep && create) {
+    ep = { id: 'e_' + randomHex(4), n: Number(episode), title: 'قسمت ' + episode, variants: { sub: {}, dub: {} } };
+    s.episodes.push(ep);
+    s.episodes.sort(function (a, b) { return a.n - b.n; });
+  }
+  return ep || null;
+}
+function streamBagsOf(item) {
+  if (item.type !== 'series') return [{ bag: item, season: 0, episode: 0 }];
+  const seasons = (item.seasons && item.seasons.length) ? item.seasons : [{ n: 1, episodes: item.episodes || [] }];
+  const out = [];
+  seasons.forEach(function (s) { (s.episodes || []).forEach(function (e) { out.push({ bag: e, season: Number(s.n || 1), episode: Number(e.n || 0) }); }); });
+  return out;
+}
+function clearAllStreams(item) {
+  let n = 0;
+  streamBagsOf(item).forEach(function (x) {
+    n += (x.bag.streams || []).length + (x.bag.streamSubs || []).length;
+    delete x.bag.streams; delete x.bag.streamSubs;
+  });
+  return n;
+}
+/* ادغام ورودی‌ها در اثر (قسمت نبود → ساخته می‌شود). خروجی: شمارنده‌ها برای پیام ربات/پنل */
+function applyStreamEntries(item, entries, opts) {
+  opts = opts || {};
+  const res = { added: 0, updated: 0, removed: 0, created: 0, skipped: 0 };
+  if (opts.replace) res.removed += clearAllStreams(item);
+  (opts.removes || []).forEach(function (rm) {
+    const bag = streamBagFor(item, rm.season, rm.episode, false);
+    if (!bag) return;
+    const before = (bag.streams || []).length + (bag.streamSubs || []).length;
+    bag.streams = (bag.streams || []).filter(function (s) {
+      return !((!rm.track || s.track === rm.track) && (!rm.quality || qualityKey(s.quality) === rm.quality));
+    });
+    if (!rm.track && !rm.quality) bag.streamSubs = [];
+    const after = (bag.streams || []).length + (bag.streamSubs || []).length;
+    res.removed += before - after;
+    if (!bag.streams.length) delete bag.streams;
+    if (!(bag.streamSubs || []).length) delete bag.streamSubs;
+  });
+  (entries || []).forEach(function (en) {
+    const url = streamSafeUrl(en.url);
+    if (!url) { res.skipped++; return; }
+    const hadEp = !!streamBagFor(item, en.season, en.episode, false);
+    const bag = streamBagFor(item, en.season, en.episode, true);
+    if (!bag) { res.skipped++; return; }
+    if (!hadEp && bag !== item) res.created++;
+    if (en.kind === 'subtitle') {
+      bag.streamSubs = bag.streamSubs || [];
+      const old = bag.streamSubs.find(function (s) { return s.url === url; });
+      if (old) { old.label = streamLabelClean(en.label) || old.label; old.lang = en.lang === 'en' ? 'en' : 'fa'; res.updated++; return; }
+      if (bag.streamSubs.length >= STREAM_SUBS_MAX) { res.skipped++; return; }
+      bag.streamSubs.push({ id: 't_' + randomHex(3), lang: en.lang === 'en' ? 'en' : 'fa', label: streamLabelClean(en.label) || 'فارسی', url: url });
+      res.added++;
+      return;
+    }
+    const track = en.track === 'dub' ? 'dub' : 'sub';
+    const quality = qualityKey(en.quality);
+    if (!quality) { res.skipped++; return; }
+    bag.streams = bag.streams || [];
+    const same = bag.streams.find(function (s) { return s.track === track && qualityKey(s.quality) === quality && s.url === url; });
+    if (same) { same.label = streamLabelClean(en.label) || same.label || ''; same.fmt = streamFmtOf(url); res.updated++; return; }
+    if (bag.streams.length >= STREAM_MAX_PER_BAG) { res.skipped++; return; }
+    bag.streams.push({ id: 'v_' + randomHex(3), track: track, quality: quality, url: url, fmt: streamFmtOf(url), label: streamLabelClean(en.label), at: Date.now() });
+    res.added++;
+  });
+  return res;
+}
+function streamLinesOf(item) {
+  const lines = [];
+  streamBagsOf(item).forEach(function (x) {
+    const pre = item.type === 'series' ? ('S' + String(x.season).padStart(2, '0') + 'E' + String(x.episode).padStart(2, '0') + ' ') : '';
+    (x.bag.streams || []).forEach(function (s) {
+      lines.push(pre + displayQuality(s.quality) + ' ' + (s.track === 'dub' ? 'دوبله' : 'زیرنویس') + ' ' + s.url + (s.label ? ' | ' + s.label : ''));
+    });
+    (x.bag.streamSubs || []).forEach(function (t) { lines.push(pre + 'زیرنویس ' + t.url + (t.label ? ' | ' + t.label : '')); });
+  });
+  return lines.join('\n');
+}
+function streamPremium(item, bag, track, q) {
+  if (item && item.access === 'premium') return true;
+  if (bag && bag !== item && bag.premium) return true;
+  const v = (bag && bag.variants && bag.variants[track === 'dub' ? 'dub' : 'sub']) || {};
+  const cell = v[q] || v[qualityKey(q)];
+  return !!(cell && cell.premium);
+}
+/* نقشهٔ عمومی بدون لینک: {sub:{'720':{label,n,premium}}, dub:{…}, subs:n} */
+function publicStreamMap(bag, item) {
+  const out = { sub: {}, dub: {}, subs: 0 };
+  (bag && bag.streams || []).forEach(function (s) {
+    if (!s || !s.url) return;
+    const t = s.track === 'dub' ? 'dub' : 'sub';
+    const q = qualityKey(s.quality) || String(s.quality || '');
+    if (!q) return;
+    if (!out[t][q]) out[t][q] = { label: displayQuality(q), n: 0, premium: streamPremium(item, bag, t, q) };
+    out[t][q].n += 1;
+  });
+  out.subs = ((bag && bag.streamSubs) || []).length;
+  return out;
+}
+function streamMapHas(map) {
+  return !!map && (Object.keys(map.sub || {}).length + Object.keys(map.dub || {}).length) > 0;
+}
+function itemHasStreams(item) {
+  return streamBagsOf(item).some(function (x) { return (x.bag.streams || []).length > 0; });
+}
+const STREAM_Q_PREF = ['720', '1080', '480', '4k'];
+function streamQRank(q) {
+  const i = STREAM_Q_PREF.indexOf(qualityKey(q));
+  return i < 0 ? 9 : i;
+}
+function pickStream(item, opts) {
+  opts = opts || {};
+  let bag = item;
+  if (item.type === 'series' || opts.epId) {
+    bag = opts.epId ? findEpisode(item, String(opts.epId)) : null;
+    if (!bag) return { error: 'قسمت پیدا نشد', status: 404 };
+  }
+  const list = (bag.streams || []).filter(function (s) { return s && s.url; });
+  if (!list.length) return { error: 'برای این ' + (bag === item ? 'اثر' : 'قسمت') + ' لینک پخش آنلاین ثبت نشده است', status: 404 };
+  const track = opts.track === 'dub' ? 'dub' : (opts.track === 'sub' ? 'sub' : '');
+  const want = qualityKey(opts.quality);
+  const sorted = list.slice().sort(function (a, b) { return streamQRank(a.quality) - streamQRank(b.quality); });
+  let s = null;
+  if (opts.streamId) s = list.find(function (x) { return x.id === opts.streamId; }) || null;
+  if (!s && track && want) s = list.find(function (x) { return x.track === track && qualityKey(x.quality) === want; }) || null;
+  if (!s && track) s = sorted.find(function (x) { return x.track === track; }) || null;
+  if (!s && want) s = list.find(function (x) { return qualityKey(x.quality) === want; }) || null;
+  if (!s) s = sorted[0];
+  const q = qualityKey(s.quality) || s.quality;
+  return { bag: bag, stream: s, track: s.track === 'dub' ? 'dub' : 'sub', quality: q, premium: streamPremium(item, bag, s.track, q) };
+}
+function streamOptionsOf(item, bag, user) {
+  const sub = hasActiveSub(user);
+  const out = { sub: [], dub: [] };
+  (bag.streams || []).slice().sort(function (a, b) { return streamQRank(a.quality) - streamQRank(b.quality); }).forEach(function (s) {
+    const t = s.track === 'dub' ? 'dub' : 'sub';
+    const q = qualityKey(s.quality) || s.quality;
+    const prem = streamPremium(item, bag, t, q);
+    out[t].push({ id: s.id, q: q, label: displayQuality(q) + (s.label ? ' — ' + s.label : ''), premium: prem, locked: prem && !sub, fmt: s.fmt || streamFmtOf(s.url) });
+  });
+  return out;
+}
+
+/* ── توکن پخش: AES-GCM با کلید مشتق از رمز لبه (SHA-256). دقیقاً همین قالب در
+   scripts/stream-edge-worker.js پیاده شده است؛ هر تغییری باید در هر دو انجام شود. ── */
+function bytesB64url(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+const streamKeys = new Map();
+function streamAesKey(secret) {
+  let k = streamKeys.get(secret);
+  if (!k) {
+    k = crypto.subtle.digest('SHA-256', enc.encode('mvx-stream-v1|' + secret)).then(function (raw) {
+      return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    });
+    streamKeys.set(secret, k);
+    if (streamKeys.size > 50) streamKeys.delete(streamKeys.keys().next().value);
+  }
+  return k;
+}
+async function streamTokenMake(secret, payload) {
+  const key = await streamAesKey(secret);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, enc.encode(JSON.stringify(payload))));
+  const all = new Uint8Array(12 + ct.length);
+  all.set(iv, 0); all.set(ct, 12);
+  return bytesB64url(all);
+}
+async function streamTokenOpen(secret, token) {
+  try {
+    if (!token || token.length > 4000 || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
+    const all = b64urlDecode(token);
+    if (all.length < 29) return null;
+    const key = await streamAesKey(secret);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: all.slice(0, 12) }, key, all.slice(12));
+    const p = JSON.parse(dec.decode(plain));
+    return p && typeof p === 'object' ? p : null;
+  } catch (e) { return null; }
+}
+function streamIpPrefix(ip) {
+  ip = String(ip || '').trim().toLowerCase();
+  if (!ip) return '';
+  if (ip.indexOf(':') >= 0) {
+    const halves = ip.split('::');
+    const head = halves[0] ? halves[0].split(':') : [];
+    let all = head;
+    if (halves.length > 1) {
+      const tail = halves[1] ? halves[1].split(':') : [];
+      all = head.concat(new Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), tail);
+    }
+    return all.slice(0, 4).map(function (h) { return (h || '0').replace(/^0+(?=.)/, ''); }).join(':') + '::/64';
+  }
+  const p = ip.split('.');
+  return p.length === 4 ? p.slice(0, 3).join('.') + '.0/24' : ip;
+}
+async function streamBindHash(secret, kind, value) {
+  if (!value) return '';
+  return (await hmacHex(enc.encode(secret), kind + '|' + value)).slice(0, 16);
+}
+/* مرورگرهای مدرن همیشه Sec-Fetch-Dest می‌فرستند؛ نبودنش با UA یک مرورگر مدرن یعنی
+   دانلودمنیجر/اسکریپتی که UA مرورگر را کپی کرده است (مثل IDM). */
+function streamModernBrowserUa(ua) {
+  let m = /(?:Chrome|CriOS|Chromium)\/(\d+)/.exec(ua);
+  if (m && Number(m[1]) >= 80) return true;
+  m = /Firefox\/(\d+)/.exec(ua);
+  if (m && Number(m[1]) >= 90) return true;
+  return false;
+}
+function streamEdgeCors(request, tok) {
+  const origin = request.headers.get('origin') || '';
+  const h = { 'vary': 'Origin' };
+  if (!origin) return h;
+  let host = '';
+  try { host = new URL(origin).host.toLowerCase(); } catch (e) { return h; }
+  const list = (tok && Array.isArray(tok.o)) ? tok.o : [];
+  if (!list.length || list.indexOf(host) >= 0) {
+    h['access-control-allow-origin'] = origin;
+    h['access-control-expose-headers'] = 'Content-Length, Content-Range, Accept-Ranges, Content-Type';
+  }
+  return h;
+}
+function streamEdgeDeny(reason, request, tok) {
+  return new Response('forbidden: ' + reason, { status: 403, headers: Object.assign({ 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-mvx-deny': reason }, streamEdgeCors(request, tok)) });
+}
+async function streamEdgeChecks(request, secret, tok, kind) {
+  if (!tok || tok.v !== 1 || tok.k !== kind) return 'token';
+  if (!(Number(tok.e) > Date.now() / 1000)) return 'expired';
+  const ref = request.headers.get('referer') || request.headers.get('origin') || '';
+  if (ref && Array.isArray(tok.o) && tok.o.length) {
+    let host = '';
+    try { host = new URL(ref).host.toLowerCase(); } catch (e) { host = ''; }
+    if (host && tok.o.indexOf(host) < 0) return 'origin';
+  }
+  if (kind === 't') return '';
+  const ip = request.headers.get('cf-connecting-ip') || '';
+  if (tok.i && ip && tok.i !== await streamBindHash(secret, 'ip', streamIpPrefix(ip))) return 'ip';
+  const ua = request.headers.get('user-agent') || '';
+  if (/AppleCoreMedia/i.test(ua)) return ''; // پخش‌کنندهٔ بومی iOS: UA و هدرهای Sec-Fetch ندارد
+  if (tok.a && tok.a !== await streamBindHash(secret, 'ua', ua)) return 'ua';
+  const dest = request.headers.get('sec-fetch-dest');
+  if (dest) {
+    const ok = kind === 'v' ? ['video', 'audio'] : ['video', 'audio', 'empty'];
+    if (ok.indexOf(dest) < 0) return 'dest';
+  } else if (streamModernBrowserUa(ua)) return 'client';
+  return '';
+}
+function streamMime(fmt, upstreamType) {
+  const t = String(upstreamType || '').toLowerCase();
+  if (t.indexOf('video/') === 0 || t.indexOf('audio/') === 0) return upstreamType;
+  if (fmt === 'mp4') return 'video/mp4';
+  if (fmt === 'webm') return 'video/webm';
+  if (fmt === 'mkv') return 'video/x-matroska';
+  return upstreamType || 'video/mp4';
+}
+async function streamEdgeProgressive(request, tok, opts) {
+  const headers = { 'user-agent': request.headers.get('user-agent') || 'Mozilla/5.0', 'accept': '*/*' };
+  const range = request.headers.get('range');
+  if (range && /^bytes=\d*-\d*$/.test(range)) headers.range = range;
+  let up;
+  try {
+    up = await fetch(tok.u, { method: request.method === 'HEAD' ? 'HEAD' : 'GET', headers: headers, redirect: 'follow', cf: opts && opts.cacheTtl ? { cacheEverything: true, cacheTtl: opts.cacheTtl } : undefined });
+  } catch (e) { return new Response('upstream unreachable', { status: 502, headers: streamEdgeCors(request, tok) }); }
+  if (up.status >= 400 && up.status !== 416) return new Response('upstream ' + up.status, { status: up.status === 404 ? 404 : 502, headers: Object.assign({ 'cache-control': 'no-store' }, streamEdgeCors(request, tok)) });
+  const h = new Headers(streamEdgeCors(request, tok));
+  h.set('content-type', streamMime(tok.f, up.headers.get('content-type')));
+  ['content-length', 'content-range'].forEach(function (k) { const v = up.headers.get(k); if (v) h.set(k, v); });
+  h.set('accept-ranges', up.headers.get('accept-ranges') || (up.status === 206 ? 'bytes' : 'bytes'));
+  h.set('cache-control', 'private, no-store, no-transform');
+  h.set('content-disposition', 'inline');
+  h.set('x-content-type-options', 'nosniff');
+  h.set('referrer-policy', 'no-referrer');
+  return new Response(request.method === 'HEAD' ? null : up.body, { status: up.status, headers: h });
+}
+async function streamEdgeHls(request, tok, tokenStr, rest, base, secret) {
+  const root = tok.u;
+  const dir = root.slice(0, root.lastIndexOf('/') + 1);
+  const rootOrigin = new URL(root).origin;
+  let target;
+  if (!rest || rest === '/') target = root;
+  else if (rest.indexOf('/~') === 0) {
+    const parts = rest.slice(2).split('.');
+    if (parts.length !== 2) return streamEdgeDeny('path', request, tok);
+    let abs = '';
+    try { abs = dec.decode(b64urlDecode(parts[0])); } catch (e) { return streamEdgeDeny('path', request, tok); }
+    if (parts[1] !== (await hmacHex(enc.encode(secret), 'abs|' + abs)).slice(0, 16)) return streamEdgeDeny('sig', request, tok);
+    target = abs;
+  } else {
+    let rel = rest.slice(1);
+    try { rel = rel.split('/').map(function (x) { return decodeURIComponent(x); }).map(function (x) { return encodeURIComponent(x); }).join('/'); } catch (e) { }
+    const search = new URL(request.url).search;
+    try { target = new URL(rel + search, dir).href; } catch (e) { return streamEdgeDeny('path', request, tok); }
+    if (!search && target.split('?')[0] === root.split('?')[0]) target = root; // playlist اصلی با query امضای CDN خودش
+    if (new URL(target).origin !== rootOrigin) return streamEdgeDeny('path', request, tok);
+  }
+  const headers = { 'user-agent': request.headers.get('user-agent') || 'Mozilla/5.0', 'accept': '*/*' };
+  const range = request.headers.get('range');
+  if (range && /^bytes=\d*-\d*$/.test(range)) headers.range = range;
+  let up;
+  try { up = await fetch(target, { headers: headers, redirect: 'follow' }); }
+  catch (e) { return new Response('upstream unreachable', { status: 502, headers: streamEdgeCors(request, tok) }); }
+  if (up.status >= 400) return new Response('upstream ' + up.status, { status: 502, headers: streamEdgeCors(request, tok) });
+  const ct = (up.headers.get('content-type') || '').toLowerCase();
+  const playlist = /mpegurl/.test(ct) || /\.m3u8(?:$|\?)/i.test(target);
+  const h = new Headers(streamEdgeCors(request, tok));
+  h.set('cache-control', 'private, no-store');
+  if (!playlist) {
+    ['content-type', 'content-length', 'content-range', 'accept-ranges'].forEach(function (k) { const v = up.headers.get(k); if (v) h.set(k, v); });
+    return new Response(up.body, { status: up.status, headers: h });
+  }
+  const text = await up.text();
+  if (text.length > 4 * 1024 * 1024) return new Response('playlist too large', { status: 502 });
+  const pre = base + '/h/' + tokenStr + '/';
+  const cache = {};
+  async function rewrite(uri) {
+    let abs;
+    try { abs = new URL(uri, target).href; } catch (e) { return uri; }
+    if (abs.indexOf(dir) === 0) {
+      const relPath = abs.slice(dir.length);
+      // نسبی نسبت به خود این playlist بماند تا مرورگر خودش آدرس لبه را بسازد
+      return pre + relPath;
+    }
+    if (cache[abs]) return cache[abs];
+    const sig = (await hmacHex(enc.encode(secret), 'abs|' + abs)).slice(0, 16);
+    cache[abs] = pre + '~' + bytesB64url(enc.encode(abs)) + '.' + sig;
+    return cache[abs];
+  }
+  const out = [];
+  const lines = text.replace(/\r/g, '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) { out.push(line); continue; }
+    if (line.charAt(0) === '#') {
+      if (/URI="/.test(line)) {
+        const m = /URI="([^"]*)"/.exec(line);
+        out.push(m ? line.replace(m[0], 'URI="' + (await rewrite(m[1])) + '"') : line);
+      } else out.push(line);
+      continue;
+    }
+    out.push(await rewrite(line.trim()));
+  }
+  h.set('content-type', 'application/vnd.apple.mpegurl');
+  return new Response(out.join('\n'), { status: 200, headers: h });
+}
+const WIN1256_HIGH = '\u20ac\u067e\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0679\u2039\u0152\u0686\u0698\u0688\u06af\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u06a9\u2122\u0691\u203a\u0153\u200c\u200d\u06ba\u00a0\u060c\u00a2\u00a3\u00a4\u00a5\u00a6\u00a7\u00a8\u00a9\u06be\u00ab\u00ac\u00ad\u00ae\u00af\u00b0\u00b1\u00b2\u00b3\u00b4\u00b5\u00b6\u00b7\u00b8\u00b9\u061b\u00bb\u00bc\u00bd\u00be\u061f\u06c1\u0621\u0622\u0623\u0624\u0625\u0626\u0627\u0628\u0629\u062a\u062b\u062c\u062d\u062e\u062f\u0630\u0631\u0632\u0633\u0634\u0635\u0636\u00d7\u0637\u0638\u0639\u063a\u0640\u0641\u0642\u0643\u00e0\u0644\u00e2\u0645\u0646\u0647\u0648\u00e7\u00e8\u00e9\u00ea\u00eb\u0649\u064a\u00ee\u00ef\u064b\u064c\u064d\u064e\u00f4\u064f\u0650\u00f7\u0651\u00f9\u0652\u00fb\u00fc\u200e\u200f\u06d2';
+/* زیرنویس‌های فارسی قدیمی اغلب Windows-1256 هستند؛ اول UTF-8/UTF-16 را امتحان می‌کنیم */
+function decodeSubtitleBytes(bytes) {
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes.slice(2));
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    const sw = new Uint8Array(bytes.length - 2);
+    for (let i = 2; i + 1 < bytes.length; i += 2) { sw[i - 2] = bytes[i + 1]; sw[i - 1] = bytes[i]; }
+    return new TextDecoder('utf-16le').decode(sw);
+  }
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (e) { }
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    s += b < 0x80 ? String.fromCharCode(b) : WIN1256_HIGH.charAt(b - 0x80);
+  }
+  return s.replace(/\u064a/g, 'ی').replace(/\u0643/g, 'ک');
+}
+async function streamEdgeSubtitle(request, tok) {
+  let up;
+  try { up = await fetch(tok.u, { headers: { 'user-agent': 'Mozilla/5.0', 'accept': '*/*' }, redirect: 'follow' }); }
+  catch (e) { return new Response('upstream unreachable', { status: 502, headers: streamEdgeCors(request, tok) }); }
+  if (!up.ok) return new Response('upstream ' + up.status, { status: 502, headers: streamEdgeCors(request, tok) });
+  const buf = new Uint8Array(await up.arrayBuffer());
+  if (buf.length > 3 * 1024 * 1024) return new Response('subtitle too large', { status: 413, headers: streamEdgeCors(request, tok) });
+  let text = decodeSubtitleBytes(buf).replace(/^\uFEFF/, '');
+  if (!/^WEBVTT/i.test(text.trim())) text = srtToVtt(text);
+  const h = new Headers(streamEdgeCors(request, tok));
+  h.set('content-type', 'text/vtt; charset=utf-8');
+  h.set('cache-control', 'private, max-age=3600');
+  return new Response(text, { status: 200, headers: h });
+}
+/* دروازهٔ لبه: /v/<توکن> (MP4/WebM)، /h/<توکن>/<مسیر> (HLS)، /t/<توکن> (زیرنویس) */
+async function streamEdgeHandle(request, secret, opts) {
+  opts = opts || {};
+  if (!secret) return new Response('edge not configured', { status: 503 });
+  const url = new URL(request.url);
+  let path = url.pathname;
+  if (opts.prefix && path.indexOf(opts.prefix) === 0) path = path.slice(opts.prefix.length);
+  const m = /^\/(v|h|t)\/([A-Za-z0-9_-]{24,4000})(\/.*)?$/.exec(path);
+  if (!m) return new Response('not found', { status: 404 });
+  const tok = await streamTokenOpen(secret, m[2]);
+  if (request.method === 'OPTIONS') {
+    const h = streamEdgeCors(request, tok);
+    h['access-control-allow-methods'] = 'GET, HEAD, OPTIONS';
+    h['access-control-allow-headers'] = 'Range';
+    h['access-control-max-age'] = '86400';
+    return new Response(null, { status: 204, headers: h });
+  }
+  if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('method not allowed', { status: 405 });
+  const bad = await streamEdgeChecks(request, secret, tok, m[1]);
+  if (bad) return streamEdgeDeny(bad, request, tok);
+  if (m[1] === 'v') return streamEdgeProgressive(request, tok, opts);
+  if (m[1] === 't') return streamEdgeSubtitle(request, tok);
+  return streamEdgeHls(request, tok, m[2], m[3] || '', url.origin + (opts.prefix || ''), secret);
+}
+
+/* ── جلسهٔ پخش، انتخاب لبه و ساخت آدرس‌ها ── */
+const memRates = new Map();
+function memRate(key, max, windowMs) {
+  const now = Date.now();
+  let r = memRates.get(key);
+  if (!r || now - r.t > windowMs) { r = { t: now, n: 0 }; memRates.set(key, r); }
+  r.n += 1;
+  if (memRates.size > 5000) { for (const [k, v] of memRates) { if (now - v.t > windowMs) memRates.delete(k); } }
+  return r.n <= max;
+}
+function streamEdgeList(set) {
+  return (Array.isArray(set.streamEdges) ? set.streamEdges : []).filter(function (e) {
+    return e && /^[a-z0-9-]{1,32}$/.test(String(e.id || '')) && /^https:\/\/[^\s]+$/.test(String(e.url || '')) && String(e.secret || '').length >= 16 && e.off !== true;
+  }).map(function (e) { return { id: e.id, base: String(e.url).replace(/\/+$/, ''), secret: String(e.secret) }; });
+}
+async function streamOwnSecret(store, set) {
+  if (set.streamSecret && String(set.streamSecret).length >= 32) return set.streamSecret;
+  const fresh = await store.get('set');
+  if (fresh && fresh.streamSecret && String(fresh.streamSecret).length >= 32) { set.streamSecret = fresh.streamSecret; return set.streamSecret; }
+  set.streamSecret = randomHex(32);
+  await writeSettings(store, set);
+  return set.streamSecret;
+}
+async function streamPickEdge(store, set, user, request, avoid) {
+  const list = streamEdgeList(set).filter(function (e) { return e.id !== avoid; });
+  if (list.length) {
+    const e = list[shardHash(String(user.username || '')) % list.length];
+    return { id: e.id, base: e.base, secret: e.secret };
+  }
+  return { id: 'self', base: new URL(request.url).origin + '/sv', secret: await streamOwnSecret(store, set) };
+}
+function streamAllowedHosts(set, request) {
+  const out = [];
+  function add(h) { h = String(h || '').toLowerCase().trim(); if (h && h.indexOf('*') < 0 && out.indexOf(h) < 0 && out.length < 8) out.push(h); }
+  try { add(new URL(originFromRequest(request)).host); } catch (e) { }
+  try { add(new URL(request.url).host); } catch (e) { }
+  try { if (set.publicUrl) add(new URL(set.publicUrl).host); } catch (e) { }
+  parseHostList(set.entryHosts).concat(parseHostList(set.poolHosts)).forEach(add);
+  return out;
+}
+async function streamSessionTouch(store, set, user, sid, reason) {
+  const key = 'stm:' + user.username;
+  const max = Math.max(1, Math.min(10, parseInt(set.streamMaxSessions, 10) || 2));
+  let rec = null;
+  try { rec = await store.get(key); } catch (e) { rec = null; }
+  const now = Date.now();
+  const list = (rec && Array.isArray(rec.list) ? rec.list : []).filter(function (x) {
+    return x && /^[a-f0-9]{24}$/.test(String(x.sid || '')) && now - (Number(x.at) || 0) < 12 * 3600 * 1000;
+  });
+  let cur = sid ? list.find(function (x) { return x.sid === sid; }) : null;
+  if (!cur) {
+    if (sid && reason !== 'start') return { error: 'این پخش روی دستگاه دیگری جایگزین شد؛ برای ادامه دوباره پخش را شروع کنید.', code: 'replaced' };
+    cur = { sid: randomHex(12), at: now };
+    list.push(cur);
+    while (list.length > max) list.shift();
+    await store.set(key, { list: list }, 86400);
+    return { sid: cur.sid, fresh: true };
+  }
+  if (now - (Number(cur.at) || 0) > 10 * 60 * 1000) { cur.at = now; await store.set(key, { list: list }, 86400); }
+  return { sid: cur.sid };
+}
+function streamEpisodeInfo(item, bag) {
+  if (!bag || bag === item) return null;
+  const seasons = (item.seasons && item.seasons.length) ? item.seasons : [{ n: 1, episodes: item.episodes || [] }];
+  const flat = [];
+  seasons.forEach(function (s) { (s.episodes || []).forEach(function (e) { flat.push({ s: Number(s.n || 1), e: e }); }); });
+  const i = flat.findIndex(function (x) { return x.e.id === bag.id; });
+  function brief(x) { return x ? { id: x.e.id, n: x.e.n, season: x.s, title: x.e.title || ('قسمت ' + x.e.n), has: (x.e.streams || []).length > 0 } : null; }
+  let next = null, prev = null;
+  for (let j = i + 1; j < flat.length; j++) if ((flat[j].e.streams || []).length) { next = flat[j]; break; }
+  for (let j = i - 1; j >= 0; j--) if ((flat[j].e.streams || []).length) { prev = flat[j]; break; }
+  return {
+    cur: brief(flat[i]), next: brief(next), prev: brief(prev),
+    list: seasons.map(function (s) { return { n: Number(s.n || 1), title: s.title || ('فصل ' + (s.n || 1)), eps: (s.episodes || []).map(function (e) { return { id: e.id, n: e.n, title: e.title || ('قسمت ' + e.n), has: (e.streams || []).length > 0 }; }) }; }),
+  };
+}
+function streamWatermarkOf(user) {
+  const id = user.tgId ? String(user.tgId) : String(user.username || '');
+  return (user.tgUsername ? '@' + user.tgUsername + ' · ' : '') + id;
+}
+async function streamBuild(store, set, user, item, picked, sid, request, avoid) {
+  const edge = await streamPickEdge(store, set, user, request, avoid);
+  const ttlMin = Math.max(10, Math.min(720, parseInt(set.streamTokenMin, 10) || 180));
+  const exp = Math.floor(Date.now() / 1000) + ttlMin * 60;
+  const hosts = streamAllowedHosts(set, request);
+  const ip = request.headers.get('cf-connecting-ip') || '';
+  const ua = request.headers.get('user-agent') || '';
+  const fmt = picked.stream.fmt || streamFmtOf(picked.stream.url);
+  const kind = fmt === 'hls' ? 'h' : 'v';
+  const tok = await streamTokenMake(edge.secret, {
+    v: 1, k: kind, u: picked.stream.url, e: exp, s: sid, f: fmt, o: hosts,
+    i: set.streamBindIp !== false && ip ? await streamBindHash(edge.secret, 'ip', streamIpPrefix(ip)) : '',
+    a: ua ? await streamBindHash(edge.secret, 'ua', ua) : '',
+  });
+  let src = edge.base + '/' + kind + '/' + tok;
+  if (kind === 'h') {
+    let name = 'index.m3u8';
+    try { name = encodeURIComponent(decodeURIComponent(new URL(picked.stream.url).pathname.split('/').pop() || 'index.m3u8')); } catch (e) { }
+    src += '/' + name;
+  }
+  const subs = [];
+  for (const t of (picked.bag.streamSubs || []).slice(0, STREAM_SUBS_MAX)) {
+    const st = await streamTokenMake(edge.secret, { v: 1, k: 't', u: t.url, e: exp + 6 * 3600, s: sid, o: hosts });
+    subs.push({ id: t.id, lang: t.lang || 'fa', label: t.label || 'فارسی', src: edge.base + '/t/' + st });
+  }
+  const ep = streamEpisodeInfo(item, picked.bag);
+  return {
+    ok: true, sid: sid, src: src, fmt: fmt, exp: exp * 1000, edge: edge.id,
+    item: { id: item.id, title: item.title, type: item.type, poster: posterUrlFor({ posterOverride: item.posterOverride || '', posterSrc: (item.source && item.source.tmeUrl) || '', galleryPoster: galleryPosterOf(item) }) },
+    ep: ep,
+    cur: { track: picked.track, quality: picked.quality, streamId: picked.stream.id, label: displayQuality(picked.quality) + (picked.stream.label ? ' — ' + picked.stream.label : '') },
+    options: streamOptionsOf(item, picked.bag, user),
+    subs: subs,
+    subDefault: picked.track === 'sub' && subs.length ? subs[0].id : '',
+    wm: set.streamWatermark === false ? '' : streamWatermarkOf(user),
+  };
+}
+function streamGateError(set, user) {
+  if (!set.streamEnabled) return { error: 'پخش آنلاین فعلاً غیرفعال است.', status: 403, code: 'off' };
+  if (!user) return { error: 'برای پخش آنلاین ابتدا وارد شوید.', status: 401, needLogin: true };
+  if (set.streamPublic === false && user.role !== 'admin') return { error: 'پخش آنلاین فعلاً فقط برای مدیران در حال آزمایش است.', status: 403, code: 'admins' };
+  return null;
+}
+function streamAdConfig(set) {
+  const n = function (v, d, lo, hi) { v = parseInt(v, 10); if (!isFinite(v)) v = d; return Math.max(lo, Math.min(hi, v)); };
+  return {
+    banner: set.plAdBanner !== false, bannerFirst: n(set.plAdBannerFirst, 120, 10, 7200), bannerEvery: n(set.plAdBannerEvery, 600, 60, 7200),
+    bannerSec: n(set.plAdBannerSec, 15, 5, 60), pause: set.plAdPause !== false, skipAfter: n(set.plAdSkip, 5, 0, 30),
+    midroll: n(set.plAdMidroll, 0, 0, 240), switchGap: n(set.plAdSwitchGap, 0, 0, 3600),
+  };
+}
+async function apiStreamOpen(store, body, request, ctx) {
+  const set = await getSettings(store);
+  const user = await currentUser(request, store);
+  const gate = streamGateError(set, user);
+  if (gate) return json(gate, gate.status);
+  if (!memRate('so:' + user.username, 40, 60000)) return json({ error: 'درخواست‌های پخش زیاد است؛ کمی صبر کنید.' }, 429);
+  const item = await getItem(store, String(body.itemId || ''));
+  if (!item) return json({ error: 'محتوا پیدا نشد' }, 404);
+  if (!allowed(user, item, set)) return json({ error: 'این اثر ویژهٔ مشترکین است.', needSub: true }, 403);
+  const reason = ['start', 'switch', 'renew', 'next', 'mid'].indexOf(body.reason) >= 0 ? body.reason : 'start';
+  const picked = pickStream(item, { epId: body.epId, track: body.track, quality: body.quality, streamId: String(body.streamId || '').replace(/[^a-z0-9_]/g, '') });
+  if (picked.error) return json({ error: picked.error }, picked.status || 400);
+  const sub = hasActiveSub(user);
+  if (picked.premium && !sub) return json({ error: 'این کیفیت/قسمت فقط برای مشترکین قابل پخش است.', needSub: true }, 403);
+  const sess = await streamSessionTouch(store, set, user, /^[a-f0-9]{24}$/.test(String(body.sid || '')) ? String(body.sid) : '', reason === 'next' ? 'start' : (reason === 'mid' ? 'switch' : reason));
+  if (sess.error) return json({ error: sess.error, code: sess.code }, 409);
+  const adCfg = streamAdConfig(set);
+  const meta = { noAds: sub, adCfg: sub ? null : adCfg };
+  if (!sub && reason !== 'renew') {
+    const slot = reason === 'switch' ? 'sw' : (reason === 'mid' ? 'mid' : 'pre');
+    const want = slot === 'sw' ? set.plAdSwitch !== false : (slot === 'mid' ? adCfg.midroll > 0 : set.plAdPre !== false);
+    const lastAd = Number(body.lastAdAt) || 0;
+    const gapOk = slot !== 'sw' || !adCfg.switchGap || Date.now() - lastAd >= adCfg.switchGap * 1000;
+    if (want && gapOk) {
+      const ad = await pickAdForSlot(store, set, user, item, slot, ctx, request, body.seen);
+      if (ad) {
+        const minWatch = ad.kind === 'video' ? Math.min(ad.sec, ad.skipAfter > 0 ? ad.skipAfter : ad.sec) : Math.min(ad.sec, 5);
+        const gateTok = await signToken({ g: 'st', u: user.username, it: item.id, ep: picked.bag === item ? '' : picked.bag.id, si: picked.stream.id, sid: sess.sid, nb: Date.now() + Math.max(0, minWatch - 1) * 1000, exp: Math.floor(Date.now() / 1000) + 1800 }, set.secret);
+        const ep = streamEpisodeInfo(item, picked.bag);
+        return json(Object.assign({ ok: true, needAd: true, ad: ad, gate: gateTok, sid: sess.sid, item: { id: item.id, title: item.title, type: item.type }, ep: ep, cur: { track: picked.track, quality: picked.quality, streamId: picked.stream.id }, options: streamOptionsOf(item, picked.bag, user) }, meta));
+      }
+    }
+  }
+  if (reason === 'mid') return json({ ok: true, noAd: true, sid: sess.sid }); // میان‌پخش بدون تبلیغ: پخش فعلی ادامه دارد
+  const info = await streamBuild(store, set, user, item, picked, sess.sid, request, String(body.avoidEdge || ''));
+  if (!sub) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
+  return json(Object.assign(info, meta));
+}
+async function apiStreamSrc(store, body, request, ctx) {
+  const set = await getSettings(store);
+  const user = await currentUser(request, store);
+  const gate = streamGateError(set, user);
+  if (gate) return json(gate, gate.status);
+  const g = await verifyToken(String(body.gate || ''), set.secret);
+  if (!g || g.g !== 'st' || g.u !== user.username) return json({ error: 'مهلت این پخش تمام شده؛ دوباره پخش را بزنید.' }, 410);
+  if (Date.now() + 1500 < Number(g.nb || 0)) return json({ error: 'تبلیغ هنوز تمام نشده است', remain: Math.ceil((g.nb - Date.now()) / 1000) }, 425);
+  if (body.ad && typeof body.ad === 'object') await adResultRecord(store, set, ctx, request, user, body.ad);
+  const item = await getItem(store, g.it);
+  if (!item) return json({ error: 'محتوا پیدا نشد' }, 404);
+  const picked = pickStream(item, { epId: g.ep, streamId: g.si });
+  if (picked.error) return json({ error: picked.error }, picked.status || 400);
+  if (picked.premium && !hasActiveSub(user)) return json({ error: 'این کیفیت/قسمت فقط برای مشترکین قابل پخش است.', needSub: true }, 403);
+  const info = await streamBuild(store, set, user, item, picked, g.sid, request, '');
+  const sub = hasActiveSub(user);
+  if (!sub) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
+  return json(Object.assign(info, { noAds: sub, adCfg: sub ? null : streamAdConfig(set) }));
+}
+
+/* ═══════════════════════ شبکهٔ تبلیغات خودکار (اتصال به ads.js) ═══════════════════════
+   پلتفرم تبلیغ‌دهندگان (ads.js) روی Worker/اکانت دیگری اجرا می‌شود. این سایت:
+   ۱) فهرست کمپین‌های تأییدشده را با درخواست امضاشدهٔ HMAC می‌گیرد و ۹۰ ثانیه در حافظه +
+      Cache API نگه می‌دارد (نه یک درخواست به ازای هر تبلیغ)،
+   ۲) انتخاب تبلیغ (هدف‌گیری، وزن پیشنهاد، سقف تکرار) را خودش انجام می‌دهد،
+   ۳) رویدادها (نمایش/بازدید کامل/رد کردن/کلیک/فرصت خالی) را در حافظه تجمیع می‌کند و هر
+      ~۲۰ ثانیه یک‌جا می‌فرستد؛ هر دسته شناسهٔ یکتا دارد تا تکرار، دوبار شمرده نشود.
+   جایگاه‌ها: dl=قبل از دانلود، pre=شروع پخش، sw=تعویض کیفیت/نسخه، mid=میان‌پخش،
+   ov=بنر روی پلیر، pause=بنر توقف، bot=دکمهٔ لینک زیر فایل ربات. */
+const AD_SLOTS = ['dl', 'pre', 'sw', 'mid', 'ov', 'pause', 'bot'];
+const AD_NET = { inv: null, invAt: 0, invTtl: 90000, invKey: '', failAt: 0, failKey: '', fetching: null, buf: new Map(), bufN: 0, bufAt: 0, timer: false, flushing: false, pending: null, seen: new Map(), lastError: '', lastErrorAt: 0, lastFlushAt: 0 };
+
+function adNetConfig(set, env) {
+  const url = String((set && set.adNetUrl) || '').trim().replace(/\/+$/, '');
+  const secret = String((env && (env.ADNET_SECRET || env.AD_NET_SECRET)) || (set && set.adNetSecret) || '').trim();
+  return { on: !!(set && set.adNetEnabled) && /^https:\/\/[^\s/]+/.test(url) && secret.length >= 16, url: url, secret: secret, fromEnv: !!(env && (env.ADNET_SECRET || env.AD_NET_SECRET)) };
+}
+async function adNetSignedFetch(cfg, method, path, bodyObj, timeoutMs) {
+  const body = bodyObj ? JSON.stringify(bodyObj) : '';
+  const ts = String(Math.floor(Date.now() / 1000));
+  const nonce = randomHex(8);
+  const sign = await hmacSign(cfg.secret, method, path, body, ts, nonce);
+  const r = await fetch(cfg.url + path, {
+    method: method,
+    headers: { 'content-type': 'application/json', 'x-net-ts': ts, 'x-net-nonce': nonce, 'x-net-sign': sign },
+    body: method === 'GET' ? undefined : body,
+    signal: AbortSignal.timeout(timeoutMs || 4000),
+  });
+  let data = null;
+  try { data = await r.json(); } catch (e) { data = null; }
+  if (!r.ok) throw Object.assign(new Error((data && data.error) || ('پلتفرم تبلیغات: HTTP ' + r.status)), { status: r.status });
+  return data;
+}
+function adNum(v, d, lo, hi) { v = Number(v); if (!isFinite(v)) v = d; return Math.max(lo, Math.min(hi, v)); }
+function adHttps(u, max) {
+  u = String(u || '').trim();
+  if (!/^https:\/\//i.test(u) || u.length > (max || 700) || !isPublicHttpUrl(u)) return '';
+  return u;
+}
+function adNetNormalize(data) {
+  const out = { rev: '', cfg: { viewSec: 10, skipAfter: 5, maxSec: 30 }, campaigns: [] };
+  if (!data || typeof data !== 'object' || !Array.isArray(data.campaigns)) return out;
+  out.rev = String(data.rev || '').slice(0, 40);
+  const cfg = data.cfg || {};
+  out.cfg = { viewSec: Math.round(adNum(cfg.viewSec, 10, 1, 60)), skipAfter: Math.round(adNum(cfg.skipAfter, 5, 0, 30)), maxSec: Math.round(adNum(cfg.maxSec, 30, 5, 120)) };
+  function arr(v) { return Array.isArray(v) ? v : []; }
+  for (const c of data.campaigns.slice(0, 300)) {
+    if (!c || !/^c_[a-z0-9]{4,32}$/.test(String(c.id || ''))) continue;
+    const f = ['video', 'banner', 'link'].indexOf(c.f) >= 0 ? c.f : '';
+    const slots = arr(c.slots).filter(function (s) { return AD_SLOTS.indexOf(s) >= 0; });
+    if (!f || !slots.length) continue;
+    const cr = c.cr || {};
+    const tg = c.tg || {};
+    const n = {
+      id: c.id, f: f, slots: slots, w: adNum(c.w, 1, 0.1, 100), cap: Math.round(adNum(c.cap, 0, 0, 100)),
+      tg: { types: arr(tg.types).filter(function (x) { return x === 'movie' || x === 'series'; }), genres: arr(tg.genres).map(String).slice(0, 40), dev: arr(tg.dev).filter(function (x) { return x === 'm' || x === 'd'; }) },
+      title: String(cr.title || '').slice(0, 80), cta: String(cr.cta || '').slice(0, 40), landing: adHttps(cr.landing, 400),
+    };
+    if (f === 'video') {
+      const v = cr.video || {};
+      n.video = { src: adHttps(v.src), srcP: adHttps(v.srcP), poster: adHttps(v.poster), dur: adNum(v.dur, 15, 1, 120), w: Math.round(adNum(v.w, 0, 0, 8000)), h: Math.round(adNum(v.h, 0, 0, 8000)) };
+      if (!n.video.src && !n.video.srcP) continue;
+    } else if (f === 'banner') {
+      const b = cr.banner || {};
+      n.banner = { wide: adHttps(b.wide), rect: adHttps(b.rect), tall: adHttps(b.tall) };
+      if (!n.banner.wide && !n.banner.rect && !n.banner.tall) continue;
+    } else {
+      const l = cr.link || {};
+      const text = String(l.text || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 64);
+      const url = adHttps(l.url, 300);
+      if (!text || !url) continue;
+      n.link = { text: text, url: url };
+    }
+    out.campaigns.push(n);
+  }
+  return out;
+}
+async function adNetInventory(store, set) {
+  const cfg = adNetConfig(set, store && store.env);
+  if (!cfg.on) return null;
+  const key = cfg.url + '|' + cfg.secret.slice(0, 6);
+  const now = Date.now();
+  if (AD_NET.inv && AD_NET.invKey === key && now - AD_NET.invAt < AD_NET.invTtl) return AD_NET.inv;
+  /* پلتفرم در دسترس نیست: ۳۰ ثانیه دوباره امتحان نمی‌کنیم تا دانلود/پخش منتظر تایم‌اوت نماند */
+  if (AD_NET.failKey === key && now - AD_NET.failAt < 30000) return AD_NET.invKey === key ? AD_NET.inv : null;
+  if (AD_NET.fetching) { try { return await AD_NET.fetching; } catch (e) { return AD_NET.invKey === key ? AD_NET.inv : null; } }
+  AD_NET.fetching = (async function () {
+    const cache = await publicCache();
+    const ckey = 'https://adnet.internal/inv/' + (await sha256Hex(key)).slice(0, 24);
+    let data = null;
+    if (cache) { try { const hit = await cache.match(ckey); if (hit) data = await hit.json(); } catch (e) { data = null; } }
+    if (!data) {
+      data = await adNetSignedFetch(cfg, 'GET', '/api/net/inventory', null, 3500);
+      const ttl = Math.round(adNum(data && data.ttl, 90, 30, 600));
+      if (cache && data) { try { await cache.put(ckey, new Response(JSON.stringify(data), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=' + ttl } })); } catch (e) { } }
+    }
+    AD_NET.inv = adNetNormalize(data);
+    AD_NET.invTtl = Math.round(adNum(data && data.ttl, 90, 30, 600)) * 1000;
+    AD_NET.invAt = Date.now();
+    AD_NET.invKey = key;
+    AD_NET.failAt = 0;
+    return AD_NET.inv;
+  })();
+  try { return await AD_NET.fetching; }
+  catch (e) {
+    AD_NET.lastError = String((e && e.message) || e).slice(0, 200); AD_NET.lastErrorAt = Date.now();
+    AD_NET.failAt = Date.now(); AD_NET.failKey = key; // ۳۰ ثانیه بعد دوباره تلاش؛ تا آن موقع نسخهٔ قبلی (اگر بود)
+    return AD_NET.invKey === key ? AD_NET.inv : null;
+  } finally { AD_NET.fetching = null; }
+}
+function adDeviceOf(request) {
+  const ua = (request && request.headers && request.headers.get('user-agent')) || '';
+  return /Mobi|Android|iPhone|iPad|iPod/i.test(ua) ? 'm' : 'd';
+}
+function adSeenParse(seen) {
+  const out = {};
+  if (!seen || typeof seen !== 'object' || Array.isArray(seen)) return out;
+  Object.keys(seen).slice(0, 80).forEach(function (k) {
+    if (/^c_[a-z0-9]{4,32}$/.test(k)) out[k] = Math.round(adNum(seen[k], 0, 0, 1000));
+  });
+  return out;
+}
+function adNetEligible(c, slot, ctx) {
+  if (c.slots.indexOf(slot) < 0) return false;
+  const tg = c.tg || {};
+  if (tg.types.length && ctx.ctype && tg.types.indexOf(ctx.ctype) < 0) return false;
+  if (tg.genres.length && !(ctx.genres || []).some(function (g) { return tg.genres.indexOf(g) >= 0; })) return false;
+  if (tg.dev.length && tg.dev.indexOf(ctx.dev) < 0) return false;
+  if (c.cap && ctx.seen && (ctx.seen[c.id] || 0) >= c.cap) return false;
+  if (slot === 'ov') return !!(c.banner && c.banner.wide);
+  if (slot === 'pause') return !!(c.banner && (c.banner.rect || c.banner.wide));
+  if (slot === 'dl') return !!((c.video && (c.video.srcP || c.video.src)) || (c.banner && (c.banner.tall || c.banner.rect)));
+  if (slot === 'pre' || slot === 'sw' || slot === 'mid') return !!(c.video && (c.video.src || c.video.srcP));
+  if (slot === 'bot') return !!c.link;
+  return false;
+}
+function adWeightedPick(list, exclude) {
+  const pool = (list || []).filter(function (c) { return !exclude || exclude.indexOf(c.id) < 0; });
+  if (!pool.length) return null;
+  let total = 0;
+  pool.forEach(function (c) { total += c.w || 1; });
+  let r = Math.random() * total;
+  for (let i = 0; i < pool.length; i++) { r -= (pool[i].w || 1); if (r <= 0) return pool[i]; }
+  return pool[pool.length - 1];
+}
+async function adTokenMake(set, p) {
+  const now = Math.floor(Date.now() / 1000);
+  return signToken(Object.assign({ a: 1, t: now, n: randomHex(3), exp: now + 7200 }, p), set.secret);
+}
+function adPayloadNet(c, slot, tok, cfg) {
+  const base = { at: tok, net: true, title: c.title || '', cta: c.cta || 'مشاهده', clickable: !!(c.landing || (c.link && c.link.url)) };
+  if (c.f === 'video' && c.video) {
+    const src = slot === 'dl' ? (c.video.srcP || c.video.src) : (c.video.src || c.video.srcP);
+    const sec = Math.max(3, Math.round(Math.min(slot === 'dl' ? CONFIG.AD_MAX_SEC : cfg.maxSec, c.video.dur || 15)));
+    const skip = slot === 'dl' ? 0 : (cfg.skipAfter && sec > cfg.skipAfter + 2 ? cfg.skipAfter : 0);
+    return Object.assign(base, { kind: 'video', mediaUrl: src, posterUrl: c.video.poster || '', sec: sec, skipAfter: skip, muted: slot === 'dl', w: c.video.w || 0, h: c.video.h || 0 });
+  }
+  const b = c.banner || {};
+  let img = '', size = '';
+  if (slot === 'ov') { img = b.wide; size = 'wide'; }
+  else if (slot === 'pause') { img = b.rect || b.wide; size = b.rect ? 'rect' : 'wide'; }
+  else { img = b.tall || b.rect || b.wide; size = b.tall ? 'tall' : (b.rect ? 'rect' : 'wide'); }
+  return Object.assign(base, { kind: 'banner', mediaUrl: img, size: size, sec: slot === 'dl' ? 8 : 6, skipAfter: 0 });
+}
+/* انتخاب یک تبلیغ برای یک جایگاه: اول شبکهٔ خودکار، اگر نبود تبلیغ داخلی (دستی) */
+async function pickAdForSlot(store, set, user, item, slot, ctx, request, seen) {
+  if (!user || hasActiveSub(user)) return null;
+  const dev = adDeviceOf(request);
+  const ictx = { ctype: item && item.type === 'series' ? 'series' : 'movie', genres: (item && item.genres) || [], dev: dev, seen: adSeenParse(seen) };
+  const cfg = adNetConfig(set, store.env);
+  if (cfg.on) {
+    adNetRecord(ctx, store, set, { c: '*', s: slot, e: 'opp', d: dev, t: ictx.ctype });
+    const inv = await adNetInventory(store, set);
+    const c = inv ? adWeightedPick(inv.campaigns.filter(function (x) { return adNetEligible(x, slot, ictx); })) : null;
+    if (c) {
+      const isVideo = c.f === 'video';
+      const tok = await adTokenMake(set, { c: c.id, k: 'n', s: slot, u: user.username, m: isVideo ? 'video' : 'banner', d: isVideo ? Math.round(c.video.dur || 15) : 6, v: inv.cfg.viewSec, ct: ictx.ctype, dv: dev });
+      if (slot !== 'ov' && slot !== 'pause') adNetRecord(ctx, store, set, { c: c.id, s: slot, e: 'imp', d: dev, t: ictx.ctype });
+      return adPayloadNet(c, slot, tok, inv.cfg);
+    }
+    if (set.adNetHouseFallback === false) return null;
+  }
+  if (['dl', 'pre', 'sw', 'mid'].indexOf(slot) < 0) return null;
+  const a = pickAdForUser(await getAds(store), user);
+  if (!a) return null;
+  if (a.once) { markAdSeen(user, a.id); try { await saveUser(store, user); } catch (e) { } }
+  try { await bumpAdStat(store, a.id, 'views', 1); } catch (e) { }
+  const tok = await adTokenMake(set, { c: a.id, k: 'h', s: slot, u: user.username, m: a.kind, d: a.sec });
+  return Object.assign(publicAd(a), { at: tok, net: false, skipAfter: slot === 'dl' ? 0 : Math.min(a.sec, streamAdConfig(set).skipAfter) });
+}
+/* بنرهای پلیر: تا ۲ بنر پهن (روی تصویر) + ۱ بنر توقف؛ نمایش واقعی را پلیر گزارش می‌دهد */
+async function pickPlayerBanners(store, set, user, item, ctx, request, seen) {
+  if (!user || hasActiveSub(user)) return [];
+  const cfg = adNetConfig(set, store.env);
+  if (!cfg.on) return [];
+  const inv = await adNetInventory(store, set);
+  if (!inv || !inv.campaigns.length) return [];
+  const dev = adDeviceOf(request);
+  const ictx = { ctype: item && item.type === 'series' ? 'series' : 'movie', genres: (item && item.genres) || [], dev: dev, seen: adSeenParse(seen) };
+  const out = [];
+  const plan = [];
+  if (set.plAdBanner !== false) plan.push('ov', 'ov');
+  if (set.plAdPause !== false) plan.push('pause');
+  const used = [];
+  for (const slot of plan) {
+    adNetRecord(ctx, store, set, { c: '*', s: slot, e: 'opp', d: dev, t: ictx.ctype });
+    const pool = inv.campaigns.filter(function (x) { return adNetEligible(x, slot, ictx); });
+    const c = adWeightedPick(pool, used) || adWeightedPick(pool);
+    if (!c) continue;
+    used.push(c.id);
+    const tok = await adTokenMake(set, { c: c.id, k: 'n', s: slot, u: user.username, m: 'banner', d: 6, v: 1, ct: ictx.ctype, dv: dev });
+    out.push(Object.assign(adPayloadNet(c, slot, tok, inv.cfg), { slot: slot }));
+  }
+  return out;
+}
+function adSeenOnce(key, max) {
+  const n = AD_NET.seen.get(key) || 0;
+  if (n >= (max || 1)) return false;
+  AD_NET.seen.set(key, n + 1);
+  if (AD_NET.seen.size > 30000) AD_NET.seen.clear();
+  return true;
+}
+/* نتیجهٔ یک تبلیغ ویدئویی/میان‌پرده (بعد از پایان یا رد کردن). بازدید فقط وقتی شمرده
+   می‌شود که هم پلیر و هم ساعت سرور حداقل زمان لازم را تأیید کنند. */
+async function adResultRecord(store, set, ctx, request, user, r) {
+  const p = await verifyToken(String((r && r.at) || ''), set.secret);
+  if (!p || p.a !== 1 || !user || p.u !== user.username || p.k !== 'n') return false;
+  if (!adSeenOnce('res:' + p.c + ':' + p.t + ':' + p.n, 1)) return false;
+  const watched = adNum(r.t, 0, 0, 600);
+  const elapsed = Date.now() / 1000 - Number(p.t || 0);
+  const need = Math.max(1, Math.min(Number(p.v) || 10, Number(p.d) || 10));
+  if (p.m === 'video') {
+    if (watched + 1 >= need && elapsed + 2 >= need) adNetRecord(ctx, store, set, { c: p.c, s: p.s, e: 'view', d: p.dv, t: p.ct, w: Math.min(watched, elapsed + 2) });
+    else if (r.skip) adNetRecord(ctx, store, set, { c: p.c, s: p.s, e: 'skip', d: p.dv, t: p.ct, w: watched });
+  }
+  return true;
+}
+/* نمایش بنرهای پلیر (sendBeacon؛ بدون توکن ورود — خود توکن تبلیغ به کاربر گره خورده) */
+async function apiAdEvents(store, body, request, ctx) {
+  const set = await getSettings(store);
+  const evs = Array.isArray(body && body.evs) ? body.evs.slice(0, 30) : [];
+  let n = 0;
+  for (const e of evs) {
+    if (!e || e.ev !== 'imp') continue;
+    const p = await verifyToken(String(e.at || ''), set.secret);
+    if (!p || p.a !== 1 || p.k !== 'n' || (p.s !== 'ov' && p.s !== 'pause')) continue;
+    if (!adSeenOnce('bimp:' + p.c + ':' + p.t + ':' + p.n, 24)) continue;
+    adNetRecord(ctx, store, set, { c: p.c, s: p.s, e: 'imp', d: p.dv, t: p.ct });
+    n++;
+  }
+  return json({ ok: true, n: n });
+}
+async function apiAdTokenClick(store, body, request, ctx) {
+  const set = await getSettings(store);
+  const p = await verifyToken(String((body && body.at) || ''), set.secret);
+  if (!p || p.a !== 1) return json({ error: 'تبلیغ نامعتبر است' }, 400);
+  if (p.k === 'h') {
+    const ad = (await getAds(store)).find(function (a) { return a.id === p.c; });
+    if (!ad || !ad.linkUrl) return json({ error: 'لینکی برای این تبلیغ ثبت نشده' }, 404);
+    if (memRate('hc:' + p.c + ':' + ipOf(request), 3, 300000)) await bumpAdStat(store, ad.id, 'clicks', 1);
+    return json({ ok: true, url: ad.linkUrl });
+  }
+  const inv = await adNetInventory(store, set);
+  const c = inv && inv.campaigns.find(function (x) { return x.id === p.c; });
+  const url = c ? (c.landing || (c.link && c.link.url) || '') : '';
+  if (!url) return json({ error: 'لینک این تبلیغ دیگر در دسترس نیست' }, 404);
+  if (adSeenOnce('clk:' + p.c + ':' + p.t + ':' + p.n, 1) && memRate('nci:' + ipOf(request), 40, 3600000)) {
+    adNetRecord(ctx, store, set, { c: p.c, s: p.s, e: 'click', d: p.dv || adDeviceOf(request), t: p.ct });
+  }
+  return json({ ok: true, url: url });
+}
+/* لینک دکمهٔ تبلیغ زیر فایل: از /r/ سایت عبور می‌کند تا کلیک دقیق شمرده شود */
+async function adRedirectUrl(set, c) {
+  const origin = String(set.publicUrl || '').replace(/\/+$/, '');
+  if (!/^https:\/\//.test(origin)) return c.link.url;
+  return origin + '/r/' + (await signToken({ r: 1, c: c.id, l: c.link.url }, set.secret));
+}
+async function handleAdRedirect(request, url, store, ctx) {
+  const set = await getSettings(store);
+  let tok = '';
+  try { tok = decodeURIComponent(url.pathname.slice(3)); } catch (e) { tok = ''; }
+  const p = await verifyToken(tok, set.secret);
+  const home = (set.publicUrl || url.origin).replace(/\/+$/, '') + '/';
+  if (!p || p.r !== 1 || !/^https:\/\//i.test(String(p.l || '')) || !isPublicHttpUrl(String(p.l))) {
+    return new Response(null, { status: 302, headers: { location: home, 'cache-control': 'no-store' } });
+  }
+  if (memRate('rc:' + p.c + ':' + ipOf(request), 1, 3600000)) adNetRecord(ctx, store, set, { c: p.c, s: 'bot', e: 'click', d: adDeviceOf(request), t: '' });
+  return new Response(null, { status: 302, headers: { location: String(p.l), 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
+}
+/* دکمه‌های زیر فایل ارسالی ربات: تبلیغ لینکی خودکار (برای کاربران بدون اشتراک) + دکمهٔ خود سایت */
+async function deliveryKeyboard(store, set, dl, item, ctx) {
+  const rows = [];
+  try {
+    const cfg = adNetConfig(set, store.env);
+    if (cfg.on && set.adNetBotLinks !== false && item) {
+      const user = dl && dl.username ? await getUser(store, dl.username) : null;
+      if (user && !hasActiveSub(user)) {
+        const ictx = { ctype: item.type === 'series' ? 'series' : 'movie', genres: item.genres || [], dev: 'm', seen: null };
+        adNetRecord(ctx, store, set, { c: '*', s: 'bot', e: 'opp', d: 'm', t: ictx.ctype });
+        const inv = await adNetInventory(store, set);
+        const c = inv ? adWeightedPick(inv.campaigns.filter(function (x) { return adNetEligible(x, 'bot', ictx); })) : null;
+        if (c) {
+          rows.push([{ text: c.link.text, url: await adRedirectUrl(set, c) }]);
+          adNetRecord(ctx, store, set, { c: c.id, s: 'bot', e: 'imp', d: 'm', t: ictx.ctype });
+        }
+      }
+    }
+  } catch (e) { /* تبلیغ نباید تحویل فایل را خراب کند */ }
+  const own = adKeyboard(set);
+  if (own) rows.push(own.inline_keyboard[0]);
+  return rows.length ? { inline_keyboard: rows } : null;
+}
+function adNetRecord(ctx, store, set, ev) {
+  const cfg = adNetConfig(set, store && store.env);
+  if (!cfg.on || !ev || AD_SLOTS.indexOf(ev.s) < 0) return;
+  const day = tlrDayStamp();
+  const hour = new Date(Date.now() + 12600000).getUTCHours();
+  const d = ev.d === 'd' ? 'd' : 'm';
+  const t = ev.t === 'series' || ev.t === 'movie' ? ev.t : '';
+  const key = [ev.c || '*', ev.s, day, hour, d, t].join('|');
+  let row = AD_NET.buf.get(key);
+  if (!row) { row = { c: ev.c || '*', s: ev.s, day: day, h: hour, d: d, t: t, imp: 0, view: 0, click: 0, skip: 0, opp: 0, watch: 0 }; AD_NET.buf.set(key, row); }
+  if (typeof row[ev.e] !== 'number' || ev.e === 'watch') return;
+  row[ev.e] += 1;
+  if (ev.w) row.watch += Math.round(adNum(ev.w, 0, 0, 600));
+  AD_NET.bufN += 1;
+  if (!AD_NET.bufAt) AD_NET.bufAt = Date.now();
+  const canWait = ctx && typeof ctx.waitUntil === 'function';
+  let job = null;
+  if (!canWait || AD_NET.bufN >= 200 || Date.now() - AD_NET.bufAt >= 20000) job = adNetFlush(cfg);
+  else if (!AD_NET.timer) {
+    AD_NET.timer = true;
+    job = sleep(Math.max(500, 20000 - (Date.now() - AD_NET.bufAt))).then(function () { AD_NET.timer = false; return adNetFlush(cfg); });
+  }
+  if (job) { if (canWait) ctx.waitUntil(job.catch(function () { })); else job.catch(function () { }); }
+}
+async function adNetFlush(cfg) {
+  if (AD_NET.flushing) return;
+  AD_NET.flushing = true;
+  try {
+    if (AD_NET.pending) {
+      try { await adNetSignedFetch(cfg, 'POST', '/api/net/events', { v: 1, id: AD_NET.pending.id, rows: AD_NET.pending.rows }, 6000); AD_NET.pending = null; }
+      catch (e) { AD_NET.pending.tries += 1; if (AD_NET.pending.tries >= 5) AD_NET.pending = null; throw e; }
+    }
+    if (!AD_NET.buf.size) return;
+    const rows = Array.from(AD_NET.buf.values());
+    AD_NET.buf = new Map(); AD_NET.bufN = 0; AD_NET.bufAt = 0;
+    const batch = { id: randomHex(10), rows: rows, tries: 0 };
+    try { await adNetSignedFetch(cfg, 'POST', '/api/net/events', { v: 1, id: batch.id, rows: rows }, 6000); AD_NET.lastFlushAt = Date.now(); }
+    catch (e) { AD_NET.pending = batch; throw e; } // همان شناسه دوباره فرستاده می‌شود → دوبار شمرده نمی‌شود
+  } catch (e) {
+    AD_NET.lastError = String((e && e.message) || e).slice(0, 200); AD_NET.lastErrorAt = Date.now();
+  } finally { AD_NET.flushing = false; }
+}
+
+/* ═══════════════════════ فایل‌های جانبی پلیر (/assets) ═══════════════════════
+   player.js فقط هنگام باز شدن پلیر بارگذاری می‌شود و با نسخه در آدرس، در مرورگر
+   «immutable» کش می‌شود (برای هر کاربر عملاً یک‌بار). hls.js فقط برای لینک‌های m3u8 در
+   مرورگرهای بدون HLS بومی لازم است: Worker آن را از CDN می‌گیرد، با SHA-256 ثابت
+   بررسی می‌کند و در Cache API نگه می‌دارد (کاربر ایرانی مستقیم به CDN وصل نمی‌شود). */
+const HLS_JS = { version: '1.6.16', sha256: '947b45be1392e39569d4aefc2cff9ff6ecbe6cc246cf67ab12ece0c41c24b793',
+  urls: ['https://cdn.jsdelivr.net/npm/hls.js@1.6.16/dist/hls.light.min.js', 'https://unpkg.com/hls.js@1.6.16/dist/hls.light.min.js'] };
+let PLAYER_JS_CACHE = null;
+function playerAssetVersion() { return (PLAYER_JS_CACHE || (PLAYER_JS_CACHE = buildPlayerJs())).v; }
+async function handleAssets(request, url) {
+  if (url.pathname === '/assets/player.js') {
+    const a = PLAYER_JS_CACHE || (PLAYER_JS_CACHE = buildPlayerJs());
+    return new Response(a.code, { headers: { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': url.searchParams.get('v') === a.v ? 'public, max-age=31536000, immutable' : 'no-cache', 'x-content-type-options': 'nosniff' } });
+  }
+  if (url.pathname === '/assets/hls.js') {
+    const cache = await publicCache();
+    const ckey = 'https://assets.internal/hls/' + HLS_JS.version;
+    if (cache) { try { const hit = await cache.match(ckey); if (hit) return new Response(hit.body, { headers: hit.headers }); } catch (e) { } }
+    let body = null;
+    for (const u of HLS_JS.urls) {
+      try {
+        const r = await fetch(u, { signal: AbortSignal.timeout(8000) });
+        if (!r.ok) continue;
+        const buf = await r.arrayBuffer();
+        if (bytesToHex(await sha256Bytes(new Uint8Array(buf))) !== HLS_JS.sha256) continue; // فایل دستکاری‌شده را هرگز نمی‌فرستیم
+        body = buf; break;
+      } catch (e) { }
+    }
+    if (!body) return new Response('/* hls.js unavailable */', { status: 503, headers: { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' } });
+    const resp = new Response(body, { headers: { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'public, max-age=2592000, immutable' } });
+    if (cache) { try { await cache.put(ckey, resp.clone()); } catch (e) { } }
+    return resp;
+  }
+  return new Response('not found', { status: 404 });
+}
+
 function itemHasTrack(item, track) {
   if (track === 'dub' && item.dubbed) return true;
   if (track === 'sub' && item.subtitled) return true;
@@ -2105,6 +3299,7 @@ async function idxUpsert(store, item) {
     dubbed: !!(item.dubbed || itemHasTrack(item, 'dub')),
     subtitled: !!(item.subtitled || itemHasTrack(item, 'sub')),
     censored: !!item.censored,
+    hasStream: itemHasStreams(item),
   };
   const i = idx.findIndex(function (x) { return x.id === item.id; });
   if (i >= 0) idx[i] = entry; else idx.unshift(entry);
@@ -2128,6 +3323,9 @@ function hasActiveSub(user) {
   return until > Date.now();
 }
 function downloadPrice(user, set) {
+  /* مدل جدید: دانلود و پخش آنلاین برای همه رایگان است؛ درآمد از تبلیغات و اشتراک
+     (محتوای ویژه + حذف تبلیغ). مدل قدیمیِ «سکه به ازای هر دانلود» فقط با dlChargeEnabled. */
+  if (!set || set.dlChargeEnabled !== true) return 0;
   if (hasActiveSub(user)) return 0;
   const n = Number(set && set.dlClickPrice);
   return (isFinite(n) && n > 0) ? n : 0;
@@ -2286,7 +3484,9 @@ function planMeta(set, plan) {
 function publicEconomy(set) {
   return {
     unit: set.walletUnitName || 'سکه',
-    dlClickPrice: Number(set.dlClickPrice) || 0,
+    dlClickPrice: set.dlChargeEnabled === true ? (Number(set.dlClickPrice) || 0) : 0,
+    freeDl: set.dlChargeEnabled !== true,
+    stream: set.streamEnabled ? (set.streamPublic === false ? 'admins' : 'on') : 'off',
     vanishSec: Number(set.vanishSec) || CONFIG.VANISH_SEC,
     refSignupBonus: Number(set.refSignupBonus) || 0,
     refPurchasePercent: Number(set.refPurchasePercent) || 0,
@@ -3576,6 +4776,7 @@ async function apiCatalog(store, url, request) {
       dubbed: !!e.dubbed,
       subtitled: !!e.subtitled,
       censored: !!e.censored,
+      stream: !!e.hasStream,
     });
   }
   return json({
@@ -3648,6 +4849,7 @@ async function apiItem(store, id, request, ctx) {
   delete out.imdbUrl;
   delete out.imdbImages;
   delete out.imdbImagesUpdatedAt;
+  decorateItemStreams(out, item, !!(user && user.role === 'admin'));
   const idx = await getIdx(store);
   const related = idx
     .filter(function (x) {
@@ -3655,12 +4857,30 @@ async function apiItem(store, id, request, ctx) {
     })
     .slice(0, 8)
     .map(function (x) { return { id: x.id, title: x.title, type: x.type, year: x.year, yearEnd: x.yearEnd || 0, airing: !!x.airing, airingSeason: x.airingSeason || 0, quality: x.quality, access: x.access, addedAt: x.addedAt, poster: posterUrlFor(x), imdb: x.imdb || 0 }; });
+  const isAdmin = !!(user && user.role === 'admin');
   return json({
     item: out, related: related, canPlay: canPlay, user: pubUser(user),
-    hasSub: hasActiveSub(user), dlPrice: Number(set.dlClickPrice) || 0,
+    hasSub: hasActiveSub(user), dlPrice: downloadPrice(user, set),
     vanishSec: Number(set.vanishSec) || CONFIG.VANISH_SEC,
+    stream: { on: !!set.streamEnabled && (set.streamPublic !== false || isAdmin), testOnly: !!set.streamEnabled && set.streamPublic === false, any: itemHasStreams(item) },
     economy: publicEconomy(set),
   });
+}
+/* لینک‌های پخش هرگز به کاربر عادی نمی‌رسند؛ فقط نقشهٔ «کدام کیفیت/نسخه پخش آنلاین دارد».
+   شیء item در حافظه کش است، پس همه‌چیز کپی می‌شود (نه تغییر درجا). */
+function decorateItemStreams(out, item, isAdmin) {
+  function strip(e) {
+    if (!e || typeof e !== 'object') return e;
+    const c = Object.assign({}, e);
+    if (Array.isArray(e.streams) || !c.stm) c.stm = publicStreamMap(e, item);
+    if (!isAdmin) { delete c.streams; delete c.streamSubs; }
+    return c;
+  }
+  out.stm = publicStreamMap(item, item);
+  if (!isAdmin) { delete out.streams; delete out.streamSubs; }
+  if (Array.isArray(out.seasons)) out.seasons = out.seasons.map(function (s) { return Object.assign({}, s, { episodes: (s.episodes || []).map(strip) }); });
+  if (Array.isArray(out.episodes)) out.episodes = out.episodes.map(strip);
+  return out;
 }
 
 /* ═══════════════════════ ورود تلگرام ═══════════════════════ */
@@ -3958,7 +5178,8 @@ async function fulfillDownload(store, ctx, token, chatId, dl, set) {
   if (picked.error) return tgSend(token, chatId, '❌ ' + picked.error);
   const sec = Number(set.vanishSec) || CONFIG.VANISH_SEC;
   const cap = buildMediaCaption(set, item);
-  const kb = adKeyboard(set);
+  // دکمهٔ تبلیغ لینکی خودکار (کاربر بدون اشتراک) + دکمهٔ خود سایت
+  const kb = typeof deliveryKeyboard === 'function' ? await deliveryKeyboard(store, set, dl, item, ctx) : adKeyboard(set);
   const sources = versionSources(picked.source);
   dl.sentParts = dl.sentParts || [];
   for (let i = 0; i < sources.length; i++) {
@@ -4570,7 +5791,7 @@ async function sendDlNotice (store, job) {
   return transient ? { ok: false, retry: true, after: retryAfter } : { ok: false };
 }
 
-async function apiDlRequest(store, body, request) {
+async function apiDlRequest(store, body, request, ctx) {
   const user = await currentUser(request, store);
   if (!user) return json({ error: 'وارد شوید' }, 401);
   if (!user.tgId) return json({ error: 'حساب تلگرام متصل نیست. یک‌بار با ربات وارد شوید.' }, 400);
@@ -4638,37 +5859,33 @@ async function apiDlRequest(store, body, request) {
     gateInfo: adGateInfo(set),
   };
 
-  // کاربران دارای اشتراک هیچ تبلیغی نمی‌بینند
-  const ad = sub ? null : (set.adGateEnabled === false ? null : pickAdForUser(await getAds(store), fresh));
+  // کاربران دارای اشتراک هیچ تبلیغی نمی‌بینند؛ بقیه: اول تبلیغ خودکار شبکه، بعد تبلیغ داخلی
+  const ad = (sub || set.adGateEnabled === false) ? null : await pickAdForSlot(store, set, fresh, item, 'dl', ctx, request, body.seen);
   if (!ad) {
     out.botLink = botLink;
     return json(out);
   }
 
   const gid = randomHex(10);
+  const adSec = adClampSec(ad.sec);
   await store.set('adg:' + gid, {
     id: gid,
     username: fresh.username,
     dlId: id,
-    adId: ad.id,
-    sec: ad.sec,
+    adId: ad.net ? '' : (ad.id || ''),
+    at: ad.at || '',
+    sec: adSec,
     startAt: Date.now(),
     done: false,
   }, 1800);
 
-  if (ad.once) {
-    markAdSeen(fresh, ad.id);
-    await saveUser(store, fresh);
-  }
-  await bumpAdStat(store, ad.id, 'views', 1);
-
   out.needAd = true;
   out.gate = gid;
-  out.ad = publicAd(ad);
+  out.ad = Object.assign({}, ad, { sec: adSec });
   return json(out);
 }
 
-async function apiDlGate(store, gid, request) {
+async function apiDlGate(store, gid, request, ctx) {
   const user = await currentUser(request, store);
   if (!user) return json({ error: 'وارد شوید' }, 401);
   const g = await store.get('adg:' + gid);
@@ -4685,6 +5902,7 @@ async function apiDlGate(store, gid, request) {
   if (!g.done) {
     g.done = true;
     await store.set('adg:' + gid, g, 1800);
+    if (g.at) await adResultRecord(store, set, ctx, request, user, { at: g.at, t: passed, done: true });
   }
   return json({
     ok: true,
@@ -5579,6 +6797,126 @@ async function handleShards(store, request, method) {
   }
   throw Object.assign(new Error('عملیات نامعتبر'), { status: 400 });
 }
+/* ═══════ تنظیمات پخش آنلاین و شبکهٔ تبلیغات در پنل مدیریت ═══════ */
+function streamAdminState(set) {
+  return {
+    enabled: !!set.streamEnabled, public: set.streamPublic !== false,
+    tokenMin: Math.max(10, Math.min(720, parseInt(set.streamTokenMin, 10) || 180)),
+    maxSessions: Math.max(1, Math.min(10, parseInt(set.streamMaxSessions, 10) || 2)),
+    bindIp: set.streamBindIp !== false, watermark: set.streamWatermark !== false,
+    edges: (set.streamEdges || []).map(function (e) { return { id: e.id, url: e.url, off: !!e.off, secret: maskToken(e.secret) }; }),
+  };
+}
+function adNetAdminState(set, env) {
+  const cfg = adNetConfig(set, env);
+  const n = function (v, d) { v = parseInt(v, 10); return isFinite(v) ? v : d; };
+  return {
+    enabled: !!set.adNetEnabled, url: set.adNetUrl || '', secretSet: cfg.secret.length >= 16, secretFromEnv: cfg.fromEnv,
+    secret: cfg.secret ? maskToken(cfg.secret) : '', houseFallback: set.adNetHouseFallback !== false, botLinks: set.adNetBotLinks !== false,
+    plAdPre: set.plAdPre !== false, plAdSwitch: set.plAdSwitch !== false, plAdSwitchGap: n(set.plAdSwitchGap, 0),
+    plAdBanner: set.plAdBanner !== false, plAdBannerFirst: n(set.plAdBannerFirst, 120), plAdBannerEvery: n(set.plAdBannerEvery, 600),
+    plAdBannerSec: n(set.plAdBannerSec, 15), plAdPause: set.plAdPause !== false, plAdSkip: n(set.plAdSkip, 5), plAdMidroll: n(set.plAdMidroll, 0),
+    status: { campaigns: AD_NET.inv && AD_NET.invKey ? AD_NET.inv.campaigns.length : null, invAt: AD_NET.invAt || 0, lastFlushAt: AD_NET.lastFlushAt || 0,
+      lastError: AD_NET.lastError || '', lastErrorAt: AD_NET.lastErrorAt || 0, queued: AD_NET.bufN + (AD_NET.pending ? AD_NET.pending.rows.length : 0) },
+  };
+}
+/* همه‌چیز اول اعتبارسنجی می‌شود؛ خطا یعنی هیچ تغییری روی set اعمال نشود */
+function applyStreamAdSettings(set, body, env) {
+  const patch = {};
+  function int(k, lo, hi, label) {
+    if (body[k] === undefined) return '';
+    const n = Number(body[k]);
+    if (!Number.isFinite(n) || Math.floor(n) !== n || n < lo || n > hi) return label + ' باید عدد صحیح بین ' + lo + ' تا ' + hi + ' باشد';
+    patch[k] = n;
+    return '';
+  }
+  ['streamEnabled', 'streamPublic', 'streamBindIp', 'streamWatermark', 'adNetEnabled', 'adNetHouseFallback', 'adNetBotLinks',
+    'plAdPre', 'plAdSwitch', 'plAdBanner', 'plAdPause', 'dlChargeEnabled'].forEach(function (k) { if (body[k] !== undefined) patch[k] = !!body[k]; });
+  const errs = [
+    int('streamTokenMin', 10, 720, 'اعتبار توکن پخش (دقیقه)'), int('streamMaxSessions', 1, 10, 'تعداد پخش هم‌زمان'),
+    int('plAdSwitchGap', 0, 3600, 'فاصلهٔ تبلیغ تعویض'), int('plAdBannerFirst', 10, 7200, 'زمان اولین بنر'),
+    int('plAdBannerEvery', 60, 7200, 'فاصلهٔ بنرها'), int('plAdBannerSec', 5, 60, 'مدت نمایش بنر'),
+    int('plAdSkip', 0, 30, 'زمان دکمهٔ رد کردن'), int('plAdMidroll', 0, 240, 'فاصلهٔ تبلیغ میان‌پخش'),
+  ].filter(Boolean);
+  if (errs.length) return errs[0];
+  if (body.adNetUrl !== undefined) {
+    const u = String(body.adNetUrl || '').trim().replace(/\/+$/, '');
+    if (u && (!/^https:\/\/[^\s/]+/.test(u) || u.length > 300)) return 'آدرس پلتفرم تبلیغات باید با https:// شروع شود';
+    patch.adNetUrl = u;
+  }
+  if (body.adNetSecret !== undefined && !(env && (env.ADNET_SECRET || env.AD_NET_SECRET))) {
+    const sec = String(body.adNetSecret || '').trim();
+    if (sec && (sec.length < 16 || sec.length > 256)) return 'کلید اتصال پلتفرم تبلیغات باید ۱۶ تا ۲۵۶ نویسه باشد';
+    if (sec) patch.adNetSecret = sec;
+  }
+  if (patch.adNetEnabled && !(patch.adNetUrl !== undefined ? patch.adNetUrl : set.adNetUrl)) return 'برای فعال‌کردن شبکهٔ تبلیغات، آدرس پلتفرم را وارد کنید';
+  Object.assign(set, patch);
+  if (patch.adNetUrl !== undefined || patch.adNetSecret !== undefined) { AD_NET.inv = null; AD_NET.invAt = 0; AD_NET.invKey = ''; AD_NET.failAt = 0; }
+  return '';
+}
+async function edgeHealth(url, secret) {
+  const ts = String(Math.floor(Date.now() / 1000));
+  const sig = (await hmacHex(enc.encode(secret), 'health|' + ts)).slice(0, 32);
+  const t0 = Date.now();
+  const r = await fetch(String(url).replace(/\/+$/, '') + '/health?ts=' + ts + '&sig=' + sig, { signal: AbortSignal.timeout(6000) });
+  const data = await r.json().catch(function () { return null; });
+  if (!r.ok || !data || !data.ok) throw new Error((data && data.error) || ('HTTP ' + r.status));
+  if (!data.auth) throw new Error('رمز لبه با EDGE_SECRET همان Worker یکی نیست');
+  return { latency: Date.now() - t0, version: data.v || '' };
+}
+async function handleStreamEdges(store, request, method) {
+  const set = await getSettings(store);
+  if (method === 'GET') {
+    const rows = [];
+    for (const e of set.streamEdges || []) {
+      let ok = false, latency = 0, error = '';
+      try { const h = await edgeHealth(e.url, e.secret); ok = true; latency = h.latency; } catch (x) { error = (x && x.message) || String(x); }
+      rows.push({ id: e.id, url: e.url, off: !!e.off, ok: ok, latency: latency, error: error });
+    }
+    return json({ edges: rows });
+  }
+  const body = await readBody(request, 16384);
+  if (body.action === 'test') {
+    try { const h = await edgeHealth(String(body.url || ''), String(body.secret || '')); return json({ ok: true, latency: h.latency, version: h.version }); }
+    catch (e) { return json({ ok: false, error: (e && e.message) || String(e) }, 400); }
+  }
+  if (body.action === 'add') {
+    const id = String(body.id || '').trim().toLowerCase();
+    const u = String(body.url || '').trim().replace(/\/+$/, '');
+    const secret = String(body.secret || '').trim();
+    if (!/^[a-z0-9-]{1,32}$/.test(id)) return json({ error: 'شناسهٔ لبه: حروف کوچک انگلیسی، عدد و خط تیره' }, 400);
+    if (!/^https:\/\/[^\s]+$/.test(u)) return json({ error: 'آدرس لبه باید با https:// شروع شود' }, 400);
+    if (secret.length < 16 || secret.length > 256) return json({ error: 'رمز لبه باید ۱۶ تا ۲۵۶ نویسه باشد' }, 400);
+    try { await edgeHealth(u, secret); } catch (e) { return json({ error: 'لبه پاسخ درست نداد: ' + ((e && e.message) || e) }, 400); }
+    const list = (set.streamEdges || []).filter(function (x) { return x.id !== id; });
+    if (list.length >= 12) return json({ error: 'حداکثر ۱۲ لبه' }, 400);
+    list.push({ id: id, url: u, secret: secret });
+    set.streamEdges = list;
+    await writeSettings(store, set);
+    return json({ ok: true, stream: streamAdminState(set) });
+  }
+  if (body.action === 'remove' || body.action === 'toggle') {
+    const id = String(body.id || '').trim();
+    if (body.action === 'remove') set.streamEdges = (set.streamEdges || []).filter(function (x) { return x.id !== id; });
+    else (set.streamEdges || []).forEach(function (x) { if (x.id === id) x.off = !x.off; });
+    await writeSettings(store, set);
+    return json({ ok: true, stream: streamAdminState(set) });
+  }
+  return json({ error: 'عملیات نامعتبر' }, 400);
+}
+async function adNetAdminTest(store, body) {
+  const set = await getSettings(store);
+  const tmp = Object.assign({}, set, { adNetEnabled: true });
+  if (body && body.url) tmp.adNetUrl = String(body.url).trim().replace(/\/+$/, '');
+  if (body && body.secret && !(store.env && (store.env.ADNET_SECRET || store.env.AD_NET_SECRET))) tmp.adNetSecret = String(body.secret).trim();
+  const cfg = adNetConfig(tmp, store.env);
+  if (!cfg.on) return json({ ok: false, error: 'آدرس https و کلید اتصال (حداقل ۱۶ نویسه) لازم است' }, 400);
+  try {
+    const t0 = Date.now();
+    const sum = await adNetSignedFetch(cfg, 'GET', '/api/net/summary', null, 6000);
+    return json({ ok: true, latency: Date.now() - t0, summary: sum });
+  } catch (e) { return json({ ok: false, error: (e && e.message) || String(e) }, 400); }
+}
 async function storageStatus(store, set) {
   let d1Ready = false;
   try {
@@ -5607,6 +6945,8 @@ async function handleAdmin(store, url, request, adminUser) {
   }
 
   if (p === 'shards' && (m === 'GET' || m === 'POST')) return handleShards(store, request, m);
+  if (p === 'stream-edges' && (m === 'GET' || m === 'POST')) return handleStreamEdges(store, request, m);
+  if (p === 'adnet/test' && m === 'POST') return adNetAdminTest(store, await readBody(request, 8 * 1024));
 
   if (p === 'overview' && m === 'GET') {
     const users = await store.list('u:');
@@ -5662,6 +7002,8 @@ async function handleAdmin(store, url, request, adminUser) {
       adButtonText: set.adButtonText || '',
       adButtonUrl: set.adButtonUrl || '',
       starPacks: set.starPacks, rialPacks: [], starShops: set.starShops || [],
+      dlChargeEnabled: set.dlChargeEnabled === true,
+      stream: streamAdminState(set),
     });
   }
 
@@ -5797,6 +7139,8 @@ async function handleAdmin(store, url, request, adminUser) {
       }).filter(function (p) { return p.toman > 0 && p.units > 0; });
     }
     if (set.k2kEnabled && !set.k2kSecret) set.k2kSecret = randomHex(16);
+    const extraErr = applyStreamAdSettings(set, body, store.env);
+    if (extraErr) return json({ error: extraErr }, 400);
     if (body.botToken !== undefined && !envBotToken(store.env)) {
       const t = String(body.botToken).trim();
       if (t) {
@@ -6184,6 +7528,22 @@ async function handleAdmin(store, url, request, adminUser) {
     await idxUpsert(store, item);
     return json({ item: item });
   }
+  mm = p.match(/^item\/(i_[a-z0-9]+)\/streams$/);
+  if (mm && m === 'POST') {
+    const item = await getItem(store, mm[1]);
+    if (!item) return json({ error: 'یافته نشد' }, 404);
+    const body = await readBody(request, 256 * 1024);
+    const parsed = parseStreamLines(String(body.text || ''), { type: item.type });
+    if (parsed.errors.length) return json({ error: 'برخی خط‌ها نامعتبرند؛ هیچ تغییری ذخیره نشد.', errors: parsed.errors.slice(0, 30) }, 400);
+    const copy = JSON.parse(JSON.stringify(item));
+    const res = applyStreamEntries(copy, parsed.entries, { replace: body.replace !== false, removes: parsed.removes });
+    syncEpisodesFromSeasons(copy);
+    copy.updatedAt = Math.max(Date.now(), Number(item.updatedAt || 0) + 1);
+    await saveItemRecord(store, copy);
+    bustItem(copy.id);
+    await idxUpsert(store, copy);
+    return json({ ok: true, item: copy, result: res, warnings: parsed.warnings.slice(0, 20), lines: streamLinesOf(copy) });
+  }
   mm = p.match(/^item\/(i_[a-z0-9]+)\/episodes\/order$/);
   if (mm && m === 'POST') {
     const item = await getItem(store, mm[1]);
@@ -6353,6 +7713,7 @@ async function handleAdmin(store, url, request, adminUser) {
         adGateTitle: set.adGateTitle || '',
         adGateNote: set.adGateNote || '',
       },
+      net: adNetAdminState(set, store.env),
     });
   }
   if (p === 'ads' && m === 'POST') {
@@ -6477,6 +7838,25 @@ async function contentBotAction(store, body, action) {
   const item = await store.get('it:' + body.itemId);
   if (!item) return json({error:'اثر حذف شده یا یافت نشد'}, 404);
   if (action === 'item') return json({item:{id:item.id, title:item.title, type:item.type, year:item.year, description:item.description || '', updatedAt:item.updatedAt || 0}, vault:vault});
+  if (action === 'streamlist') return json({item:{id:item.id,title:item.title,type:item.type},lines:streamLinesOf(item)});
+  if (action === 'streams') {
+    /* بخش اختیاری «لینک پخش آنلاین» ربات سوم؛ همه‌چیز دوباره در سمت سایت اعتبارسنجی می‌شود */
+    const entries=Array.isArray(body.entries)?body.entries:[], removes=Array.isArray(body.removes)?body.removes:[];
+    if ((!entries.length && !removes.length) || entries.length>200 || removes.length>100) return json({error:'هیچ لینکی برای ثبت نیست یا تعداد بیش از حد است (حداکثر ۲۰۰ لینک در هر بار)'},400);
+    const series=item.type==='series', epOk=(s,e)=>Number.isInteger(s)&&s>=1&&s<=200&&Number.isInteger(e)&&e>=1&&e<=10000;
+    for (const en of entries) {
+      if (!en || !streamSafeUrl(en.url) || !['video','subtitle'].includes(en.kind)) return json({error:'یکی از لینک‌ها نامعتبر است'},400);
+      if (en.kind==='video' && (!['sub','dub'].includes(en.track) || !qualityKey(en.quality))) return json({error:'نوع یا کیفیت یکی از لینک‌ها نامعتبر است'},400);
+      if (series && !epOk(en.season,en.episode)) return json({error:'فصل یا قسمت یکی از لینک‌ها نامعتبر است'},400);
+    }
+    for (const rm of removes) if (!rm || (series && !epOk(rm.season,rm.episode)) || (rm.track && !['sub','dub'].includes(rm.track))) return json({error:'درخواست حذف نامعتبر است'},400);
+    const result=applyStreamEntries(item,entries,{removes});
+    syncEpisodesFromSeasons(item);
+    item.updatedAt=Math.max(Date.now(),Number(item.updatedAt || 0)+1);
+    await saveItemRecord(store,item);
+    await idxUpsert(store,item);
+    return json({ok:true,itemId:item.id,result});
+  }
   if (action !== 'publish') return json({error:'not found'},404);
   const files = body.files;
   if (!/^[a-f0-9]{32}$/.test(String(body.jobId || '')) || !Array.isArray(files) || !files.length || files.length > 20) return json({error:'پیش‌نویس نامعتبر؛ حداکثر ۲۰ فایل'},400);
@@ -6761,9 +8141,9 @@ export class EditorSession {
     if (storagePaused(this.env)) return new Response('Storage maintenance',{status:503,headers:{'Retry-After':'60'}});
     if (new URL(request.url).pathname.startsWith('/channel-')) return this.channelRequest(request);
     // All publications from this bot are routed through a single durable coordinator.
-    if (new URL(request.url).pathname === '/publish') {
+    if (new URL(request.url).pathname === '/publish' || new URL(request.url).pathname === '/streams') {
       const data = await request.json();
-      try { return await this.publishCoordinated(data); }
+      try { return await this.publishCoordinated(data, new URL(request.url).pathname === '/streams' ? 'streams' : 'publish'); }
       catch(e) { return Response.json({error:e.message},{status:e.status || 502}); }
     }
     const update=await request.json(), msg=update.message, actor=String(msg.from.id);
@@ -6779,7 +8159,7 @@ export class EditorSession {
     }
     return Response.json({ok:true});
   }
-  async publishCoordinated(data) {
+  async publishCoordinated(data, action) {
     // KV is eventually consistent across isolates. Keep the last editorial item in
     // durable storage and journal writes so a failed KV put can be retried safely.
     assertStorageWritable(this.env);
@@ -6815,7 +8195,7 @@ export class EditorSession {
       },
       delete:(...args)=>kv.delete(...args), list:(...args)=>kv.list(...args)
     };
-    return contentBotAction(new Store(bridge,this.env),data,'publish');
+    return contentBotAction(new Store(bridge,this.env),data,action==='streams'?'streams':'publish');
   }
   async channelRequest(request) {
     const path=new URL(request.url).pathname, body=await request.json();
@@ -7119,8 +8499,85 @@ export class EditorSession {
   }
   say(chat,text) { return tg(this.env,'sendMessage',{chat_id:chat,text,reply_markup:{resize_keyboard:true,keyboard:[
     ['راهنما','وضعیت کانال‌ها'],['مرحله بعد','پیش‌نمایش'],['انتشار پس از بررسی','تازه‌کردن مشخصات'],
-    ['تأیید فایل منتظر','ردکردن فایل منتظر'],['اصلاح فصل و کیفیت','لغو پیش‌نویس']
+    ['تأیید فایل منتظر','ردکردن فایل منتظر'],['اصلاح فصل و کیفیت','لغو پیش‌نویس'],['🎬 لینک پخش آنلاین']
   ]}}); }
+  /* ═══ بخش «لینک‌های پخش آنلاین» (اختیاری) ═══
+     جدا از پیش‌نویس فایل‌ها (کلید stream در حافظهٔ DO) تا هیچ‌کدام دیگری را خراب نکند.
+     لینک‌ها فقط در همین گفتگوی خصوصی گرفته می‌شوند و هرگز به کانال‌ها relay نمی‌شوند. */
+  sayStream(chat,text) { return tg(this.env,'sendMessage',{chat_id:chat,text:String(text).slice(0,4000),disable_web_page_preview:true,reply_markup:{resize_keyboard:true,keyboard:[
+    ['ثبت لینک‌های پخش','پیش‌نمایش پخش'],['لینک‌های پخش فعلی','راهنمای پخش'],['خروج از بخش پخش']
+  ]}}); }
+  streamHelp(type) {
+    const series=type==='series';
+    return 'هر خط یک لینک. قالب: '+(series?'[قسمت] ':'')+'[کیفیت] [دوبله یا زیرنویس] لینک [| عنوان دلخواه]\n\nمثال:\n'+
+      (series?'S01E05 720 دوبله https://cdn.example.com/show.s01e05.720.mp4\nS01E05 1080 زیرنویس https://cdn.example.com/show.s01e05.1080.mp4 | WEB-DL\nS01E05 زیرنویس https://cdn.example.com/show.s01e05.fa.srt  ← زیرنویس جدا (srt/vtt)\n':
+        '1080 دوبله https://cdn.example.com/movie.1080.mp4\n720 زیرنویس https://cdn.example.com/movie.720.mp4 | WEB-DL\nhttps://cdn.example.com/movie.fa.srt  ← زیرنویس جدا (srt/vtt)\n')+
+      '\nاگر نام فایل داخل لینک خودش '+(series?'SxxExx و ':'')+'کیفیت (720p) و Dubbed/SoftSub را داشته باشد، فقط لینک کافی است.\nخط‌های «#نوع دوبله»، «#کیفیت 720»'+(series?' و «#فصل 2»':'')+' پیش‌فرض خط‌های بعدی را تعیین می‌کنند.\n'+
+      'حذف: «حذف'+(series?' S01E05':'')+'» (همهٔ لینک‌ها) یا «حذف'+(series?' S01E05':'')+' 720 دوبله».\n\nفرمت: MP4 (H.264/AAC) بهترین سازگاری؛ HLS (m3u8) هم پشتیبانی می‌شود؛ MKV فقط در برخی مرورگرها.\nلینک‌ها هرگز به کاربر یا کانال نمایش داده نمی‌شوند؛ پخش از پراکسی امن سایت انجام می‌شود.\nبعد از ارسال لینک‌ها «ثبت لینک‌های پخش» را بزنید.';
+  }
+  streamShort(url) {
+    try { const u=new URL(url); const name=decodeURIComponent(u.pathname.split('/').pop() || ''); return u.host+'/…/'+name.slice(-60); } catch { return String(url).slice(0,80); }
+  }
+  streamReview(sd) {
+    const series=sd.type==='series', tag=e=>series?'S'+String(e.season).padStart(2,'0')+'E'+String(e.episode).padStart(2,'0')+' | ':'';
+    const lines=(sd.entries || []).map((e,i)=>(i+1)+'. '+tag(e)+(e.kind==='subtitle'?'زیرنویس جدا ('+(e.label || 'فارسی')+')':((e.track==='dub'?'دوبله':'زیرنویس')+' | '+displayQuality(e.quality)+' | '+(e.fmt || 'auto').toUpperCase()))+(e.label && e.kind!=='subtitle'?' | '+e.label:'')+'\n   '+this.streamShort(e.url));
+    const rms=(sd.removes || []).map(r=>'🗑 حذف '+(series?'S'+String(r.season).padStart(2,'0')+'E'+String(r.episode).padStart(2,'0'):'لینک‌های فیلم')+(r.quality?' '+displayQuality(r.quality):'')+(r.track?' '+(r.track==='dub'?'دوبله':'زیرنویس'):''));
+    if (!lines.length && !rms.length) return 'پیش‌نویس پخش خالی است. لینک‌ها را بفرستید.';
+    return 'پیش‌نمایش لینک‌های پخش «'+sd.title+'»:\n'+lines.concat(rms).join('\n').slice(0,3500)+'\n\nبرای ذخیره «ثبت لینک‌های پخش» را بزنید.';
+  }
+  async streamProcess(msg,text,chat,actor,sd,publicOrigin) {
+    const st=this.ctx.storage, save=async()=>{ sd.touchedAt=Date.now(); await st.put('stream',sd); };
+    const cmd={'ثبت لینک‌های پخش':'save','/streamsave':'save','پیش‌نمایش پخش':'review','/streamreview':'review','لینک‌های پخش فعلی':'list','/streamlist':'list',
+      'راهنمای پخش':'help','/streamhelp':'help','خروج از بخش پخش':'exit','/streamcancel':'exit'}[text];
+    if (cmd==='exit') {
+      const pending=(sd.entries || []).length+(sd.removes || []).length;
+      await st.delete('stream');
+      return this.say(chat,pending?'از بخش پخش خارج شدید؛ '+pending+' مورد ثبت‌نشده کنار گذاشته شد.':'از بخش پخش آنلاین خارج شدید.');
+    }
+    if (cmd==='help') return this.sayStream(chat,sd.type?this.streamHelp(sd.type):'ابتدا لینک صفحهٔ فیلم یا سریال در سایت را بفرستید.');
+    const itemId=itemIdFromLink(text,publicOrigin);
+    if (itemId) {
+      if ((sd.entries || []).length || (sd.removes || []).length) return this.sayStream(chat,'ابتدا موارد فعلی را «ثبت» کنید یا «خروج از بخش پخش» را بزنید، سپس اثر دیگر را انتخاب کنید.');
+      const data=await site(this.env,'item',{actorId:actor,itemId});
+      sd={phase:'collect',itemId,title:data.item.title,type:data.item.type,entries:[],removes:[],touchedAt:Date.now()};
+      await st.put('stream',sd);
+      return this.sayStream(chat,'🎬 '+data.item.title+(data.item.year?' — '+data.item.year:'')+'\n\n'+this.streamHelp(data.item.type));
+    }
+    const mainCommand=/^\//.test(text) || ['وضعیت کانال‌ها','اصلاح فصل و کیفیت','لغو پیش‌نویس','تأیید لغو','ادامه کار'].includes(text);
+    if (sd.phase!=='collect') {
+      if (msg.document || msg.video || msg.audio || mainCommand) return false;
+      return this.sayStream(chat,'لینک صفحهٔ فیلم یا سریال در همین سایت را بفرستید تا لینک‌های پخش آنلاین آن را ثبت کنیم.');
+    }
+    if (cmd==='list') {
+      const r=await site(this.env,'streamlist',{actorId:actor,itemId:sd.itemId});
+      const lines=String(r.lines || '').split('\n').filter(Boolean);
+      return this.sayStream(chat,lines.length?'لینک‌های پخش فعلی «'+sd.title+'» ('+lines.length+'):\n'+lines.map(l=>l.replace(/https?:\/\/\S+/,u=>this.streamShort(u))).join('\n').slice(0,3500):'هنوز لینک پخشی برای این اثر ثبت نشده است.');
+    }
+    if (cmd==='review') return this.sayStream(chat,this.streamReview(sd));
+    if (cmd==='save') {
+      if (!(sd.entries || []).length && !(sd.removes || []).length) return this.sayStream(chat,'چیزی برای ثبت نیست؛ اول لینک‌ها را بفرستید.');
+      const coordinator=this.env.EDITOR.get(this.env.EDITOR.idFromName('publication-coordinator'));
+      const r=await coordinator.fetch(new Request('https://editor.internal/streams',{method:'POST',body:JSON.stringify({actorId:actor,itemId:sd.itemId,entries:sd.entries,removes:sd.removes})}));
+      const result=await r.json();
+      if (!r.ok) throw new Error(result.error || 'ثبت لینک‌های پخش ناموفق بود');
+      const x=result.result || {};
+      sd.entries=[]; sd.removes=[]; await save();
+      return this.sayStream(chat,'✅ لینک‌های پخش «'+sd.title+'» ذخیره شد.\nجدید: '+(x.added || 0)+' | به‌روزشده: '+(x.updated || 0)+' | حذف‌شده: '+(x.removed || 0)+(x.created?' | قسمت تازه: '+x.created:'')+(x.skipped?' | ردشده (سقف/نامعتبر): '+x.skipped:'')+'\n'+publicOrigin+'/#/item/'+sd.itemId+'\n\nمی‌توانید لینک‌های بیشتری بفرستید یا «خروج از بخش پخش» را بزنید.');
+    }
+    if (!text || !/https?:\/\/|^(?:حذف|\/streamdel)|^#?\s*(?:نوع|کیفیت|فصل)/m.test(text)) return false;
+    const parsed=parseStreamLines(text,{type:sd.type});
+    const key=e=>[e.kind,e.season,e.episode,e.track || '',e.quality || '',e.url].join('|');
+    const have=new Set((sd.entries || []).map(key));
+    let added=0;
+    for (const e of parsed.entries) { if (have.has(key(e)) || sd.entries.length>=200) continue; have.add(key(e)); sd.entries.push(e); added++; }
+    for (const r of parsed.removes) { if (sd.removes.length<100) sd.removes.push(r); }
+    await save();
+    const parts=['📥 '+added+' لینک'+(parsed.removes.length?' و '+parsed.removes.length+' حذف':'')+' به پیش‌نویس پخش اضافه شد (جمع: '+sd.entries.length+').'];
+    if (parsed.errors.length) parts.push('⚠️ خط‌های ردشده:\n'+parsed.errors.slice(0,12).map(e=>'خط '+e.line+': '+e.error).join('\n'));
+    if (parsed.warnings.length) parts.push('ℹ️ '+parsed.warnings.slice(0,5).map(w=>'خط '+w.line+': '+w.warning).join('\n'));
+    parts.push('«پیش‌نمایش پخش» برای بررسی و «ثبت لینک‌های پخش» برای ذخیره.');
+    return this.sayStream(chat,parts.join('\n\n'));
+  }
   async save(draft) {
     draft.touchedAt=Date.now();
     await this.ctx.storage.put('draft',draft);
@@ -7134,6 +8591,14 @@ export class EditorSession {
     const buttons={'راهنما':'/help','مرحله بعد':'/next','پیش‌نمایش':'/review','انتشار پس از بررسی':'/confirm','تأیید فایل منتظر':'/accept','ردکردن فایل منتظر':'/skip','تازه‌کردن مشخصات':'/refresh'};
     text=buttons[text] || text;
     const publicOrigin = await contentSiteOrigin(this.env);
+    let sd=await this.ctx.storage.get('stream');
+    if (sd && Date.now()-(sd.touchedAt || 0)>DAY) { await this.ctx.storage.delete('stream'); sd=null; }
+    if (text==='🎬 لینک پخش آنلاین' || text==='لینک پخش آنلاین' || text==='/stream') {
+      sd={phase:'item',entries:[],removes:[],touchedAt:Date.now()};
+      await this.ctx.storage.put('stream',sd);
+      return this.sayStream(chat,'🎬 بخش لینک‌های پخش آنلاین (اختیاری)\nلینک صفحهٔ فیلم یا سریال در سایت را بفرستید. برای هر قسمت می‌توانید لینک دوبله و زیرنویس با چند کیفیت ثبت کنید.');
+    }
+    if (sd) { const handled=await this.streamProcess(msg,text,chat,actor,sd,publicOrigin); if (handled!==false) return handled; }
     const control = /^\/(channel|retry|skiprelay) (-100\d{6,20})(?: (\d+))?$/.exec(text);
     if (control) {
       const rule=contentChannelRules(this.env)[control[2]];
@@ -7433,9 +8898,14 @@ async function handleApi(request, url, store, ctx) {
   if (p === 'wallet/zarinpal/cb' && m === 'GET') return await apiZarinpalCb(store, url);
   if (p === 'wallet/redeem' && m === 'POST') return await apiRedeemCode(store, await readBody(request), request);
   if (p === 'subscribe' && m === 'POST') return await apiSubscribe(store, await readBody(request), request);
-  if (p === 'dl/request' && m === 'POST') return await apiDlRequest(store, await readBody(request), request);
+  if (p === 'dl/request' && m === 'POST') return await apiDlRequest(store, await readBody(request), request, ctx);
   mm = p.match(/^dl\/gate\/([a-f0-9]{6,32})$/);
-  if (mm && m === 'POST') return await apiDlGate(store, mm[1], request);
+  if (mm && m === 'POST') return await apiDlGate(store, mm[1], request, ctx);
+  /* پخش آنلاین و تبلیغات خودکار */
+  if (p === 'stream/open' && m === 'POST') return await apiStreamOpen(store, await readBody(request, 16 * 1024), request, ctx);
+  if (p === 'stream/src' && m === 'POST') return await apiStreamSrc(store, await readBody(request, 16 * 1024), request, ctx);
+  if (p === 'ad/click' && m === 'POST') return await apiAdTokenClick(store, await readBody(request, 8 * 1024), request, ctx);
+  if (p === 'ad/evs' && m === 'POST') return await apiAdEvents(store, await readBody(request, 32 * 1024), request, ctx);
   mm = p.match(/^ad\/([a-z0-9_]{2,32})\/click$/);
   if (mm && m === 'POST') return await apiAdClick(store, mm[1], request);
 
@@ -7454,6 +8924,7 @@ function faviconSvg() {
 
 function htmlPage(settings) {
   const html = APP_HTML
+    .replace(/@@PLAYER_V@@/g, playerAssetVersion())
     .replace(/@@MINI_APP_URL@@/g, miniAppUrl(settings))
     .replace(/@@SITE@@/g, htmlEscape(settings.siteName))
     .replace(/@@TAG@@/g, htmlEscape(settings.tagline || ''));
@@ -7522,6 +8993,14 @@ export default {
         return new Response(faviconSvg(), { headers: { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=86400' } });
       }
       if (url.pathname === '/img' && request.method === 'GET') return await imgResponse(request, url, store);
+      /* لبهٔ داخلی پخش آنلاین (وقتی Worker لبهٔ جدایی تعریف نشده) */
+      if (url.pathname.indexOf('/sv/') === 0) {
+        const sset = await getSettings(store);
+        if (!sset.streamEnabled) return new Response('streaming disabled', { status: 403 });
+        return await streamEdgeHandle(request, sset.streamSecret, { prefix: '/sv' });
+      }
+      if (url.pathname.indexOf('/r/') === 0 && request.method === 'GET') return await handleAdRedirect(request, url, store, ctx);
+      if (url.pathname.indexOf('/assets/') === 0 && request.method === 'GET') return await handleAssets(request, url);
       if (url.pathname.indexOf('/api/') === 0 && request.method === 'OPTIONS') {
         return new Response('', { status: 204, headers: { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS', 'access-control-allow-headers': 'authorization,content-type,x-telegram-bot-api-secret-token,x-k2k-secret' } });
       }
@@ -7551,6 +9030,986 @@ export default {
 };
 
 export const schedules = [{ cron: '*/30 * * * *' }];
+
+
+/* ═══════════════════════ پلیر آنلاین (VLC-like) — /assets/player.js ═══════════════════════
+   این تابع هرگز در Worker اجرا نمی‌شود؛ متن آن (toString) به‌صورت یک فایل جدا به مرورگر
+   داده می‌شود تا صفحهٔ اصلی سنگین نشود و نیازی به escape قالب APP_HTML نباشد.
+   امکانات: انتخاب نسخه (دوبله/زیرنویس) و کیفیت داخل پلیر (با تبلیغ پیش از تعویض)، زیرنویس
+   جدا با اندازه و تأخیر قابل تنظیم (G/H مثل VLC)، سرعت، نسبت تصویر، قسمت بعد، ادامهٔ پخش،
+   میانبرهای صفحه‌کلید، دوبار ضربه برای ±۱۰ ثانیه، واترمارک متحرک، بنر روی پلیر و بنر توقف.
+   ضد دانلود: بدون کنترل بومی/PiP/Cast، منوی راست‌کلیک بسته، آدرس واقعی هرگز در صفحه نیست. */
+function MVX_PLAYER_MODULE(W) {
+  'use strict';
+  if (W.MvxPlayer) return;
+  var D = W.document;
+  var FA = '۰۱۲۳۴۵۶۷۸۹';
+  function fa(s) { return String(s).replace(/[0-9]/g, function (d) { return FA.charAt(+d); }); }
+  function fmtT(t) {
+    t = Math.max(0, Math.floor(isFinite(t) ? t : 0));
+    var h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    return fa((h ? h + ':' + (m < 10 ? '0' : '') : '') + m + ':' + (s < 10 ? '0' : '') + s);
+  }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; });
+  }
+  function q(sel, root) { return (root || D).querySelector(sel); }
+  function qa(sel, root) { return Array.prototype.slice.call((root || D).querySelectorAll(sel)); }
+  function ls(k, v) {
+    try {
+      if (v === undefined) return JSON.parse(W.localStorage.getItem(k) || 'null');
+      if (v === null) W.localStorage.removeItem(k); else W.localStorage.setItem(k, JSON.stringify(v));
+    } catch (e) { }
+    return null;
+  }
+  function svg(p, extra) { return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="' + p + '"/>' + (extra || '') + '</svg>'; }
+  var I = {
+    play: svg('M8 5.14v13.72a1 1 0 0 0 1.5.86l11.2-6.86a1 1 0 0 0 0-1.72L9.5 4.28A1 1 0 0 0 8 5.14z'),
+    pause: svg('M6 4h4v16H6zM14 4h4v16h-4z'),
+    back: svg('M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z', '<text x="12" y="16.4" font-size="6.6" text-anchor="middle" font-weight="800" font-family="Arial">10</text>'),
+    fwd: svg('M12 5V1l5 5-5 5V7a6 6 0 1 0 6 6h2a8 8 0 1 1-8-8z', '<text x="12" y="16.4" font-size="6.6" text-anchor="middle" font-weight="800" font-family="Arial">10</text>'),
+    vol: svg('M3 10v4h4l5 5V5L7 10H3zm13.5 2a4.5 4.5 0 0 0-2.5-4.03v8.05A4.5 4.5 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06A9 9 0 0 0 14 3.23z'),
+    mute: svg('M3 10v4h4l5 5V5L7 10H3zm13.59 2L19 9.59l-1.41-1.42-2.42 2.42-2.41-2.42-1.42 1.42L13.76 12l-2.42 2.41 1.42 1.42 2.41-2.42 2.42 2.42L19 14.41z'),
+    cc: svg('M19 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1zm7 0h-1.5v-.5h-2v3h2V13H18v1a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1z'),
+    gear: svg('M19.14 12.94a7.07 7.07 0 0 0 .05-.94 7.07 7.07 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54c.05.24.25.42.5.42h3.84c.25 0 .45-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z'),
+    fs: svg('M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z'),
+    fsx: svg('M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z'),
+    list: svg('M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z'),
+    next: svg('M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z'),
+    close: svg('M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z'),
+  };
+  var CSS = '' +
+    '.mvp{position:fixed;inset:0;z-index:2147483000;background:#000;color:#fff;font-family:inherit;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;overflow:hidden;touch-action:manipulation}' +
+    '.mvp *{box-sizing:border-box}.mvp svg{width:22px;height:22px;fill:currentColor;display:block}' +
+    '.mvp-v{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}' +
+    '.mvp.fit-cover .mvp-v{object-fit:cover}.mvp.fit-fill .mvp-v{object-fit:fill}' +
+    '.mvp-tap{position:absolute;inset:0;z-index:2}' +
+    '.mvp-sub{position:absolute;left:5%;right:5%;bottom:9%;z-index:4;text-align:center;pointer-events:none;transition:bottom .25s;line-height:1.55;font-weight:700}' +
+    '.mvp.ui .mvp-sub{bottom:118px}' +
+    '.mvp-sub span{display:inline;padding:.12em .45em;border-radius:6px;background:rgba(0,0,0,.62);text-shadow:0 0 3px #000,0 0 6px #000;box-decoration-break:clone;-webkit-box-decoration-break:clone;white-space:pre-line}' +
+    '.mvp.sub-nobg .mvp-sub span{background:none}.mvp.sub-s .mvp-sub{font-size:15px}.mvp.sub-m .mvp-sub{font-size:20px}.mvp.sub-l .mvp-sub{font-size:27px}.mvp.sub-xl .mvp-sub{font-size:34px}' +
+    '.mvp-wm{position:absolute;z-index:5;font-size:12px;font-weight:700;color:rgba(255,255,255,.34);text-shadow:0 0 2px rgba(0,0,0,.6);pointer-events:none;transition:left 2.5s ease,top 2.5s ease;white-space:nowrap;direction:ltr}' +
+    '.mvp-grad{position:absolute;left:0;right:0;z-index:6;pointer-events:none;opacity:0;transition:opacity .25s}.mvp-grad.t{top:0;height:120px;background:linear-gradient(rgba(0,0,0,.75),transparent)}.mvp-grad.b{bottom:0;height:170px;background:linear-gradient(transparent,rgba(0,0,0,.85))}' +
+    '.mvp.ui .mvp-grad{opacity:1}' +
+    '.mvp-top,.mvp-bot{position:absolute;left:0;right:0;z-index:8;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s}' +
+    '.mvp.ui .mvp-top,.mvp.ui .mvp-bot{opacity:1;pointer-events:auto}' +
+    '.mvp-top{top:0;display:flex;align-items:center;gap:10px;padding:max(12px,env(safe-area-inset-top)) 14px 10px;transform:translateY(-8px)}.mvp.ui .mvp-top{transform:none}' +
+    '.mvp-ttl{flex:1;min-width:0;direction:rtl;text-align:right}.mvp-ttl b{display:block;font-size:15px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mvp-ttl span{font-size:12px;color:rgba(255,255,255,.72)}' +
+    '.mvp-chip{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.14);font-size:11.5px;font-weight:700;margin-inline-start:6px;direction:rtl}' +
+    '.mvp-chip.acc{background:linear-gradient(135deg,#ff5f2e,#ffb01f);color:#111}' +
+    '.mvp-btn{appearance:none;border:0;background:transparent;color:#fff;width:42px;height:42px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;flex:none;transition:background .15s,transform .1s}' +
+    '.mvp-btn:hover{background:rgba(255,255,255,.14)}.mvp-btn:active{transform:scale(.92)}.mvp-btn[hidden]{display:none}' +
+    '.mvp-bot{bottom:0;padding:0 14px max(10px,env(safe-area-inset-bottom));transform:translateY(8px)}.mvp.ui .mvp-bot{transform:none}' +
+    '.mvp-prog{position:relative;height:22px;display:flex;align-items:center;cursor:pointer;touch-action:none}' +
+    '.mvp-rail{position:relative;width:100%;height:4px;border-radius:4px;background:rgba(255,255,255,.22);transition:height .15s}.mvp-prog:hover .mvp-rail,.mvp-prog.drag .mvp-rail{height:7px}' +
+    '.mvp-buf,.mvp-fill{position:absolute;left:0;top:0;bottom:0;border-radius:4px}.mvp-buf{background:rgba(255,255,255,.35)}.mvp-fill{background:linear-gradient(90deg,#ff5f2e,#ffb01f)}' +
+    '.mvp-knob{position:absolute;top:50%;width:15px;height:15px;margin:-7.5px 0 0 -7.5px;border-radius:50%;background:#fff;box-shadow:0 0 0 4px rgba(255,122,26,.35);transform:scale(0);transition:transform .15s}.mvp-prog:hover .mvp-knob,.mvp-prog.drag .mvp-knob{transform:scale(1)}' +
+    '.mvp-tip{position:absolute;bottom:24px;padding:3px 8px;border-radius:6px;background:rgba(0,0,0,.8);font-size:12px;font-weight:700;transform:translateX(-50%);display:none;white-space:nowrap}.mvp-prog:hover .mvp-tip{display:block}' +
+    '.mvp-row{display:flex;align-items:center;gap:2px;margin-top:2px}.mvp-sp{flex:1}' +
+    '.mvp-time{font-size:13px;font-weight:700;padding:0 8px;white-space:nowrap;font-variant-numeric:tabular-nums}' +
+    '.mvp-vol{display:flex;align-items:center}.mvp-vol input{width:0;opacity:0;transition:width .2s,opacity .2s;accent-color:#ff7a1a}.mvp-vol:hover input,.mvp-vol input:focus{width:80px;opacity:1}' +
+    '@media (hover:none){.mvp-vol input{display:none}}' +
+    '.mvp-center{position:absolute;inset:0;z-index:7;display:flex;align-items:center;justify-content:center;gap:42px;pointer-events:none}' +
+    '.mvp-big{pointer-events:auto;appearance:none;border:0;width:78px;height:78px;border-radius:50%;background:rgba(255,122,26,.92);color:#111;display:none;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 10px 40px rgba(255,95,46,.45)}.mvp-big svg{width:38px;height:38px}' +
+    '.mvp.paused .mvp-big{display:flex}.mvp.loading .mvp-big{display:none}' +
+    '.mvp-spin{width:58px;height:58px;border-radius:50%;border:4px solid rgba(255,255,255,.18);border-top-color:#ffb01f;animation:mvpspin .8s linear infinite;display:none}.mvp.loading .mvp-spin{display:block}' +
+    '@keyframes mvpspin{to{transform:rotate(360deg)}}' +
+    '.mvp-fx{position:absolute;top:50%;z-index:7;transform:translateY(-50%);padding:14px 18px;border-radius:999px;background:rgba(0,0,0,.55);font-weight:800;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}.mvp-fx.l{left:12%}.mvp-fx.r{right:12%}.mvp-fx.c{left:50%;transform:translate(-50%,-50%)}.mvp-fx.on{opacity:1}' +
+    '.mvp-panel{position:absolute;z-index:12;right:12px;bottom:86px;width:min(340px,calc(100% - 24px));max-height:min(70vh,520px);overflow:auto;border-radius:16px;background:rgba(18,22,30,.94);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid rgba(255,255,255,.12);box-shadow:0 18px 50px rgba(0,0,0,.6);direction:rtl;display:none}' +
+    '.mvp-panel.on{display:block;animation:mvpin .18s ease}@keyframes mvpin{from{opacity:0;transform:translateY(8px)}}' +
+    '.mvp-ph{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.08);font-weight:800;font-size:14px;position:sticky;top:0;background:rgba(18,22,30,.98)}' +
+    '.mvp-ph button{margin-inline-start:auto}' +
+    '.mvp-sec{padding:8px 10px 10px}.mvp-sec h6{margin:4px 6px 6px;font-size:12px;color:rgba(255,255,255,.55);font-weight:700}' +
+    '.mvp-opts{display:flex;flex-wrap:wrap;gap:6px}.mvp-opt{appearance:none;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);color:#fff;border-radius:10px;padding:8px 12px;font:inherit;font-size:13px;font-weight:700;cursor:pointer}' +
+    '.mvp-opt.on{background:linear-gradient(135deg,#ff5f2e,#ffb01f);color:#111;border-color:transparent}.mvp-opt.lock{opacity:.6}.mvp-opt:disabled{opacity:.35;cursor:default}' +
+    '.mvp-eps{padding:6px 10px 12px}.mvp-ep{display:flex;align-items:center;gap:10px;width:100%;appearance:none;border:0;background:transparent;color:#fff;font:inherit;text-align:right;padding:9px 10px;border-radius:10px;cursor:pointer}' +
+    '.mvp-ep:hover{background:rgba(255,255,255,.07)}.mvp-ep.on{background:rgba(255,122,26,.2)}.mvp-ep:disabled{opacity:.35;cursor:default}.mvp-ep i{font-style:normal;width:30px;height:30px;border-radius:9px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;flex:none}' +
+    '.mvp-banner{position:absolute;z-index:9;left:50%;bottom:96px;transform:translateX(-50%);width:min(728px,92%);display:none;border-radius:10px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.5);background:#000}' +
+    '.mvp:not(.ui) .mvp-banner{bottom:18px}.mvp-banner.on{display:block;animation:mvpin .25s ease}.mvp-banner img{display:block;width:100%;height:auto;cursor:pointer}' +
+    '.mvp-adtag{position:absolute;top:6px;left:6px;padding:2px 7px;border-radius:5px;background:rgba(0,0,0,.6);font-size:10.5px;font-weight:800;pointer-events:none}' +
+    '.mvp-bx{position:absolute;top:6px;right:6px;width:26px;height:26px;border-radius:50%;border:0;background:rgba(0,0,0,.65);color:#fff;font-size:14px;cursor:pointer;display:none}.mvp-bx.on{display:block}' +
+    '.mvp-pad{position:absolute;z-index:10;left:50%;top:50%;transform:translate(-50%,-50%);width:min(360px,86%);display:none;direction:rtl;text-align:center}' +
+    '.mvp-pad.on{display:block;animation:mvpin .2s ease}.mvp-pad .im{position:relative;border-radius:14px;overflow:hidden;box-shadow:0 18px 50px rgba(0,0,0,.6)}.mvp-pad img{display:block;width:100%;cursor:pointer}' +
+    '.mvp-pad .go{margin-top:12px;appearance:none;border:0;border-radius:999px;padding:10px 22px;background:#fff;color:#111;font:inherit;font-weight:800;cursor:pointer}' +
+    '.mvp-ad{position:absolute;inset:0;z-index:20;background:#000;display:none}.mvp-ad.on{display:block}' +
+    '.mvp-ad video,.mvp-ad img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}' +
+    '.mvp-ad .bar{position:absolute;left:0;right:0;top:0;height:3px;background:rgba(255,255,255,.18)}.mvp-ad .bar i{display:block;height:100%;width:0;background:#ffb01f;transition:width .25s linear}' +
+    '.mvp-ad .tl{position:absolute;top:max(14px,env(safe-area-inset-top));left:14px;display:flex;gap:8px;align-items:center;direction:rtl}' +
+    '.mvp-ad .tag{padding:4px 10px;border-radius:7px;background:#ffb01f;color:#111;font-weight:900;font-size:12px}.mvp-ad .cd{padding:4px 10px;border-radius:7px;background:rgba(0,0,0,.6);font-weight:800;font-size:12px}' +
+    '.mvp-ad .skip{position:absolute;right:0;bottom:90px;appearance:none;border:1px solid rgba(255,255,255,.35);border-right:0;background:rgba(0,0,0,.72);color:#fff;font:inherit;font-weight:800;font-size:14px;padding:12px 20px;border-radius:10px 0 0 10px;cursor:pointer;direction:rtl}' +
+    '.mvp-ad .skip:disabled{cursor:default;color:rgba(255,255,255,.75)}' +
+    '.mvp-ad .cta{position:absolute;left:14px;bottom:max(24px,env(safe-area-inset-bottom));appearance:none;border:0;border-radius:999px;padding:11px 20px;background:linear-gradient(135deg,#ff5f2e,#ffb01f);color:#111;font:inherit;font-weight:900;cursor:pointer;direction:rtl;max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+    '.mvp-ad .snd{position:absolute;right:14px;top:max(12px,env(safe-area-inset-top));}' +
+    '.mvp-msg{position:absolute;inset:0;z-index:30;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.72);direction:rtl;text-align:center;padding:24px}.mvp-msg.on{display:flex}' +
+    '.mvp-msg .box{max-width:420px}.mvp-msg h4{font-size:17px;margin:0 0 8px;font-weight:900}.mvp-msg p{font-size:14px;color:rgba(255,255,255,.8);line-height:1.9;margin:0 0 16px}' +
+    '.mvp-msg .acts{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}.mvp-msg button{appearance:none;border:0;border-radius:999px;padding:11px 20px;font:inherit;font-weight:800;cursor:pointer;background:rgba(255,255,255,.14);color:#fff}.mvp-msg button.pri{background:linear-gradient(135deg,#ff5f2e,#ffb01f);color:#111}' +
+    '.mvp-toast{position:absolute;z-index:25;left:50%;top:70px;transform:translateX(-50%);padding:9px 16px;border-radius:999px;background:rgba(0,0,0,.75);font-size:13px;font-weight:700;opacity:0;transition:opacity .2s;pointer-events:none;direction:rtl;white-space:nowrap}.mvp-toast.on{opacity:1}' +
+    '.mvp-resume{position:absolute;z-index:11;left:50%;bottom:110px;transform:translateX(-50%);display:none;gap:8px;align-items:center;padding:8px 8px 8px 14px;border-radius:999px;background:rgba(18,22,30,.92);border:1px solid rgba(255,255,255,.14);direction:rtl;font-size:13px;font-weight:700;white-space:nowrap}' +
+    '.mvp-resume.on{display:flex}.mvp-resume button{appearance:none;border:0;border-radius:999px;padding:7px 14px;font:inherit;font-weight:800;cursor:pointer;background:rgba(255,255,255,.12);color:#fff}.mvp-resume button.pri{background:#ffb01f;color:#111}' +
+    '@media (max-width:600px){.mvp-hm{display:none!important}.mvp-btn{width:38px;height:38px}.mvp-time{font-size:12px;padding:0 4px}.mvp.ui .mvp-sub{bottom:104px}}';
+
+  var P = null;
+  function injectCss() {
+    if (q('#mvp-css')) return;
+    var st = D.createElement('style');
+    st.id = 'mvp-css';
+    st.textContent = CSS;
+    (D.head || D.documentElement).appendChild(st);
+  }
+  function api(path, body, timeout) {
+    return P.host.api(path, { method: 'POST', body: body, timeout: timeout || 20000 });
+  }
+  function seenMap() {
+    var day = new Date(Date.now() + 12600000).toISOString().slice(0, 10);
+    var s = ls('mvx_adseen');
+    if (!s || s.d !== day) s = { d: day, m: {} };
+    return s;
+  }
+  function seenBump(at) {
+    var cid = '';
+    try {
+      var p = String(at || '').split('.')[0].replace(/-/g, '+').replace(/_/g, '/');
+      while (p.length % 4) p += '=';
+      cid = JSON.parse(decodeURIComponent(escape(atob(p)))).c || '';
+    } catch (e) { cid = ''; }
+    if (!/^c_/.test(cid)) return;
+    var s = seenMap();
+    s.m[cid] = (s.m[cid] || 0) + 1;
+    ls('mvx_adseen', s);
+  }
+  function posKey() { return 'mvx_pos:' + P.opts.itemId + ':' + (P.opts.epId || ''); }
+  function savePos(force) {
+    if (!P || !P.video || P.adActive) return;
+    var v = P.video, d = v.duration;
+    if (!isFinite(d) || d < 60 || !v.currentTime) return;
+    if (!force && Date.now() - (P.lastSave || 0) < 8000) return;
+    P.lastSave = Date.now();
+    if (v.currentTime > d * 0.95 || d - v.currentTime < 30) ls(posKey(), null);
+    else ls(posKey(), { t: Math.floor(v.currentTime), d: Math.floor(d), at: Date.now() });
+  }
+  function toast(msg) {
+    var t = q('.mvp-toast', P.root);
+    t.textContent = msg;
+    t.classList.add('on');
+    clearTimeout(P.toastT);
+    P.toastT = setTimeout(function () { t.classList.remove('on'); }, 1600);
+  }
+  function fx(side, text) {
+    var f = q('.mvp-fx', P.root);
+    f.className = 'mvp-fx ' + side + ' on';
+    f.textContent = text;
+    clearTimeout(P.fxT);
+    P.fxT = setTimeout(function () { f.classList.remove('on'); }, 650);
+  }
+  function setLoading(on) { if (P) P.root.classList.toggle('loading', !!on); }
+  function showUi(keep) {
+    if (!P) return;
+    P.root.classList.add('ui');
+    clearTimeout(P.uiT);
+    if (!keep) P.uiT = setTimeout(function () {
+      if (P && !P.video.paused && !P.panel && !P.drag) P.root.classList.remove('ui');
+    }, 3200);
+  }
+
+  function build() {
+    var r = D.createElement('div');
+    r.className = 'mvp ui loading paused sub-' + (ls('mvx_subsize') || 'm') + (ls('mvx_subbg') === false ? ' sub-nobg' : '');
+    r.setAttribute('dir', 'ltr');
+    r.setAttribute('role', 'dialog');
+    r.innerHTML =
+      '<video class="mvp-v" playsinline webkit-playsinline preload="auto" disablepictureinpicture disableremoteplayback x-webkit-airplay="deny" controlslist="nodownload noplaybackrate noremoteplayback"></video>' +
+      '<div class="mvp-sub" dir="auto"></div><div class="mvp-wm"></div><div class="mvp-tap"></div>' +
+      '<div class="mvp-grad t"></div><div class="mvp-grad b"></div>' +
+      '<div class="mvp-center"><div class="mvp-spin"></div><button type="button" class="mvp-big" aria-label="پخش">' + I.play + '</button></div>' +
+      '<div class="mvp-fx"></div><div class="mvp-toast"></div>' +
+      '<div class="mvp-top"><button type="button" class="mvp-btn" data-a="close" title="بستن (Esc)">' + I.close + '</button>' +
+        '<div class="mvp-ttl"><b class="t1"></b><span class="t2"></span></div></div>' +
+      '<div class="mvp-bot"><div class="mvp-prog"><div class="mvp-rail"><div class="mvp-buf"></div><div class="mvp-fill"></div><div class="mvp-knob"></div></div><div class="mvp-tip"></div></div>' +
+        '<div class="mvp-row">' +
+          '<button type="button" class="mvp-btn" data-a="play" title="پخش/توقف (Space)">' + I.play + '</button>' +
+          '<button type="button" class="mvp-btn" data-a="back" title="۱۰ ثانیه عقب (J)">' + I.back + '</button>' +
+          '<button type="button" class="mvp-btn" data-a="fwd" title="۱۰ ثانیه جلو (L)">' + I.fwd + '</button>' +
+          '<div class="mvp-vol"><button type="button" class="mvp-btn" data-a="mute" title="بی‌صدا (M)">' + I.vol + '</button><input type="range" min="0" max="1" step="0.05" aria-label="صدا"></div>' +
+          '<span class="mvp-time">۰:۰۰ / ۰:۰۰</span><span class="mvp-sp"></span>' +
+          '<button type="button" class="mvp-btn" data-a="next" title="قسمت بعد (N)" hidden>' + I.next + '</button>' +
+          '<button type="button" class="mvp-btn" data-a="eps" title="قسمت‌ها" hidden>' + I.list + '</button>' +
+          '<button type="button" class="mvp-btn" data-a="cc" title="زیرنویس (C)" hidden>' + I.cc + '</button>' +
+          '<button type="button" class="mvp-btn" data-a="set" title="کیفیت، نسخه و تنظیمات">' + I.gear + '</button>' +
+          '<button type="button" class="mvp-btn" data-a="fs" title="تمام‌صفحه (F)">' + I.fs + '</button>' +
+        '</div></div>' +
+      '<div class="mvp-panel" data-p="set"></div><div class="mvp-panel" data-p="eps"></div>' +
+      '<div class="mvp-banner"><span class="mvp-adtag">تبلیغ</span><button type="button" class="mvp-bx" aria-label="بستن تبلیغ">✕</button><img alt="تبلیغ"></div>' +
+      '<div class="mvp-pad"><div class="im"><span class="mvp-adtag">تبلیغ</span><img alt="تبلیغ"></div><button type="button" class="go">▶ ادامهٔ پخش</button></div>' +
+      '<div class="mvp-resume"><span class="tx"></span><button type="button" class="pri" data-r="yes">ادامه</button><button type="button" data-r="no">از اول</button></div>' +
+      '<div class="mvp-ad"></div><div class="mvp-msg"><div class="box"></div></div>';
+    D.body.appendChild(r);
+    P.root = r;
+    P.video = q('.mvp-v', r);
+    var v = P.video;
+    try { v.disablePictureInPicture = true; v.disableRemotePlayback = true; } catch (e) { }
+    var vol = ls('mvx_vol');
+    if (vol && typeof vol.v === 'number') { v.volume = Math.max(0, Math.min(1, vol.v)); v.muted = !!vol.m; }
+    q('.mvp-vol input', r).value = v.muted ? 0 : v.volume;
+    bindUi();
+  }
+
+  function title() {
+    var info = P.info || {};
+    var it = info.item || {};
+    var t1 = String(it.title || P.opts.title || '').split(' | ')[0];
+    var t2 = '';
+    if (info.ep && info.ep.cur) t2 = 'فصل ' + fa(info.ep.cur.season) + ' · قسمت ' + fa(info.ep.cur.n) + (info.ep.cur.title && !/^قسمت/.test(info.ep.cur.title) ? ' — ' + info.ep.cur.title : '');
+    var cur = info.cur || P.cur || {};
+    var chips = (cur.track ? '<span class="mvp-chip">' + (cur.track === 'dub' ? '🎙 دوبله' : '💬 زیرنویس') + '</span>' : '') +
+      (cur.quality ? '<span class="mvp-chip acc">' + esc(qLabel(cur.quality)) + '</span>' : '');
+    q('.t1', P.root).textContent = t1;
+    q('.t2', P.root).innerHTML = esc(t2) + chips;
+    var ep = info.ep;
+    q('[data-a="next"]', P.root).hidden = !(ep && ep.next);
+    q('[data-a="eps"]', P.root).hidden = !(ep && ep.list && ep.list.length);
+    q('[data-a="cc"]', P.root).hidden = !(info.subs && info.subs.length);
+  }
+  function qLabel(qk) { return ({ '480': '480p', '720': '720p', '1080': '1080p', '4k': '4K' })[qk] || String(qk || ''); }
+
+  /* ── شروع/تعویض/تمدید پخش (همهٔ منطق دسترسی و تبلیغ در سرور است) ── */
+  function requestOpen(reason, extra) {
+    if (!P) return null;
+    var keepAt = (reason === 'switch' || reason === 'renew' || reason === 'mid') && P.video ? P.video.currentTime : 0;
+    if (keepAt) P.pendingSeek = keepAt;
+    if (reason !== 'mid') setLoading(true);
+    var body = { itemId: P.opts.itemId, epId: P.opts.epId || '', track: P.cur.track || '', quality: P.cur.quality || '', streamId: P.cur.streamId || '', sid: P.sid || '', reason: reason, lastAdAt: P.lastAdAt || 0, seen: seenMap().m };
+    if (extra) for (var k in extra) body[k] = extra[k];
+    var mine = P;
+    return api('/stream/open', body).then(function (r) {
+      if (P !== mine || P.closed) return;
+      if (r.sid) P.sid = r.sid;
+      if (r.noAd) { P.pendingSeek = 0; return; }
+      if (r.needAd && r.ad) {
+        P.meta = r;
+        P.info = Object.assign({}, P.info || {}, { item: r.item || (P.info && P.info.item), ep: r.ep, cur: r.cur, options: r.options });
+        title();
+        return runAd(r.ad, function (res) {
+          if (P !== mine || !P || P.closed) return;
+          setLoading(true);
+          return api('/stream/src', { gate: r.gate, ad: res, seen: seenMap().m }).then(function (r2) { if (P === mine && !P.closed) load(r2, reason); });
+        });
+      }
+      load(r, reason);
+    }).catch(function (e) { if (P === mine) handleErr(e, reason); });
+  }
+  function handleErr(e, reason) {
+    if (!P) return;
+    setLoading(false);
+    var d = (e && e.data) || {};
+    if (d.needSub) return message('ویژهٔ مشترکین', e.message || 'این بخش فقط برای مشترکین قابل پخش است.', [['خرید اشتراک', function () { var h = P.host; close(); if (h.onNeedSub) h.onNeedSub(); }, 1], ['بستن', close]]);
+    if (d.needLogin || e.status === 401) return message('ورود لازم است', e.message || 'برای پخش آنلاین ابتدا وارد شوید.', [['ورود', function () { var h = P.host; close(); if (h.onNeedLogin) h.onNeedLogin(); }, 1], ['بستن', close]]);
+    if (d.remain) { setTimeout(function () { requestOpen(reason); }, (d.remain + 0.5) * 1000); return; }
+    message('پخش ممکن نشد', (e && e.message) || 'خطای ناشناخته', [['تلاش دوباره', function () { hideMsg(); requestOpen(P.info ? 'renew' : 'start'); }, 1], ['بستن', close]]);
+  }
+  function load(info, reason) {
+    if (!P) return;
+    P.info = info;
+    P.cur = { track: info.cur.track, quality: info.cur.quality, streamId: info.cur.streamId };
+    P.adCfg = info.noAds ? null : info.adCfg;
+    P.banners = info.banners || [];
+    if (P.nextBannerAt == null && P.adCfg) P.nextBannerAt = P.adCfg.bannerFirst;
+    if (P.nextMidAt == null && P.adCfg && P.adCfg.midroll) P.nextMidAt = P.adCfg.midroll * 60;
+    title();
+    renderPanel();
+    q('.mvp-wm', P.root).textContent = info.wm || '';
+    setupSubs(info);
+    setSource(info.src, info.fmt, reason === 'start' || reason === 'next');
+  }
+  function destroyHls() { if (P && P.hls) { try { P.hls.destroy(); } catch (e) { } P.hls = null; } }
+  var HLS_WAIT = null;
+  function loadHls(cb) {
+    if (W.Hls) return cb(W.Hls);
+    if (!HLS_WAIT) {
+      HLS_WAIT = [];
+      var s = D.createElement('script');
+      s.src = '/assets/hls.js';
+      s.async = true;
+      s.onload = function () { var l = HLS_WAIT; HLS_WAIT = null; l.forEach(function (f) { f(W.Hls || null); }); };
+      s.onerror = function () { var l = HLS_WAIT; HLS_WAIT = null; l.forEach(function (f) { f(null); }); };
+      (D.head || D.body).appendChild(s);
+    }
+    HLS_WAIT.push(cb);
+  }
+  function setSource(src, fmt, fresh) {
+    var v = P.video;
+    destroyHls();
+    hidePause();
+    var seekTo = P.pendingSeek || 0;
+    P.pendingSeek = 0;
+    var resume = 0;
+    if (fresh && !seekTo) { var sp = ls(posKey()); if (sp && sp.t > 20) resume = sp.t; }
+    var started = false;
+    function go() {
+      if (started || !P) return;
+      started = true;
+      if (seekTo) { try { v.currentTime = seekTo; } catch (e) { } }
+      var pr = v.play();
+      if (pr && pr.catch) pr.catch(function () { if (P) { setLoading(false); P.root.classList.add('paused'); showUi(true); } });
+      if (resume) offerResume(resume);
+    }
+    if (fmt === 'hls' && !v.canPlayType('application/vnd.apple.mpegurl')) {
+      loadHls(function (Hls) {
+        if (!P) return;
+        if (!Hls || !Hls.isSupported()) return message('پخش ممکن نیست', 'مرورگر شما از این نوع پخش (HLS) پشتیبانی نمی‌کند یا کتابخانهٔ پخش بارگذاری نشد. کیفیت دیگری را امتحان کنید.', [['بستن', close, 1]]);
+        var h = new Hls({ maxBufferLength: 30, backBufferLength: 20, enableWorker: true });
+        P.hls = h;
+        h.on(Hls.Events.ERROR, function (ev, d) {
+          if (!d || !d.fatal) return;
+          if (d.type === Hls.ErrorTypes.MEDIA_ERROR) { try { h.recoverMediaError(); return; } catch (e) { } }
+          onVideoError();
+        });
+        h.on(Hls.Events.MANIFEST_PARSED, go);
+        h.loadSource(src);
+        h.attachMedia(v);
+      });
+      return;
+    }
+    v.removeAttribute('src');
+    v.src = src;
+    var onMeta = function () { v.removeEventListener('loadedmetadata', onMeta); go(); };
+    v.addEventListener('loadedmetadata', onMeta);
+    try { v.load(); } catch (e) { }
+  }
+  function offerResume(t) {
+    var box = q('.mvp-resume', P.root);
+    q('.tx', box).textContent = 'ادامه از ' + fmtT(t) + '؟';
+    box.classList.add('on');
+    var done = function (yes) {
+      box.classList.remove('on');
+      clearTimeout(P.resT);
+      if (yes && P && P.video) { try { P.video.currentTime = t; } catch (e) { } }
+    };
+    q('[data-r="yes"]', box).onclick = function () { done(true); };
+    q('[data-r="no"]', box).onclick = function () { done(false); };
+    P.resT = setTimeout(function () { done(true); }, 7000);
+  }
+  function onVideoError() {
+    if (!P || P.closed || P.adActive || !P.info) return;
+    var err = P.video.error;
+    var code = err ? err.code : 0;
+    var fmt = P.info.fmt;
+    if (P.errCount >= 1 && code === 4 && (fmt === 'mkv' || fmt === 'auto')) {
+      return message('این فایل در مرورگر شما پخش نمی‌شود', 'فرمت یا کدک این نسخه با مرورگر شما سازگار نیست. کیفیت یا نسخهٔ دیگری را از ⚙ انتخاب کنید یا فایل را دانلود کنید.', [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }, 1], ['بستن', close]]);
+    }
+    if (P.errCount >= 2) {
+      return message('پخش متوقف شد', 'اتصال به سرور پخش قطع شد. اینترنت/فیلترشکن را بررسی کنید و دوباره تلاش کنید.', [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; requestOpen('renew'); }, 1], ['بستن', close]]);
+    }
+    P.errCount = (P.errCount || 0) + 1;
+    requestOpen('renew', P.errCount === 2 ? { avoidEdge: P.info.edge || '' } : null);
+  }
+
+  /* ── تبلیغ ویدئویی/تصویری داخل پلیر (قبل از شروع و قبل از هر تعویض) ── */
+  function runAd(ad, then) {
+    P.adActive = true;
+    try { P.video.pause(); } catch (e) { }
+    hidePause();
+    setLoading(false);
+    closePanels();
+    var box = q('.mvp-ad', P.root);
+    var total = Math.max(3, Math.min(120, Number(ad.sec) || 15));
+    var skipAt = Number(ad.skipAfter) || 0;
+    var isVid = ad.kind === 'video';
+    box.innerHTML = '<div class="bar"><i></i></div>' +
+      (isVid ? '<video playsinline webkit-playsinline preload="auto" disablepictureinpicture controlslist="nodownload"' + (ad.posterUrl ? ' poster="' + esc(ad.posterUrl) + '"' : '') + '></video>' : '<img alt="تبلیغ">') +
+      '<div class="tl"><span class="tag">تبلیغ</span><span class="cd"></span></div>' +
+      (isVid ? '<button type="button" class="mvp-btn snd" aria-label="صدا">' + I.vol + '</button>' : '') +
+      (ad.clickable ? '<button type="button" class="cta">' + esc(ad.cta || 'مشاهده') + ' ↗</button>' : '') +
+      '<button type="button" class="skip" disabled></button>';
+    box.classList.add('on');
+    seenBump(ad.at);
+    var media = q(isVid ? 'video' : 'img', box);
+    var cd = q('.cd', box), bar = q('.bar i', box), skip = q('.skip', box);
+    var watched = 0, real = 0, last = Date.now(), finished = false, failed = false;
+    var t0 = Date.now();
+    function finish(skipped) {
+      if (finished) return;
+      finished = true;
+      clearInterval(tick);
+      try { if (isVid) media.pause(); } catch (e) { }
+      box.classList.remove('on');
+      box.innerHTML = '';
+      P.adActive = false;
+      P.lastAdAt = Date.now();
+      var res = { at: ad.at, t: Math.round((isVid ? real : watched) * 10) / 10, done: !skipped && !failed, skip: !!skipped };
+      Promise.resolve(then(res)).catch(function (e) { handleErr(e, 'switch'); });
+    }
+    function paint() {
+      var left = Math.max(0, Math.ceil(total - watched));
+      cd.textContent = fa(left) + ' ثانیه';
+      bar.style.width = Math.min(100, (watched / total) * 100) + '%';
+      if (skipAt > 0) {
+        if (watched >= skipAt) { skip.disabled = false; skip.textContent = 'رد کردن تبلیغ ⏭'; }
+        else skip.textContent = 'رد کردن در ' + fa(Math.ceil(skipAt - watched));
+      } else if (watched >= total) { skip.disabled = false; skip.textContent = 'ادامهٔ پخش ▶'; }
+      else skip.textContent = 'پخش پس از تبلیغ';
+    }
+    var tick = setInterval(function () {
+      var now = Date.now();
+      var dt = (now - last) / 1000;
+      last = now;
+      var playing = isVid && !failed && media && !media.paused && !media.ended && media.readyState >= 2;
+      if (playing) real += dt;
+      if (!isVid || failed || playing) watched += dt;
+      if (isVid && !failed && media.ended) { real = Math.max(real, Math.min(total, media.duration || total)); watched = Math.max(watched, total); }
+      paint();
+      if (watched >= total) finish(false);
+      if (now - t0 > (total + 25) * 1000) finish(false); // محافظ: اتصال کند، تبلیغ گیر نکند
+    }, 250);
+    skip.onclick = function () { if (!skip.disabled) finish(watched < total); };
+    if (ad.clickable) q('.cta', box).onclick = function (e) {
+      e.stopPropagation();
+      try { media.pause && media.pause(); } catch (x) { }
+      api('/ad/click', { at: ad.at }, 8000).then(function (r) { if (r && r.url) P.host.openExt(r.url); }).catch(function () { });
+    };
+    if (isVid) {
+      var snd = q('.snd', box);
+      var setSnd = function () { snd.innerHTML = media.muted ? I.mute : I.vol; };
+      snd.onclick = function () { media.muted = !media.muted; setSnd(); if (media.paused) media.play().catch(function () { }); };
+      media.addEventListener('error', function () { failed = true; });
+      media.muted = !!ad.muted;
+      media.src = ad.mediaUrl;
+      var pr = media.play();
+      if (pr && pr.catch) pr.catch(function () { media.muted = true; setSnd(); media.play().catch(function () { failed = true; }); });
+      setSnd();
+    } else {
+      media.onerror = function () { failed = true; };
+      media.src = ad.mediaUrl;
+    }
+    paint();
+  }
+
+  /* ── زیرنویس جدا (VTT/SRT از لبهٔ امن) ── */
+  function parseVtt(text) {
+    var lines = String(text || '').replace(/\r/g, '').split('\n');
+    var cues = [];
+    function ts(t) {
+      var m = /^(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})$/.exec(String(t || '').trim());
+      if (!m) return NaN;
+      return (+(m[1] || 0)) * 3600 + (+m[2]) * 60 + (+m[3]) + (+m[4]) / Math.pow(10, m[4].length);
+    }
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf('-->') < 0) continue;
+      var parts = lines[i].split('-->');
+      var s = ts(parts[0]), e = ts(String(parts[1] || '').trim().split(/\s+/)[0]);
+      var txt = [];
+      i++;
+      while (i < lines.length && lines[i].trim() !== '') { txt.push(lines[i]); i++; }
+      if (isFinite(s) && isFinite(e) && txt.length) cues.push({ s: s, e: e, t: txt.join('\n').replace(/<[^>]+>/g, '').replace(/\{\\[^}]*\}/g, '') });
+    }
+    cues.sort(function (a, b) { return a.s - b.s; });
+    return cues;
+  }
+  function setupSubs(info) {
+    P.subs = info.subs || [];
+    var want = P.subPref !== undefined ? P.subPref : info.subDefault;
+    if (want && !P.subs.some(function (s) { return s.id === want; })) want = P.subs.length && P.subPref ? P.subs[0].id : '';
+    selectSub(want || '', true);
+  }
+  function selectSub(id, silent) {
+    P.subOn = id;
+    P.cues = [];
+    P.cueIdx = 0;
+    renderSub(true);
+    q('[data-a="cc"]', P.root).classList.toggle('on', !!id);
+    if (!id) { if (!silent) toast('زیرنویس خاموش'); return; }
+    var sub = P.subs.filter(function (s) { return s.id === id; })[0];
+    if (!sub) return;
+    P.subCache = P.subCache || {};
+    var url = sub.src;
+    if (P.subCache[sub.id]) { P.cues = P.subCache[sub.id]; return; }
+    fetch(url, { credentials: 'omit' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); }).then(function (t) {
+      if (!P || P.subOn !== id) return;
+      P.cues = P.subCache[sub.id] = parseVtt(t);
+      if (!silent) toast('زیرنویس: ' + sub.label);
+    }).catch(function () { if (P) toast('زیرنویس بارگذاری نشد'); });
+  }
+  function renderSub(force) {
+    var box = q('.mvp-sub', P.root);
+    if (!P.subOn || !P.cues.length) { if (force || box.innerHTML) box.innerHTML = ''; return; }
+    var t = P.video.currentTime + (P.subOffset || 0);
+    var cues = P.cues, i = P.cueIdx || 0;
+    if (i >= cues.length || (cues[i] && cues[i].s > t)) i = 0;
+    var hit = null;
+    for (var k = i; k < cues.length && cues[k].s <= t + 0.01; k++) { if (cues[k].e >= t) { hit = cues[k]; P.cueIdx = k; break; } }
+    var html = hit ? '<span>' + esc(hit.t) + '</span>' : '';
+    if (box.innerHTML !== html) box.innerHTML = html;
+  }
+
+  /* ── تنظیمات: نسخه، کیفیت، زیرنویس، سرعت، نسبت تصویر ── */
+  function renderPanel() {
+    var info = P.info || {};
+    var opts = info.options || { sub: [], dub: [] };
+    var cur = P.cur || {};
+    var tracks = [];
+    if ((opts.dub || []).length) tracks.push(['dub', '🎙 دوبله فارسی']);
+    if ((opts.sub || []).length) tracks.push(['sub', '💬 زیرنویس فارسی']);
+    var qs = opts[cur.track] || [];
+    var speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
+    var fits = [['contain', 'اصلی'], ['cover', 'پرکردن'], ['fill', 'کشیده']];
+    var sizes = [['s', 'کوچک'], ['m', 'متوسط'], ['l', 'بزرگ'], ['xl', 'خیلی بزرگ']];
+    var html = '<div class="mvp-ph">⚙ تنظیمات پخش<button type="button" class="mvp-btn" data-x="1">' + I.close + '</button></div>';
+    if (tracks.length) html += '<div class="mvp-sec"><h6>نسخه (صدا)</h6><div class="mvp-opts">' + tracks.map(function (t) {
+      return '<button type="button" class="mvp-opt' + (t[0] === cur.track ? ' on' : '') + '" data-track="' + t[0] + '">' + t[1] + '</button>';
+    }).join('') + '</div></div>';
+    if (qs.length) html += '<div class="mvp-sec"><h6>کیفیت</h6><div class="mvp-opts">' + qs.map(function (o) {
+      return '<button type="button" class="mvp-opt' + (o.id === cur.streamId ? ' on' : '') + (o.locked ? ' lock' : '') + '" data-sid="' + esc(o.id) + '" data-q="' + esc(o.q) + '">' + esc(o.label) + (o.locked ? ' ⭐' : '') + '</button>';
+    }).join('') + '</div></div>';
+    if ((P.subs || []).length) {
+      html += '<div class="mvp-sec"><h6>زیرنویس</h6><div class="mvp-opts"><button type="button" class="mvp-opt' + (!P.subOn ? ' on' : '') + '" data-sub="">خاموش</button>' +
+        P.subs.map(function (s) { return '<button type="button" class="mvp-opt' + (s.id === P.subOn ? ' on' : '') + '" data-sub="' + esc(s.id) + '">' + esc(s.label) + '</button>'; }).join('') + '</div>' +
+        '<h6 style="margin-top:10px">اندازهٔ زیرنویس</h6><div class="mvp-opts">' + sizes.map(function (z) {
+          return '<button type="button" class="mvp-opt' + (P.root.classList.contains('sub-' + z[0]) ? ' on' : '') + '" data-size="' + z[0] + '">' + z[1] + '</button>';
+        }).join('') + '<button type="button" class="mvp-opt' + (!P.root.classList.contains('sub-nobg') ? ' on' : '') + '" data-subbg="1">پس‌زمینه</button></div>' +
+        '<h6 style="margin-top:10px">هم‌زمانی زیرنویس (G / H)</h6><div class="mvp-opts"><button type="button" class="mvp-opt" data-off="-0.5">−۰٫۵ ثانیه</button><button type="button" class="mvp-opt" data-off="0">' + (P.subOffset ? fa((P.subOffset > 0 ? '+' : '') + P.subOffset.toFixed(1)) + ' (صفر)' : 'بدون تأخیر') + '</button><button type="button" class="mvp-opt" data-off="0.5">+۰٫۵ ثانیه</button></div></div>';
+    }
+    html += '<div class="mvp-sec"><h6>سرعت پخش</h6><div class="mvp-opts">' + speeds.map(function (s) {
+      return '<button type="button" class="mvp-opt' + (P.video.playbackRate === s ? ' on' : '') + '" data-speed="' + s + '">' + (s === 1 ? 'عادی' : fa(String(s)) + '×') + '</button>';
+    }).join('') + '</div></div>';
+    html += '<div class="mvp-sec"><h6>نسبت تصویر</h6><div class="mvp-opts">' + fits.map(function (f) {
+      return '<button type="button" class="mvp-opt' + ((P.fit || 'contain') === f[0] ? ' on' : '') + '" data-fit="' + f[0] + '">' + f[1] + '</button>';
+    }).join('') + '</div></div>';
+    var panel = q('[data-p="set"]', P.root);
+    panel.innerHTML = html;
+    renderEps();
+  }
+  function renderEps() {
+    var info = P.info || {};
+    var panel = q('[data-p="eps"]', P.root);
+    if (!info.ep || !info.ep.list) { panel.innerHTML = ''; return; }
+    var cur = info.ep.cur || {};
+    panel.innerHTML = '<div class="mvp-ph">☰ قسمت‌ها<button type="button" class="mvp-btn" data-x="1">' + I.close + '</button></div>' +
+      info.ep.list.map(function (s) {
+        return '<div class="mvp-sec"><h6>' + esc(s.title) + '</h6><div class="mvp-eps" style="padding:0">' + s.eps.map(function (e) {
+          return '<button type="button" class="mvp-ep' + (e.id === cur.id ? ' on' : '') + '" data-ep="' + esc(e.id) + '"' + (e.has ? '' : ' disabled') + '><i>' + fa(e.n) + '</i><span>' + esc(e.title) + (e.has ? '' : ' (بدون پخش آنلاین)') + '</span></button>';
+        }).join('') + '</div></div>';
+      }).join('');
+  }
+  function openPanel(name) {
+    closePanels();
+    var p = q('[data-p="' + name + '"]', P.root);
+    if (!p || !p.innerHTML) return;
+    p.classList.add('on');
+    P.panel = name;
+    showUi(true);
+  }
+  function closePanels() {
+    if (!P) return;
+    qa('.mvp-panel', P.root).forEach(function (p) { p.classList.remove('on'); });
+    P.panel = '';
+  }
+  function switchTo(cur) {
+    closePanels();
+    P.cur = cur;
+    toast('در حال تعویض…');
+    requestOpen('switch');
+  }
+  function gotoEp(epId) {
+    if (!epId || (P.info && P.info.ep && P.info.ep.cur && P.info.ep.cur.id === epId)) return;
+    savePos(true);
+    closePanels();
+    P.opts.epId = epId;
+    P.cur = { track: P.cur.track, quality: P.cur.quality, streamId: '' };
+    P.subCache = {};
+    hideNextUp();
+    requestOpen('next');
+  }
+
+  /* ── بنر روی پلیر و بنر توقف ── */
+  function queueImp(b) {
+    P.evq.push({ at: b.at, ev: 'imp' });
+    seenBump(b.at);
+    if (P.evq.length >= 3) flushEvq();
+  }
+  function flushEvq() {
+    if (!P || !P.evq.length) return;
+    var body = JSON.stringify({ evs: P.evq.splice(0, 30) });
+    try { if (W.navigator.sendBeacon && W.navigator.sendBeacon('/api/ad/evs', new Blob([body], { type: 'text/plain' }))) return; } catch (e) { }
+    try { W.fetch('/api/ad/evs', { method: 'POST', body: body, keepalive: true, headers: { 'content-type': 'text/plain' } }); } catch (e) { }
+  }
+  function adClick(b) {
+    api('/ad/click', { at: b.at }, 8000).then(function (r) { if (r && r.url) P.host.openExt(r.url); }).catch(function () { });
+  }
+  function showBanner(b) {
+    var box = q('.mvp-banner', P.root), img = q('img', box), x = q('.mvp-bx', box);
+    img.onload = function () {
+      if (!P || P.adActive) return;
+      box.classList.add('on');
+      queueImp(b);
+      clearTimeout(P.bxT);
+      P.bxT = setTimeout(function () { x.classList.add('on'); }, 3000);
+      clearTimeout(P.bhT);
+      P.bhT = setTimeout(hideBanner, (P.adCfg ? P.adCfg.bannerSec : 15) * 1000);
+    };
+    img.onerror = function () { hideBanner(); };
+    img.onclick = function () { adClick(b); };
+    x.onclick = function (e) { e.stopPropagation(); hideBanner(); };
+    x.classList.remove('on');
+    img.src = b.mediaUrl;
+  }
+  function hideBanner() {
+    if (!P) return;
+    var box = q('.mvp-banner', P.root);
+    box.classList.remove('on');
+    q('.mvp-bx', box).classList.remove('on');
+  }
+  function showPause() {
+    if (!P || !P.adCfg || !P.adCfg.pause || P.adActive || P.video.ended || P.seeking) return;
+    var b = (P.banners || []).filter(function (x) { return x.slot === 'pause'; })[0];
+    if (!b) return;
+    var box = q('.mvp-pad', P.root), img = q('img', box);
+    img.onload = function () {
+      if (!P || !P.video.paused || P.adActive) return;
+      box.classList.add('on');
+      if (Date.now() - (P.padImpAt || 0) > 120000) { P.padImpAt = Date.now(); queueImp(b); }
+    };
+    img.onclick = function () { adClick(b); };
+    q('.go', box).onclick = function () { hidePause(); P.video.play().catch(function () { }); };
+    if (img.getAttribute('src') !== b.mediaUrl) img.src = b.mediaUrl; else if (img.complete) img.onload();
+  }
+  function hidePause() { if (P) q('.mvp-pad', P.root).classList.remove('on'); }
+
+  /* ── قسمت بعد ── */
+  function nextUp() {
+    var ep = P.info && P.info.ep;
+    if (!ep || !ep.next) return;
+    var n = 8;
+    message('قسمت بعد', esc(ep.next.title || ('قسمت ' + fa(ep.next.n))) + ' — پخش خودکار تا <b class="nx">' + fa(n) + '</b> ثانیهٔ دیگر', [['پخش قسمت بعد ▶', function () { hideNextUp(); gotoEp(ep.next.id); }, 1], ['لغو', function () { hideNextUp(); }]], true);
+    P.nxT = setInterval(function () {
+      n -= 1;
+      var b = q('.mvp-msg .nx', P.root);
+      if (b) b.textContent = fa(Math.max(0, n));
+      if (n <= 0) { hideNextUp(); gotoEp(ep.next.id); }
+    }, 1000);
+  }
+  function hideNextUp() { if (P) { clearInterval(P.nxT); P.nxT = 0; hideMsg(); } }
+
+  function message(t, body, acts, rawHtml) {
+    var m = q('.mvp-msg', P.root);
+    var box = q('.box', m);
+    box.innerHTML = '<h4>' + esc(t) + '</h4><p>' + (rawHtml ? body : esc(body)) + '</p><div class="acts"></div>';
+    var a = q('.acts', box);
+    (acts || []).forEach(function (x) {
+      var b = D.createElement('button');
+      b.type = 'button';
+      b.textContent = x[0];
+      if (x[2]) b.className = 'pri';
+      b.onclick = x[1];
+      a.appendChild(b);
+    });
+    m.classList.add('on');
+    setLoading(false);
+  }
+  function hideMsg() { if (P) q('.mvp-msg', P.root).classList.remove('on'); }
+
+  /* ── تمام‌صفحه ── */
+  function isFs() { return !!(D.fullscreenElement || D.webkitFullscreenElement); }
+  function toggleFs() {
+    var r = P.root;
+    if (isFs()) {
+      try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { }
+      return;
+    }
+    var req = r.requestFullscreen || r.webkitRequestFullscreen;
+    var ok = false;
+    if (req) { try { var pr = req.call(r); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(); }); } catch (e) { ok = false; } }
+    if (!ok) tgFs();
+    try { if (W.screen.orientation && W.screen.orientation.lock) W.screen.orientation.lock('landscape').catch(function () { }); } catch (e) { }
+  }
+  function tgFs() {
+    var tg = P.host.tg;
+    try { if (tg && tg.requestFullscreen) tg.requestFullscreen(); } catch (e) { }
+  }
+  function syncFs() {
+    if (!P) return;
+    q('[data-a="fs"]', P.root).innerHTML = isFs() ? I.fsx : I.fs;
+  }
+
+  /* ── رویدادها ── */
+  function togglePlay() {
+    var v = P.video;
+    if (P.adActive) return;
+    if (v.paused || v.ended) { hidePause(); var pr = v.play(); if (pr && pr.catch) pr.catch(function () { }); }
+    else v.pause();
+  }
+  function seekBy(d) {
+    var v = P.video;
+    if (!isFinite(v.duration)) return;
+    v.currentTime = Math.max(0, Math.min(v.duration - 0.5, v.currentTime + d));
+    fx(d < 0 ? 'l' : 'r', (d < 0 ? '« ' : '') + fa(Math.abs(d)) + ' ثانیه' + (d > 0 ? ' »' : ''));
+    showUi();
+  }
+  function setVol(x) {
+    var v = P.video;
+    v.volume = Math.max(0, Math.min(1, x));
+    v.muted = v.volume === 0;
+    fx('c', '🔊 ' + fa(Math.round(v.volume * 100)) + '٪');
+  }
+  function bindUi() {
+    var r = P.root, v = P.video;
+    r.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    r.addEventListener('dragstart', function (e) { e.preventDefault(); });
+    r.addEventListener('mousemove', function () { showUi(); });
+    r.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-a],[data-x],[data-track],[data-sid],[data-sub],[data-size],[data-subbg],[data-off],[data-speed],[data-fit],[data-ep]') : null;
+      if (!b) return;
+      e.stopPropagation();
+      showUi();
+      var a = b.getAttribute('data-a');
+      if (a === 'close') return close();
+      if (a === 'play') return togglePlay();
+      if (a === 'back') return seekBy(-10);
+      if (a === 'fwd') return seekBy(10);
+      if (a === 'mute') { v.muted = !v.muted; if (!v.muted && v.volume === 0) v.volume = 0.6; return; }
+      if (a === 'fs') return toggleFs();
+      if (a === 'set') return P.panel === 'set' ? closePanels() : openPanel('set');
+      if (a === 'eps') return P.panel === 'eps' ? closePanels() : openPanel('eps');
+      if (a === 'next') { var n = P.info && P.info.ep && P.info.ep.next; if (n) gotoEp(n.id); return; }
+      if (a === 'cc') { P.subPref = P.subOn ? '' : ((P.subs[0] || {}).id || ''); selectSub(P.subPref); renderPanel(); return; }
+      if (b.hasAttribute('data-x')) return closePanels();
+      if (b.hasAttribute('data-track')) {
+        var t = b.getAttribute('data-track');
+        if (t === P.cur.track) return;
+        var opts = (P.info.options || {})[t] || [];
+        var same = opts.filter(function (o) { return o.q === P.cur.quality && !o.locked; })[0] || opts.filter(function (o) { return !o.locked; })[0];
+        if (!same) { toast('این نسخه ویژهٔ مشترکین است'); return; }
+        return switchTo({ track: t, quality: same.q, streamId: same.id });
+      }
+      if (b.hasAttribute('data-sid')) {
+        var sid = b.getAttribute('data-sid');
+        if (sid === P.cur.streamId) return;
+        if (b.classList.contains('lock')) { message('ویژهٔ مشترکین', 'این کیفیت فقط برای مشترکین است. با اشتراک، تبلیغی هم نمی‌بینید.', [['خرید اشتراک', function () { var h = P.host; close(); if (h.onNeedSub) h.onNeedSub(); }, 1], ['بستن', hideMsg]]); return; }
+        return switchTo({ track: P.cur.track, quality: b.getAttribute('data-q'), streamId: sid });
+      }
+      if (b.hasAttribute('data-sub')) { P.subPref = b.getAttribute('data-sub'); selectSub(P.subPref); renderPanel(); return; }
+      if (b.hasAttribute('data-size')) {
+        ['s', 'm', 'l', 'xl'].forEach(function (z) { r.classList.remove('sub-' + z); });
+        r.classList.add('sub-' + b.getAttribute('data-size'));
+        ls('mvx_subsize', b.getAttribute('data-size'));
+        return renderPanel();
+      }
+      if (b.hasAttribute('data-subbg')) { var nb = r.classList.toggle('sub-nobg'); ls('mvx_subbg', !nb); return renderPanel(); }
+      if (b.hasAttribute('data-off')) { var o = Number(b.getAttribute('data-off')); P.subOffset = o ? Math.round(((P.subOffset || 0) + o) * 10) / 10 : 0; toast('تأخیر زیرنویس: ' + fa(P.subOffset.toFixed(1)) + ' ثانیه'); return renderPanel(); }
+      if (b.hasAttribute('data-speed')) { v.playbackRate = Number(b.getAttribute('data-speed')); toast('سرعت ' + fa(String(v.playbackRate)) + '×'); return renderPanel(); }
+      if (b.hasAttribute('data-fit')) { P.fit = b.getAttribute('data-fit'); r.classList.remove('fit-cover', 'fit-fill'); if (P.fit !== 'contain') r.classList.add('fit-' + P.fit); return renderPanel(); }
+      if (b.hasAttribute('data-ep')) return gotoEp(b.getAttribute('data-ep'));
+    });
+    q('.mvp-big', r).addEventListener('click', function (e) { e.stopPropagation(); togglePlay(); });
+    /* لایهٔ لمس: یک ضربه = نمایش کنترل‌ها، دوبار ضربه چپ/راست = ±۱۰ ثانیه، دوبار وسط = تمام‌صفحه */
+    var tap = q('.mvp-tap', r), lastTap = 0, tapT = 0;
+    tap.addEventListener('click', function (e) {
+      if (P.panel) { closePanels(); return; }
+      var now = Date.now();
+      var x = e.clientX / (r.clientWidth || 1);
+      if (now - lastTap < 300) {
+        clearTimeout(tapT);
+        lastTap = 0;
+        if (x < 0.35) seekBy(-10); else if (x > 0.65) seekBy(10); else toggleFs();
+        return;
+      }
+      lastTap = now;
+      tapT = setTimeout(function () {
+        if (!P) return;
+        var touch = W.matchMedia && W.matchMedia('(hover:none)').matches;
+        if (touch) { if (r.classList.contains('ui')) r.classList.remove('ui'); else showUi(); }
+        else togglePlay();
+      }, 280);
+    });
+    /* نوار پیشرفت (موس و لمس) */
+    var prog = q('.mvp-prog', r), tip = q('.mvp-tip', r);
+    function posAt(e) {
+      var rect = q('.mvp-rail', r).getBoundingClientRect();
+      var cx = e.touches ? e.touches[0].clientX : e.clientX;
+      return Math.max(0, Math.min(1, (cx - rect.left) / (rect.width || 1)));
+    }
+    function dragTo(e) {
+      if (!isFinite(v.duration)) return;
+      var p = posAt(e);
+      P.dragAt = p * v.duration;
+      q('.mvp-fill', r).style.width = (p * 100) + '%';
+      q('.mvp-knob', r).style.left = (p * 100) + '%';
+      tip.style.left = (p * 100) + '%';
+      tip.textContent = fmtT(P.dragAt);
+    }
+    function endDrag() {
+      if (!P.drag) return;
+      P.drag = false;
+      prog.classList.remove('drag');
+      if (P.dragAt != null && isFinite(P.dragAt)) v.currentTime = P.dragAt;
+      P.dragAt = null;
+      showUi();
+    }
+    prog.addEventListener('mousedown', function (e) { P.drag = true; prog.classList.add('drag'); dragTo(e); e.preventDefault(); });
+    prog.addEventListener('touchstart', function (e) { P.drag = true; prog.classList.add('drag'); dragTo(e); }, { passive: true });
+    P.onMove = function (e) { if (P && P.drag) dragTo(e); };
+    P.onUp = function () { if (P) endDrag(); };
+    W.addEventListener('mousemove', P.onMove);
+    W.addEventListener('touchmove', P.onMove, { passive: true });
+    W.addEventListener('mouseup', P.onUp);
+    W.addEventListener('touchend', P.onUp);
+    prog.addEventListener('mousemove', function (e) {
+      if (P.drag || !isFinite(v.duration)) return;
+      var p = posAt(e);
+      tip.style.left = (p * 100) + '%';
+      tip.textContent = fmtT(p * v.duration);
+    });
+    var volIn = q('.mvp-vol input', r);
+    volIn.addEventListener('input', function () { v.volume = Number(volIn.value); v.muted = v.volume === 0; });
+    /* ویدئو */
+    v.addEventListener('playing', function () { setLoading(false); r.classList.remove('paused'); hidePause(); P.errCount = 0; showUi(); });
+    v.addEventListener('play', function () { r.classList.remove('paused'); q('[data-a="play"]', r).innerHTML = I.pause; hidePause(); });
+    v.addEventListener('pause', function () {
+      r.classList.add('paused');
+      q('[data-a="play"]', r).innerHTML = I.play;
+      showUi(true);
+      savePos(true);
+      clearTimeout(P.padT);
+      P.padT = setTimeout(showPause, 450);
+    });
+    v.addEventListener('waiting', function () { setLoading(true); });
+    v.addEventListener('canplay', function () { setLoading(false); });
+    v.addEventListener('seeking', function () { P.seeking = true; hidePause(); });
+    v.addEventListener('seeked', function () { P.seeking = false; renderSub(true); });
+    v.addEventListener('ended', function () { savePos(true); ls(posKey(), null); nextUp(); });
+    v.addEventListener('error', function () { onVideoError(); });
+    v.addEventListener('volumechange', function () {
+      q('[data-a="mute"]', r).innerHTML = v.muted || v.volume === 0 ? I.mute : I.vol;
+      volIn.value = v.muted ? 0 : v.volume;
+      ls('mvx_vol', { v: v.volume, m: v.muted });
+    });
+    v.addEventListener('progress', paintBuf);
+    v.addEventListener('timeupdate', onTime);
+    v.addEventListener('durationchange', onTime);
+  }
+  function paintBuf() {
+    var v = P.video, b = v.buffered, d = v.duration;
+    if (!b || !b.length || !isFinite(d)) return;
+    var end = 0;
+    for (var i = 0; i < b.length; i++) if (b.start(i) <= v.currentTime + 1) end = Math.max(end, b.end(i));
+    q('.mvp-buf', P.root).style.width = Math.min(100, (end / d) * 100) + '%';
+  }
+  function onTime() {
+    if (!P) return;
+    var v = P.video, d = v.duration, t = v.currentTime;
+    if (!P.drag && isFinite(d) && d > 0) {
+      q('.mvp-fill', P.root).style.width = (t / d * 100) + '%';
+      q('.mvp-knob', P.root).style.left = (t / d * 100) + '%';
+    }
+    q('.mvp-time', P.root).textContent = fmtT(t) + ' / ' + (isFinite(d) ? fmtT(d) : '--:--');
+    renderSub();
+    paintBuf();
+    savePos();
+    var now = Date.now();
+    if (!v.paused && P.lastTick) P.watch += Math.min(2, (now - P.lastTick) / 1000);
+    P.lastTick = now;
+    if (P.adCfg && !P.adActive && !v.paused) {
+      if (P.adCfg.banner && P.nextBannerAt != null && P.watch >= P.nextBannerAt) {
+        var ov = (P.banners || []).filter(function (b) { return b.slot === 'ov'; });
+        P.nextBannerAt = P.watch + P.adCfg.bannerEvery;
+        if (ov.length) showBanner(ov[(P.bannerIdx++) % ov.length]);
+      }
+      if (P.adCfg.midroll && P.nextMidAt != null && P.watch >= P.nextMidAt) {
+        P.nextMidAt = P.watch + P.adCfg.midroll * 60;
+        requestOpen('mid');
+      }
+    }
+  }
+  function moveWm() {
+    if (!P) return;
+    var wm = q('.mvp-wm', P.root);
+    var w = P.root.clientWidth || 360, h = P.root.clientHeight || 640;
+    wm.style.left = Math.round(Math.random() * Math.max(10, w - 220) + 10) + 'px';
+    wm.style.top = Math.round(Math.random() * Math.max(10, h - 120) + 50) + 'px';
+  }
+  function onKey(e) {
+    if (!P) return;
+    var k = e.key, c = e.ctrlKey || e.metaKey;
+    /* جلوگیری از میانبرهای ذخیره/سورس/ابزار توسعه (بازدارنده، نه قفل مطلق) */
+    if (k === 'F12' || (c && e.shiftKey && /^[ijcIJC]$/.test(k)) || (c && /^[suSUpP]$/.test(k))) { e.preventDefault(); e.stopPropagation(); return; }
+    if (/input|textarea|select/i.test((e.target && e.target.tagName) || '')) return;
+    var v = P.video;
+    var handled = true;
+    if (P.adActive) { if (k === 'Escape') close(); return; }
+    switch (k) {
+      case ' ': case 'k': case 'K': togglePlay(); break;
+      case 'ArrowLeft': seekBy(e.shiftKey ? -30 : -5); break;
+      case 'ArrowRight': seekBy(e.shiftKey ? 30 : 5); break;
+      case 'j': case 'J': seekBy(-10); break;
+      case 'l': case 'L': seekBy(10); break;
+      case 'ArrowUp': setVol(v.volume + 0.05); break;
+      case 'ArrowDown': setVol(v.volume - 0.05); break;
+      case 'm': case 'M': v.muted = !v.muted; break;
+      case 'f': case 'F': toggleFs(); break;
+      case 'c': case 'C': q('[data-a="cc"]', P.root).click(); break;
+      case 'n': case 'N': q('[data-a="next"]', P.root).hidden || q('[data-a="next"]', P.root).click(); break;
+      case 'g': case 'G': P.subOffset = Math.round(((P.subOffset || 0) - 0.1) * 10) / 10; toast('تأخیر زیرنویس: ' + fa(P.subOffset.toFixed(1))); break;
+      case 'h': case 'H': P.subOffset = Math.round(((P.subOffset || 0) + 0.1) * 10) / 10; toast('تأخیر زیرنویس: ' + fa(P.subOffset.toFixed(1))); break;
+      case '[': case '<': v.playbackRate = Math.max(0.25, Math.round((v.playbackRate - 0.25) * 100) / 100); toast('سرعت ' + fa(String(v.playbackRate)) + '×'); break;
+      case ']': case '>': v.playbackRate = Math.min(3, Math.round((v.playbackRate + 0.25) * 100) / 100); toast('سرعت ' + fa(String(v.playbackRate)) + '×'); break;
+      case 'Escape': if (P.panel) closePanels(); else if (!isFs()) close(); else handled = false; break;
+      default:
+        if (/^[0-9]$/.test(k) && isFinite(v.duration)) v.currentTime = v.duration * Number(k) / 10;
+        else handled = false;
+    }
+    if (handled) { e.preventDefault(); showUi(); }
+  }
+  function onVis() { if (D.hidden) { savePos(true); flushEvq(); } }
+
+  function open(opts, host) {
+    if (P) close(true);
+    injectCss();
+    P = { opts: Object.assign({}, opts || {}), host: host || {}, cur: { track: (opts && opts.track) || '', quality: (opts && opts.quality) || '', streamId: (opts && opts.streamId) || '' },
+      sid: '', info: null, subs: [], subOn: '', cues: [], subOffset: 0, evq: [], watch: 0, bannerIdx: 0, errCount: 0, closed: false };
+    if (!P.host.api) throw new Error('MvxPlayer: host.api لازم است');
+    if (!P.host.openExt) P.host.openExt = function (u) { W.open(u, '_blank'); };
+    build();
+    D.addEventListener('keydown', onKey, true);
+    D.addEventListener('fullscreenchange', syncFs);
+    D.addEventListener('webkitfullscreenchange', syncFs);
+    D.addEventListener('visibilitychange', onVis);
+    W.addEventListener('pagehide', onVis);
+    try { D.documentElement.style.overflow = 'hidden'; } catch (e) { }
+    P.wmT = setInterval(moveWm, 20000);
+    moveWm();
+    if (P.host.tgBack) { try { P.host.tgBack(true, function () { close(); }); } catch (e) { } }
+    requestOpen('start');
+    return W.MvxPlayer;
+  }
+  function close(silent) {
+    if (!P) return;
+    var p = P;
+    savePos(true);
+    flushEvq();
+    p.closed = true;
+    clearInterval(p.wmT); clearInterval(p.nxT); clearTimeout(p.uiT); clearTimeout(p.resT); clearTimeout(p.bhT); clearTimeout(p.padT);
+    destroyHls();
+    try { p.video.pause(); p.video.removeAttribute('src'); p.video.load(); } catch (e) { }
+    if (isFs()) { try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { } }
+    D.removeEventListener('keydown', onKey, true);
+    D.removeEventListener('fullscreenchange', syncFs);
+    D.removeEventListener('webkitfullscreenchange', syncFs);
+    D.removeEventListener('visibilitychange', onVis);
+    W.removeEventListener('pagehide', onVis);
+    W.removeEventListener('mousemove', p.onMove);
+    W.removeEventListener('touchmove', p.onMove);
+    W.removeEventListener('mouseup', p.onUp);
+    W.removeEventListener('touchend', p.onUp);
+    try { D.documentElement.style.overflow = ''; } catch (e) { }
+    if (p.root && p.root.parentNode) p.root.parentNode.removeChild(p.root);
+    P = null;
+    if (p.host.tgBack) { try { p.host.tgBack(false); } catch (e) { } }
+    if (!silent && p.host.onClose) { try { p.host.onClose(); } catch (e) { } }
+  }
+  W.MvxPlayer = { open: open, close: function () { close(); }, isOpen: function () { return !!P; }, _parseVtt: parseVtt };
+}
+function buildPlayerJs() {
+  const code = '/* MVX player */\n(' + MVX_PLAYER_MODULE.toString() + ')(window);\n';
+  return { code: code, v: shardHash(code).toString(36) };
+}
 
 /* ═══════════════════════ کل سایت (HTML + CSS) ═══════════════════════ */
 const APP_HTML = `<!doctype html>
@@ -7667,7 +10126,7 @@ const APP_HTML = `<!doctype html>
 })();
 </script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="mvx-version" content="v3.52">
+<meta name="mvx-version" content="v3.60">
 <meta name="theme-color" content="#0b0e14">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -8180,6 +10639,13 @@ button.dp-slide{cursor:zoom-in}
 .q-alts{display:flex;flex-direction:column;gap:6px;margin:8px 0 12px;max-width:560px}
 .q-alt{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 12px;border-radius:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);font-weight:700;font-size:13.5px;text-align:right}
 .q-alt .go{color:var(--acc2)}
+.q-act{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 6px;max-width:560px}
+.q-act .btn{flex:1;min-width:140px;justify-content:center}
+.q-btn .q-st{color:var(--acc2);font-weight:800}
+.q-head{font-size:12.5px;color:var(--tx2);font-weight:700;margin-top:4px}
+.ep .ep-st{display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:30px;padding:0 8px;border-radius:999px;background:var(--grad);color:#111;font-size:12px;font-weight:900;flex:none}
+.card-st{position:absolute;bottom:8px;right:8px;z-index:3;font-size:10px;font-weight:900;padding:3px 8px;border-radius:999px;background:linear-gradient(135deg,#ff5f2e,#ffb01f);color:#111;box-shadow:0 4px 12px rgba(255,122,26,.35)}
+.st-test{font-size:11px;font-weight:800;color:var(--warn);margin-inline-start:6px}
 .star-btn{min-width:40px;opacity:.38;font-size:15px;padding:6px 8px}
 .star-btn.on{opacity:1;filter:drop-shadow(0 0 6px rgba(255,176,31,.75))}
 .ep-star{min-width:40px;opacity:.38;font-size:15px}
@@ -8467,14 +10933,14 @@ button.dp-slide{cursor:zoom-in}
 (function () {
 'use strict';
 
-var MVX_VER = 'v3.52';
+var MVX_VER = 'v3.60';
 /*
  * نکتهٔ معماری: کل این کد داخل یک template-literal در worker.js زندگی می‌کند.
  * لایهٔ template هر بک‌اسلش را مصرف می‌کند، بنابراین در کلاینت هیچ‌وقت
  * بک‌اسلش نمی‌نویسیم: خط‌تجدید با NL، منظم‌ها با new RegExp.
  */
 var NL = String.fromCharCode(10);
-var APP = { user: null, tg: null, catalog: null, siteName: '@@SITE@@', tagline: '@@TAG@@', economy: { unit: 'سکه', dlClickPrice: 2, plans: {}, botUsername: '' } };
+var APP = { user: null, tg: null, catalog: null, siteName: '@@SITE@@', tagline: '@@TAG@@', economy: { unit: 'سکه', dlClickPrice: 0, plans: {}, botUsername: '', stream: 'off' } };
 var TG = (window.Telegram && window.Telegram.WebApp) || null;
 var TG_READY = false;
 /* پارامترهای لانچ تلگرام که اسکرپت ابتدای صفحه، پیش از بازنویسی هش، ثبت کرده */
@@ -9020,8 +11486,9 @@ function cellFilesOf (cell) {
   if (cell.has || cell.source) return [{ id: '', title: '', sizeBytes: cell.sizeBytes || null, has: true }];
   return [];
 }
-function qualityButtonsHtml (variants, track, bagLock) {
+function qualityButtonsHtml (variants, track, bagLock, stm) {
   var v = (variants && variants[track]) || {};
+  var st = (stm && streamReady() && stm[track]) || {};
   var price = currentDlPrice();
   var sub = hasSub();
   var classic = ['480', '720', '1080', '4k'];
@@ -9029,6 +11496,7 @@ function qualityButtonsHtml (variants, track, bagLock) {
     var cell = v[k];
     return cell && (cell.has || cell.source || (cell.files && cell.files.length));
   });
+  Object.keys(st).forEach(function (k) { if (keys.indexOf(k) < 0) keys.push(k); });
   keys.sort(function (a, b) {
     var ia = classic.indexOf(a), ib = classic.indexOf(b);
     if (ia >= 0 && ib >= 0) return ia - ib;
@@ -9042,15 +11510,17 @@ function qualityButtonsHtml (variants, track, bagLock) {
   return '<div class="q-row">' + keys.map(function (k) {
     var cell = v[k];
     var files = cellFilesOf(cell);
-    var on = files.length > 0;
-    var prem = !!(bagLock || (cell && cell.premium));
-    var lab = (cell && cell.label) || Q_LABEL[k] || k;
+    var hasSt = !!st[k];
+    var on = files.length > 0 || hasSt;
+    var prem = !!(bagLock || (cell && cell.premium) || (st[k] && st[k].premium));
+    var lab = (cell && cell.label) || (st[k] && st[k].label) || Q_LABEL[k] || k;
     var extra = '';
-    if (on && files.length > 1) extra += '<span>' + faNum(files.length) + ' نسخه</span>';
-    else if (on && cell.sizeBytes) extra += '<span>' + fmtBytes(cell.sizeBytes) + '</span>';
+    if (files.length > 1) extra += '<span>' + faNum(files.length) + ' نسخه</span>';
+    else if (files.length && cell.sizeBytes) extra += '<span>' + fmtBytes(cell.sizeBytes) + '</span>';
+    if (hasSt) extra += '<span class="q-st">▶ پخش آنلاین</span>';
     if (on && prem && !sub) extra += '<span>⭐ اشتراک</span>';
-    else if (on && price > 0) extra += '<span>' + faMoney(price) + ' ' + unitName() + '</span>';
-    return '<button type="button" class="q-btn' + (on ? '' : ' off') + (on && prem && !sub ? ' lock' : '') + '" data-q="' + esc(k) + '" data-nf="' + files.length + '"' + (on ? '' : ' disabled') + '>' + esc(lab) + extra + '</button>';
+    else if (files.length && price > 0) extra += '<span>' + faMoney(price) + ' ' + unitName() + '</span>';
+    return '<button type="button" class="q-btn' + (on ? '' : ' off') + (on && prem && !sub ? ' lock' : '') + '" data-q="' + esc(k) + '" data-nf="' + files.length + '" data-st="' + (hasSt ? 1 : 0) + '"' + (on ? '' : ' disabled') + '>' + esc(lab) + extra + '</button>';
   }).join('') + '</div><div class="q-alts" id="q-alts"></div>';
 }
 function trackTabsHtml (id, onTrack) {
@@ -9058,6 +11528,128 @@ function trackTabsHtml (id, onTrack) {
     '<button type="button" class="seg-btn' + (onTrack === 'sub' ? ' on' : '') + '" data-track="sub">زیرنویس</button>' +
     '<button type="button" class="seg-btn' + (onTrack === 'dub' ? ' on' : '') + '" data-track="dub">دوبله</button>' +
     '</div>';
+}
+/* ═══════════ پخش آنلاین (سمت سایت): نقشهٔ بدون لینک + بارگذاری تنبل پلیر ═══════════ */
+var PLAYER_V = '@@PLAYER_V@@';
+function streamReady () { return !!APP.streamOnItem; }
+function stmOf (bag) { return (bag && bag.stm) || { sub: {}, dub: {}, subs: 0 }; }
+function stmHas (bag, track, q) {
+  var t = stmOf(bag)[track] || {};
+  return q ? !!t[q] : Object.keys(t).length > 0;
+}
+function stmAny (bag) { return stmHas(bag, 'sub') || stmHas(bag, 'dub'); }
+function bagHasTrack (bag, it, track) {
+  var v = variantsOf(bag, it)[track] || {};
+  var ks = Object.keys(v);
+  for (var i = 0; i < ks.length; i++) if (cellFilesOf(v[ks[i]]).length) return true;
+  return streamReady() && stmHas(bag, track);
+}
+function defaultTrackOf (bag, it) {
+  var pref = '';
+  try { pref = localStorage.getItem('mvx_track') || ''; } catch (e) { pref = ''; }
+  if ((pref === 'sub' || pref === 'dub') && bagHasTrack(bag, it, pref)) return pref;
+  if (bagHasTrack(bag, it, 'sub')) return 'sub';
+  if (bagHasTrack(bag, it, 'dub')) return 'dub';
+  return 'sub';
+}
+function rememberTrack (t) { try { localStorage.setItem('mvx_track', t); } catch (e) { } }
+/* سقف تکرار هر کمپین در روز؛ فقط راهنمای سرور برای انتخاب تبلیغ متنوع‌تر */
+function adSeenStore () {
+  var day = new Date(Date.now() + 12600000).toISOString().slice(0, 10);
+  var s = null;
+  try { s = JSON.parse(localStorage.getItem('mvx_adseen') || 'null'); } catch (e) { s = null; }
+  if (!s || s.d !== day) s = { d: day, m: {} };
+  return s;
+}
+function adSeenMap () { return adSeenStore().m; }
+function adSeenBump (at) {
+  var cid = '';
+  try {
+    var p = String(at || '').split('.')[0].split('-').join('+').split('_').join('/');
+    while (p.length % 4) p += '=';
+    cid = JSON.parse(decodeURIComponent(escape(atob(p)))).c || '';
+  } catch (e) { cid = ''; }
+  if (String(cid).indexOf('c_') !== 0) return;
+  var s = adSeenStore();
+  s.m[cid] = (s.m[cid] || 0) + 1;
+  try { localStorage.setItem('mvx_adseen', JSON.stringify(s)); } catch (e) { }
+}
+var __playerWait = null;
+var __itemShown = '';
+var __itemData = null;
+var __closingByRoute = false;
+var __watchFromItem = false;
+function loadPlayer (cb) {
+  if (window.MvxPlayer) { cb(window.MvxPlayer); return; }
+  if (__playerWait) { __playerWait.push(cb); return; }
+  __playerWait = [cb];
+  var s = document.createElement('script');
+  s.src = '/assets/player.js?v=' + PLAYER_V;
+  s.async = true;
+  function done () { var l = __playerWait || []; __playerWait = null; l.forEach(function (f) { f(window.MvxPlayer || null); }); }
+  s.onload = done;
+  s.onerror = done;
+  (document.head || document.body).appendChild(s);
+}
+function playerIsOpen () { return !!(window.MvxPlayer && window.MvxPlayer.isOpen && window.MvxPlayer.isOpen()); }
+function closePlayerByRoute () {
+  if (!playerIsOpen()) return false;
+  __closingByRoute = true;
+  try { window.MvxPlayer.close(); } catch (e) { }
+  __closingByRoute = false;
+  return true;
+}
+/* پلیر به مسیر #/watch/ گره خورده تا دکمهٔ بازگشت تلگرام/مرورگر آن را ببندد */
+function openPlayer (it, opts) {
+  opts = opts || {};
+  if (!APP.user) { nav('#/auth'); return; }
+  if (opts.track) rememberTrack(opts.track);
+  closeModal();
+  __watchFromItem = currentRoute().path.indexOf('/item/') === 0;
+  nav('#/watch/' + it.id + '?ep=' + encodeURIComponent(opts.epId || '') + '&t=' + encodeURIComponent(opts.track || '') + '&q=' + encodeURIComponent(opts.quality || ''));
+}
+function launchPlayer (it, opts) {
+  if (!APP.user) { nav('#/auth'); return; }
+  loadPlayer(function (MP) {
+    if (!MP) { toast('بارگذاری پلیر ناموفق بود؛ اتصال را بررسی کنید.', 'err'); return; }
+    if (currentRoute().path.indexOf('/watch/' + it.id) !== 0 || MP.isOpen()) return;
+    MP.open({ itemId: it.id, epId: opts.epId || '', track: opts.track || '', quality: opts.quality || '', title: it.title || '' }, {
+      api: api, openExt: openExt, tg: TG,
+      onNeedSub: function () { nav('#/subscribe'); },
+      onNeedLogin: function () { nav('#/auth'); },
+      onClose: function () {
+        if (__closingByRoute || currentRoute().path.indexOf('/watch/') !== 0) return;
+        if (__watchFromItem && history.length > 1) { __watchFromItem = false; history.back(); }
+        else location.replace('#/item/' + it.id);
+      }
+    });
+  });
+}
+function lastWatchedEp (it) {
+  var best = null, pre = 'mvx_pos:' + it.id + ':';
+  try {
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (!k || k.indexOf(pre) !== 0) continue;
+      var v = JSON.parse(localStorage.getItem(k) || 'null');
+      if (v && (!best || v.at > best.at)) best = { ep: k.slice(pre.length), at: v.at };
+    }
+  } catch (e) { }
+  return best ? best.ep : '';
+}
+function playDefault (it) {
+  if (it.type !== 'series') { openPlayer(it, { track: defaultTrackOf(it, it) }); return; }
+  var want = lastWatchedEp(it), first = null, found = null;
+  seasonsOf(it).forEach(function (s) {
+    (s.episodes || []).forEach(function (e) {
+      if (!stmAny(e)) return;
+      if (!first) first = e;
+      if (e.id === want) found = e;
+    });
+  });
+  var ep = found || first;
+  if (!ep) { toast('برای قسمت‌های این سریال هنوز پخش آنلاین ثبت نشده', 'err'); return; }
+  openPlayer(it, { epId: ep.id, track: defaultTrackOf(ep, it) });
 }
 function copyText (text, cb) {
   function ok () { if (cb) cb(); }
@@ -9214,9 +11806,10 @@ function cardHtml (it) {
   var poster = it.poster;
   var imdb = it.imdb ? '<span class="card-imdb"><b>' + Number(it.imdb).toFixed(1) + '</b><i>IMDb</i></span>' : '';
   var live = isAiring(it) ? '<span class="card-live">در حال پخش</span>' : '';
+  var stb = (it.stream && APP.economy && APP.economy.stream === 'on') ? '<span class="card-st">▶ آنلاین</span>' : '';
   var inner = poster
-    ? '<div class="card-p" style="background-image:url(' + esc(poster) + ')">' + imdb + live + '<div class="card-ov"><span>📥</span></div></div>'
-    : '<div class="card-p">' + imdb + live + '<div class="card-ov"><span>📥</span></div></div>';
+    ? '<div class="card-p" style="background-image:url(' + esc(poster) + ')">' + imdb + live + stb + '<div class="card-ov"><span>' + (stb ? '▶' : '📥') + '</span></div></div>'
+    : '<div class="card-p">' + imdb + live + stb + '<div class="card-ov"><span>' + (stb ? '▶' : '📥') + '</span></div></div>';
   var yl = yearLabel(it);
   var sub = isAiring(it) && it.airingSeason ? ('فصل ' + faNum(it.airingSeason)) : typeLabel(it.type);
   return '<a class="card" href="#/item/' + it.id + '" title="' + esc(it.title) + '">' + inner +
@@ -9849,13 +12442,22 @@ function viewItem (data, id) {
 
   var price = data.hasSub ? 0 : (data.dlPrice || (APP.economy && APP.economy.dlClickPrice) || 0);
   var vanish = data.vanishSec || 10;
+  /* پخش آنلاین: data.stream از سرور (روشن/فقط مدیر) + این‌که اثر لینک پخش دارد */
+  var stOn = !!(data.stream && data.stream.on);
+  APP.streamOnItem = stOn;
+  __itemShown = id;
+  __itemData = data;
+  var stAny = stOn && !!(data.stream && data.stream.any);
 
   /* دکمهٔ اصلی (مثل «ورود و پخش» نماوا) */
   var mainBtn;
   if (!APP.user) mainBtn = '<a class="btn btn-white btn-lg" href="#/auth">▶ ورود و دریافت</a>';
   else if (!canPlay) mainBtn = '<a class="btn btn-white btn-lg" href="#/subscribe">👑 خرید اشتراک و دریافت</a>';
-  else mainBtn = '<button type="button" class="btn btn-white btn-lg" id="btn-dl-main">' + (isSeries ? '▶ دریافت قسمت‌ها' : '📥 دریافت فایل') + '</button>';
-  var cta = '<div class="d-cta">' + mainBtn +
+  else mainBtn = '<button type="button" class="btn btn-white btn-lg" id="btn-dl-main">' + (isSeries ? '📥 دریافت قسمت‌ها' : '📥 دریافت فایل') + '</button>';
+  var playBtn = (stAny && APP.user && canPlay)
+    ? '<button type="button" class="btn btn-primary btn-lg" id="btn-play-main">▶ پخش آنلاین' + (data.stream.testOnly ? '<span class="st-test">آزمایشی</span>' : '') + '</button>'
+    : '';
+  var cta = '<div class="d-cta">' + mainBtn + playBtn +
     '<button type="button" class="btn btn-ghost btn-ico" id="btn-share" title="اشتراک‌گذاری">🔗</button>' +
     ((APP.user && APP.user.role === 'admin') ? '<button type="button" class="btn btn-ghost btn-ico" id="btn-edit-item" title="ویرایش">✏️</button>' : '') +
     '</div>';
@@ -9914,12 +12516,14 @@ function viewItem (data, id) {
     ? '<section class="d-sec"><div class="d-sec-h">عوامل ' + (isSeries ? 'سریال' : 'فیلم') + ' ' + esc(tFa) + '</div><div class="people">' + directors.map(function (d) { return personHtml(d, 'کارگردان'); }).join('') + '</div></section>'
     : '';
 
-  var note = '<div class="note">🛡 پخش آنلاین وجود ندارد. فایل فقط داخل ربات ارسال می‌شود و بعد از <b>' + faNum(vanish) + ' ثانیه</b> پاک می‌گردد.' +
+  var note = '<div class="note">' +
+    (stAny ? '▶ این اثر <b>پخش آنلاین</b> دارد: نسخه و کیفیت را انتخاب کنید و «پخش آنلاین» را بزنید.<br>' : '') +
+    '📥 فایل دانلودی داخل ربات ارسال می‌شود و بعد از <b>' + faNum(vanish) + ' ثانیه</b> پاک می‌گردد.' +
     (data.hasSub
-      ? '<br>👑 اشتراک فعال — بدون کسر سکه. دانلود نامحدود.'
+      ? '<br>👑 اشتراک فعال — بدون تبلیغ و با دسترسی به محتوای ویژهٔ مشترکین.'
       : (price > 0
-        ? '<br>بدون اشتراک، هر دانلود <b>' + faMoney(price) + ' ' + unitName() + '</b> از کیف پول. با اشتراک، دانلود نامحدود و بدون کسر سکه است.'
-        : '')) +
+        ? '<br>بدون اشتراک، هر دانلود <b>' + faMoney(price) + ' ' + unitName() + '</b> از کیف پول. با اشتراک، دانلود بدون تبلیغ و بدون کسر سکه است.'
+        : '<br>دانلود' + (stAny ? ' و پخش آنلاین' : '') + ' برای همه <b>رایگان</b> است؛ با <a href="#/subscribe" style="color:var(--acc2);font-weight:800">اشتراک</a> هیچ تبلیغی نمی‌بینید و به محتوای ویژهٔ مشترکین هم دسترسی دارید.')) +
     '</div>';
   var lockNote = '';
   if (APP.user && !canPlay) lockNote = '<div class="note">👑 این اثر ویژهٔ مشترکین است. <a href="#/subscribe" style="color:var(--acc2);font-weight:800">خرید اشتراک</a> · <a href="#/wallet" style="color:var(--acc2);font-weight:800">کیف پول</a></div>';
@@ -9927,9 +12531,9 @@ function viewItem (data, id) {
   var qgLink = '<div class="q-guide-link"><a href="#/quality?from=' + id + '">❓ نمی‌دونم کدوم کیفیت رو انتخاب کنم؟</a></div>';
   var dlPanel;
   if (isSeries) {
-    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 دانلود سریال' + (live ? ' <small>' + esc(liveText) + '</small>' : '') + '</div>' + qgLink + '<div class="season-bar" id="season-bar"></div><div class="eps" id="ep-list"></div></div>';
+    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">' + (stAny ? '📥 دانلود و ▶ پخش آنلاین قسمت‌ها' : '📥 دانلود سریال') + (live ? ' <small>' + esc(liveText) + '</small>' : '') + '</div>' + qgLink + '<div class="season-bar" id="season-bar"></div><div class="eps" id="ep-list"></div></div>';
   } else {
-    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">📥 انتخاب کیفیت دانلود</div>' + qgLink + trackTabsHtml('track-tabs', 'sub') + '<div id="q-row-wrap"></div></div>';
+    dlPanel = '<div class="dl-box" id="dl-box"><div class="d-sec-h">' + (stAny ? '🎬 انتخاب نسخه و کیفیت — دانلود یا پخش آنلاین' : '📥 انتخاب کیفیت دانلود') + '</div>' + qgLink + trackTabsHtml('track-tabs', defaultTrackOf(it, it)) + '<div id="q-row-wrap"></div></div>';
   }
   var related = '';
   if (data.related && data.related.length) {
@@ -10008,6 +12612,7 @@ function showAdThen (res, done) {
   document.body.appendChild(el);
   try { document.body.style.overflow = 'hidden'; } catch (e) { }
   AD_LAYER = { el: el, tick: null };
+  if (ad.at) adSeenBump(ad.at);
 
   var fill = $('#adx-fill', el);
   var num = $('#adx-n', el);
@@ -10037,7 +12642,7 @@ function showAdThen (res, done) {
   if (ad.clickable) {
     stage.addEventListener('click', function () {
       haptic('light');
-      api('/ad/' + ad.id + '/click', { method: 'POST' }).then(function (r) {
+      (ad.at ? api('/ad/click', { method: 'POST', body: { at: ad.at } }) : api('/ad/' + ad.id + '/click', { method: 'POST' })).then(function (r) {
         openExt(r.url);
       }).catch(function () { });
     });
@@ -10146,7 +12751,8 @@ function requestDownload (itemId, opts, btn) {
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   function release () { if (btn) { btn.disabled = false; btn.innerHTML = orig; } }
 
-  return api('/dl/request', { method: 'POST', body: { itemId: itemId, epId: opts.epId || '', track: opts.track || 'sub', quality: opts.quality || '', fileId: opts.fileId || '' } }).then(function (r) {
+  var seenAds = (typeof adSeenMap === 'function') ? adSeenMap() : undefined;
+  return api('/dl/request', { method: 'POST', body: { itemId: itemId, epId: opts.epId || '', track: opts.track || 'sub', quality: opts.quality || '', fileId: opts.fileId || '', seen: seenAds } }).then(function (r) {
     if (APP.user) APP.user.wallet = r.wallet;
     release();
     var chargeMsg = r.charged
@@ -10171,7 +12777,9 @@ function requestDownload (itemId, opts, btn) {
 }
 
 function bindQualityClicks (root, it, track, ep, bagLock) {
-  var variants = variantsOf(ep || it, it);
+  var bag = ep || it;
+  var variants = variantsOf(bag, it);
+  var stm = stmOf(bag);
   $all('.q-btn', root).forEach(function (b) {
     b.addEventListener('click', function () {
       if (b.classList.contains('lock')) {
@@ -10179,44 +12787,59 @@ function bindQualityClicks (root, it, track, ep, bagLock) {
         nav('#/subscribe');
         return;
       }
-      /* رنگ دکمهٔ کیفیتِ انتخاب‌شده مثل حالت هاور می‌شود تا نسخه‌های زیر
+      /* رنگ دکمهٔ کیفیتِ انتخاب‌شده مثل حالت هاور می‌شود تا دکمه‌های زیر
          مشخص باشد برای کدام کیفیت است */
       $all('.q-btn', root).forEach(function (x) { x.classList.remove('on'); });
       b.classList.add('on');
       var q = b.getAttribute('data-q');
       var cell = (variants[track] || {})[q] || {};
       var files = cellFilesOf(cell);
+      var canStream = b.getAttribute('data-st') === '1' && streamReady();
       var alts = $('#q-alts', root) || $('#q-alts');
-      /* نسخه‌ها را همیشه نشان بده — حتی وقتی کیفیت فقط یک نسخه دارد */
-      if (files.length > 0 && alts) {
-        alts.innerHTML = files.map(function (f, i) {
-          var cell = (variants[track] || {})[q] || {};
-          var qlab = cell.label || Q_LABEL[q] || q;
-          var lab = (f.title && f.title.trim()) ? f.title : (qlab + (i ? (' — نسخه ' + faNum(i + 1)) : ''));
-          return '<button type="button" class="q-alt" data-q="' + q + '" data-fid="' + esc(f.id || '') + '"><span>' + esc(lab) + '</span><span class="go">⬇</span></button>';
-        }).join('');
-        $all('.q-alt', alts).forEach(function (a) {
-          a.addEventListener('click', function () {
-            requestDownload(it.id, { epId: ep && ep.id, track: track, quality: a.getAttribute('data-q'), fileId: a.getAttribute('data-fid') }, a);
-          });
-        });
+      if (!alts) {
+        if (files.length) requestDownload(it.id, { epId: ep && ep.id, track: track, quality: q, fileId: (files[0] && files[0].id) || '' }, b);
+        else if (canStream) openPlayer(it, { epId: ep && ep.id, track: track, quality: q });
         return;
       }
-      requestDownload(it.id, { epId: ep && ep.id, track: track, quality: q, fileId: (files[0] && files[0].id) || '' }, b);
+      var qlab = cell.label || ((stm[track] || {})[q] || {}).label || Q_LABEL[q] || q;
+      /* کنار کیفیت انتخاب‌شده دو دکمه: «دانلود» و «پخش آنلاین» */
+      var html = '<div class="q-head">' + esc(qlab) + ' — ' + (track === 'dub' ? 'دوبله' : 'زیرنویس') + '</div><div class="q-act">' +
+        (files.length === 1 ? '<button type="button" class="btn btn-primary q-dl">📥 دانلود</button>' : '') +
+        (canStream ? '<button type="button" class="btn btn-white q-play">▶ پخش آنلاین</button>' : '') + '</div>';
+      /* نسخه‌ها را همیشه نشان بده وقتی بیش از یکی است (هر نسخه دکمهٔ دانلود خودش را دارد) */
+      if (files.length > 1) {
+        html += files.map(function (f, i) {
+          var lab = (f.title && f.title.trim()) ? f.title : (qlab + (i ? (' — نسخه ' + faNum(i + 1)) : ''));
+          return '<button type="button" class="q-alt" data-q="' + q + '" data-fid="' + esc(f.id || '') + '"><span>' + esc(lab) + '</span><span class="go">📥 دانلود</span></button>';
+        }).join('');
+      } else if (!files.length) html += '<p class="note" style="margin:4px 0 0">این کیفیت فقط پخش آنلاین دارد.</p>';
+      alts.innerHTML = html;
+      var dlb = $('.q-dl', alts);
+      if (dlb) dlb.addEventListener('click', function () {
+        requestDownload(it.id, { epId: ep && ep.id, track: track, quality: q, fileId: (files[0] && files[0].id) || '' }, dlb);
+      });
+      var pb = $('.q-play', alts);
+      if (pb) pb.addEventListener('click', function () { openPlayer(it, { epId: ep && ep.id, track: track, quality: q }); });
+      $all('.q-alt', alts).forEach(function (a) {
+        a.addEventListener('click', function () {
+          requestDownload(it.id, { epId: ep && ep.id, track: track, quality: a.getAttribute('data-q'), fileId: a.getAttribute('data-fid') }, a);
+        });
+      });
     });
   });
 }
 function bindMovieDl (it) {
-  var track = 'sub';
+  var track = defaultTrackOf(it, it);
   var wrap = $('#q-row-wrap');
   if (!wrap) return;
   function paint () {
-    wrap.innerHTML = qualityButtonsHtml(variantsOf(it, it), track, false);
+    wrap.innerHTML = qualityButtonsHtml(variantsOf(it, it), track, false, stmOf(it));
     bindQualityClicks(wrap, it, track, null, false);
   }
   $all('#track-tabs .seg-btn').forEach(function (b) {
     b.addEventListener('click', function () {
       track = b.getAttribute('data-track');
+      rememberTrack(track);
       $all('#track-tabs .seg-btn').forEach(function (x) { x.className = 'seg-btn' + (x === b ? ' on' : ''); });
       paint();
     });
@@ -10227,18 +12850,19 @@ function bindMovieDl (it) {
 function openEpDlModal (it, ep) {
   /* حین پخش تبلیغ، مودال قسمت نباید روی تبلیغ باز شود */
   if (AD_LAYER) return;
-  var track = 'sub';
-  var html = trackTabsHtml('ep-track-tabs', 'sub') + '<div id="ep-q-wrap"></div>';
+  var track = defaultTrackOf(ep, it);
+  var html = trackTabsHtml('ep-track-tabs', track) + '<div id="ep-q-wrap"></div>';
   openModal(ep.title || 'دانلود قسمت', html, function (wrap) {
     function paint () {
       var box = $('#ep-q-wrap', wrap);
       if (!box) return;
-      box.innerHTML = qualityButtonsHtml(variantsOf(ep, it), track, !!ep.premium);
+      box.innerHTML = qualityButtonsHtml(variantsOf(ep, it), track, !!ep.premium, stmOf(ep));
       bindQualityClicks(box, it, track, ep, !!ep.premium);
     }
     $all('#ep-track-tabs .seg-btn', wrap).forEach(function (b) {
       b.addEventListener('click', function () {
         track = b.getAttribute('data-track');
+        rememberTrack(track);
         $all('#ep-track-tabs .seg-btn', wrap).forEach(function (x) { x.className = 'seg-btn' + (x === b ? ' on' : ''); });
         paint();
       });
@@ -10280,8 +12904,18 @@ function bindSeriesDl (it) {
     var s = currentSeason() || { episodes: [] };
     var eps = s.episodes || [];
     box.innerHTML = eps.map(function (e, i) {
-      return '<div class="ep" data-epid="' + esc(e.id) + '"><span class="ep-n">' + faNum(e.n || (i + 1)) + '</span><span class="ep-t">' + esc(e.title) + '</span><span class="go">⬇</span></div>';
+      var st = streamReady() && stmAny(e) ? '<span class="ep-st" data-play="' + esc(e.id) + '" title="پخش آنلاین">▶</span>' : '';
+      return '<div class="ep" data-epid="' + esc(e.id) + '"><span class="ep-n">' + faNum(e.n || (i + 1)) + '</span><span class="ep-t">' + esc(e.title) + '</span>' + st + '<span class="go">⬇</span></div>';
     }).join('') || '<p style="color:var(--tx3);font-size:13px">قسمتی در این فصل نیست.</p>';
+    $all('[data-play]', box).forEach(function (chip) {
+      chip.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        var pid = chip.getAttribute('data-play');
+        var pe = null;
+        eps.forEach(function (x) { if (x.id === pid) pe = x; });
+        if (pe) openPlayer(it, { epId: pe.id, track: defaultTrackOf(pe, it) });
+      });
+    });
     $all('[data-epid]', box).forEach(function (row) {
       row.addEventListener('click', function () {
         var id = row.getAttribute('data-epid');
@@ -10312,6 +12946,8 @@ function bindItem (it, data) {
       more.textContent = open ? 'بیشتر…' : 'کمتر';
     });
   }
+  var pm = $('#btn-play-main');
+  if (pm) pm.addEventListener('click', function () { playDefault(it); });
   var main = $('#btn-dl-main');
   if (main) main.addEventListener('click', function () {
     var box = $('#dl-box');
@@ -10973,19 +13609,23 @@ function openK2kInvoice(inv) {
 function viewSubscribe () {
   if (!APP.user) return emptyHtml('👑', 'وارد نشده‌اید', 'برای خرید اشتراک ابتدا وارد شوید.', '<a class="btn btn-primary" href="#/auth">ورود با تلگرام</a>');
   var plans = (APP.economy && APP.economy.plans) || {};
-  var dlWord = 'دانلود نامحدود';
+  var dlWord = 'بدون تبلیغ';
   var items = [
-    ['1m', 'یک‌ماهه', '۳۰ روز ' + dlWord + ' بدون کسر سکه'],
-    ['3m', 'سه‌ماهه', '۹۰ روز ' + dlWord + ' — به‌صرفه‌تر'],
-    ['6m', 'شش‌ماهه', '۱۸۰ روز ' + dlWord],
-    ['1y', 'یک‌ساله', '۳۶۵ روز ' + dlWord + ' — بهترین قیمت']
+    ['1m', 'یک‌ماهه', '۳۰ روز ' + dlWord + ' + محتوای ویژهٔ مشترکین'],
+    ['3m', 'سه‌ماهه', '۹۰ روز ' + dlWord + ' + محتوای ویژه — به‌صرفه‌تر'],
+    ['6m', 'شش‌ماهه', '۱۸۰ روز ' + dlWord + ' + محتوای ویژه'],
+    ['1y', 'یک‌ساله', '۳۶۵ روز ' + dlWord + ' + محتوای ویژه — بهترین قیمت']
   ];
   var cards = items.map(function (p) {
     var price = Number(plans[p[0]]) || 0;
     return '<div class="plan"><h4>' + p[1] + '</h4><div class="pr">' + faMoney(price) + ' <span style="font-size:13px;font-weight:600">' + unitName() + '</span></div><div class="ds">' + p[2] + '</div>' +
       '<button class="btn btn-primary btn-block" data-plan="' + p[0] + '">خرید از کیف پول</button></div>';
   }).join('');
-  var subDesc = 'با اشتراک، همهٔ فیلم‌ها و سریال‌ها را نامحدود و بدون کسر سکه دانلود می‌کنید. سکه فقط از کاربران بدون اشتراک بابت هر دانلود کم می‌شود. خودِ اشتراک از کیف پول پرداخت می‌شود.';
+  var paidDl = Number(APP.economy && APP.economy.dlClickPrice) > 0;
+  var subDesc = (paidDl
+    ? 'با اشتراک، دانلود بدون کسر سکه است. '
+    : 'دانلود و پخش آنلاین برای همه رایگان است. ') +
+    'با اشتراک هیچ تبلیغی نمی‌بینید — نه پیش از دانلود، نه داخل پلیر و نه زیر فایل‌های ربات — و به فیلم‌ها، قسمت‌ها و کیفیت‌هایی که «ویژهٔ مشترکین» هستند دسترسی دارید. اشتراک از کیف پول پرداخت می‌شود.';
   return '<div class="acc"><h2 style="font-size:20px;font-weight:900;margin-bottom:8px">👑 اشتراک</h2>' +
     '<p style="color:var(--tx2);font-size:13.5px;margin-bottom:16px">' + subDesc + '</p>' +
     (hasSub() ? '<div class="note">اشتراک فعلی تا <b>' + faDate(APP.user.subUntil) + '</b> فعال است. خرید جدید به انتهای همان تاریخ اضافه می‌شود.</div>' : '') +
@@ -11214,6 +13854,164 @@ function shardStatusHtml (st) {
     '<div class="adm-row"><button type="button" class="btn btn-ghost btn-sm" id="shard-test">🧪 تست اتصال</button><button type="button" class="btn btn-primary btn-sm" id="shard-add">افزودن</button><span id="shard-test-out" class="badge" style="display:none"></span></div>' +
     '</details></div>';
 }
+function admChk (id, on, text) {
+  return '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="' + id + '" style="width:auto"' + (on ? ' checked' : '') + '> ' + text + '</label>';
+}
+function admNum (id, label, val, min, max, hint) {
+  return '<div class="field"><label>' + label + '</label><input id="' + id + '" type="number" min="' + min + '" max="' + max + '" value="' + esc(val) + '">' + (hint ? '<small>' + hint + '</small>' : '') + '</div>';
+}
+/* ── پنل: پخش آنلاین (روشن/خاموش کل سیستم و دکمه، امنیت توکن، لبه‌های پخش) ── */
+function streamAdminHtml (st) {
+  st = st || {};
+  var edges = (st.edges || []).map(function (e) {
+    return '<div class="adm-item" style="margin-top:8px"><div class="inf"><b>' + esc(e.id) + '</b><span>' +
+      '<em class="badge" dir="ltr">' + esc(e.url) + '</em>' +
+      (e.off ? '<em class="badge red">خاموش</em>' : '<em class="badge acc">فعال</em>') +
+      '<em class="badge" data-edge-st="' + esc(e.id) + '">در حال بررسی…</em></span></div>' +
+      '<div class="acts"><button type="button" class="btn btn-ghost btn-sm" data-edge-tog="' + esc(e.id) + '" title="روشن/خاموش">' + (e.off ? '▶️' : '⏸') + '</button>' +
+      '<button type="button" class="btn btn-danger btn-sm" data-edge-del="' + esc(e.id) + '">حذف</button></div></div>';
+  }).join('');
+  return '<div class="adm-box"><h4>🎬 پخش آنلاین</h4>' +
+    '<p class="note">پلیر آنلاین (انتخاب دوبله/زیرنویس و کیفیت، زیرنویس جدا، قسمت بعد). لینک‌های پخش هر قسمت را از ربات مدیریت (دکمهٔ «🎬 لینک پخش آنلاین») یا از ویرایش هر اثر وارد کنید؛ لینک واقعی هرگز به کاربر نمی‌رسد و فقط با توکن کوتاه‌مدت و قفل‌شده به کاربر از «لبهٔ پخش» عبور می‌کند. توضیح کامل: <code dir="ltr">docs/ONLINE-PLAYER.md</code></p>' +
+    admChk('set-st-on', st.enabled, '<b>فعال‌سازی کل سیستم پخش آنلاین</b> (پلیر، API و لبه‌ها)') +
+    admChk('set-st-pub', st.public !== false, 'نمایش دکمهٔ «▶ پخش آنلاین» برای کاربران (خاموش = فقط مدیران برای آزمایش می‌بینند)') +
+    '<div class="form-2col">' +
+    admNum('set-st-ttl', 'اعتبار توکن هر پخش (دقیقه)', st.tokenMin || 180, 10, 720, 'پس از پایان، پلیر خودکار توکن تازه می‌گیرد.') +
+    admNum('set-st-max', 'حداکثر پخش هم‌زمان هر حساب', st.maxSessions || 2, 1, 10, 'جلسهٔ قدیمی‌تر در تمدید بعدی قطع می‌شود.') +
+    '</div>' +
+    admChk('set-st-ip', st.bindIp !== false, 'قفل توکن به IP کاربر (لینک کپی‌شده روی اینترنت دیگر کار نمی‌کند)') +
+    admChk('set-st-wm', st.watermark !== false, 'واترمارک متحرک شناسهٔ کاربر روی تصویر (ردیابی ضبط صفحه)') +
+    '<div class="d-sec-h" style="margin-top:12px">لبه‌های پخش (Worker روی اکانت‌های دیگر)</div>' +
+    (edges || '<p class="note" style="margin:8px 0">لبه‌ای اضافه نشده؛ ویدئو از همین Worker (مسیر /sv) پراکسی می‌شود. برای سهمیهٔ بیشتر، یک یا چند لبه روی اکانت‌های رایگان دیگر بسازید.</p>') +
+    '<details style="margin-top:10px"><summary>➕ افزودن لبهٔ پخش</summary>' +
+    '<p class="note">روی یک اکانت دیگر Cloudflare، فایل <code dir="ltr">scripts/stream-edge-worker.js</code> را به‌عنوان Worker تازه Deploy کنید و Secret با نام <code dir="ltr">EDGE_SECRET</code> بگذارید؛ سپس آدرس و همان رمز را اینجا وارد کنید. کاربران بین لبه‌ها پخش می‌شوند و اگر لبه‌ای قطع شود پلیر خودکار لبهٔ دیگری می‌گیرد.</p>' +
+    '<div class="field"><label>شناسه (حروف کوچک/عدد/خط تیره)</label><input id="edge-id" dir="ltr" placeholder="edge-1"></div>' +
+    '<div class="field"><label>آدرس لبه</label><input id="edge-url" dir="ltr" placeholder="https://edge1.example.com"></div>' +
+    '<div class="field"><label>رمز لبه (همان EDGE_SECRET)</label><input id="edge-secret" dir="ltr" autocomplete="off" placeholder="حداقل ۱۶ نویسه"></div>' +
+    '<div class="adm-row"><button type="button" class="btn btn-ghost btn-sm" id="edge-gen">🎲 ساخت رمز تصادفی</button><button type="button" class="btn btn-ghost btn-sm" id="edge-test">🧪 تست</button><button type="button" class="btn btn-primary btn-sm" id="edge-add">افزودن</button><span id="edge-test-out" class="badge" style="display:none"></span></div>' +
+    '</details></div>';
+}
+function bindStreamAdmin (q) {
+  function payload () {
+    return { url: ($('#edge-url') && $('#edge-url').value.trim()) || '', secret: ($('#edge-secret') && $('#edge-secret').value.trim()) || '' };
+  }
+  var gen = $('#edge-gen');
+  if (gen) gen.addEventListener('click', function () {
+    try { var b = new Uint8Array(24); crypto.getRandomValues(b); $('#edge-secret').value = Array.from(b, function (x) { return x.toString(16).padStart(2, '0'); }).join(''); copyText($('#edge-secret').value, function () { toast('رمز ساخته و کپی شد؛ در EDGE_SECRET لبه بگذارید', 'ok'); }); } catch (e) { toast('ساخت رمز ممکن نشد', 'err'); }
+  });
+  var t = $('#edge-test');
+  if (t) t.addEventListener('click', function () {
+    var out = $('#edge-test-out');
+    out.style.display = ''; out.className = 'badge'; out.textContent = 'در حال تست…';
+    var b = payload(); b.action = 'test';
+    api('/admin/stream-edges', { method: 'POST', body: b }).then(function (r) {
+      out.className = 'badge acc'; out.textContent = 'اتصال و رمز درست است ✓ ' + faNum(r.latency) + 'ms';
+    }).catch(function (e) { out.className = 'badge red'; out.textContent = e.message; });
+  });
+  var a = $('#edge-add');
+  if (a) a.addEventListener('click', function () {
+    var b = payload(); b.action = 'add'; b.id = ($('#edge-id') && $('#edge-id').value.trim()) || '';
+    if (!b.id || !b.url || !b.secret) { toast('شناسه، آدرس و رمز لبه را وارد کنید', 'err'); return; }
+    a.disabled = true;
+    api('/admin/stream-edges', { method: 'POST', body: b }).then(function () { toast('لبه اضافه شد ✓', 'ok'); loadAdminTab('settings', q); })
+      .catch(function (e) { toast(e.message, 'err'); }).then(function () { a.disabled = false; });
+  });
+  $all('[data-edge-del]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (!confirm('لبهٔ «' + b.getAttribute('data-edge-del') + '» حذف شود؟')) return;
+      api('/admin/stream-edges', { method: 'POST', body: { action: 'remove', id: b.getAttribute('data-edge-del') } }).then(function () { loadAdminTab('settings', q); }).catch(function (e) { toast(e.message, 'err'); });
+    });
+  });
+  $all('[data-edge-tog]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      api('/admin/stream-edges', { method: 'POST', body: { action: 'toggle', id: b.getAttribute('data-edge-tog') } }).then(function () { loadAdminTab('settings', q); }).catch(function (e) { toast(e.message, 'err'); });
+    });
+  });
+  if ($all('[data-edge-st]').length) api('/admin/stream-edges').then(function (r) {
+    (r.edges || []).forEach(function (e) {
+      var el = $('[data-edge-st="' + e.id + '"]');
+      if (!el) return;
+      el.className = 'badge ' + (e.ok ? 'acc' : 'red');
+      el.textContent = e.ok ? ('✓ سالم ' + faNum(e.latency) + 'ms') : ('✗ ' + (e.error || 'قطع'));
+    });
+  }).catch(function () { });
+}
+/* ── پنل: اتصال به پلتفرم تبلیغ‌دهندگان (ads.js) و تبلیغات داخل پلیر ── */
+function adNetAdminHtml (n) {
+  n = n || {};
+  var st = n.status || {};
+  var badges = '<em class="badge' + (n.enabled ? ' acc' : '') + '">' + (n.enabled ? 'فعال' : 'خاموش') + '</em>' +
+    (st.campaigns != null ? '<em class="badge">کمپین فعال در دسترس: ' + faNum(st.campaigns) + '</em>' : '') +
+    (st.lastFlushAt ? '<em class="badge">آخرین ارسال آمار: ' + new Date(st.lastFlushAt).toLocaleTimeString('fa-IR') + '</em>' : '') +
+    (st.queued ? '<em class="badge">در صف ارسال: ' + faNum(st.queued) + '</em>' : '') +
+    (st.lastError && st.lastErrorAt && Date.now() - st.lastErrorAt < 3600000 ? '<em class="badge red">خطای اخیر: ' + esc(st.lastError) + '</em>' : '');
+  return '<div class="adm-box"><h4>🤖 تبلیغات خودکار — پلتفرم تبلیغ‌دهندگان</h4>' +
+    '<p class="note">تبلیغ‌دهنده‌ها در پلتفرم جدا (فایل <code dir="ltr">ads.js</code> روی Worker دیگر) ثبت‌نام می‌کنند، کیف پولشان را با استارز یا کارت‌به‌کارت شارژ می‌کنند و کمپین ویدئویی/بنری/لینکی می‌سازند؛ بعد از تأیید مدیر در همان پلتفرم، تبلیغ خودکار پیش از دانلود، داخل پلیر و زیر فایل‌های ربات نمایش داده می‌شود و آمار دقیق برای تبلیغ‌دهنده ثبت می‌شود. مشترکین هیچ تبلیغی نمی‌بینند. راهنما: <code dir="ltr">docs/ADS-PLATFORM.md</code></p>' +
+    '<div class="adm-row" style="flex-wrap:wrap;margin-bottom:10px">' + badges + '</div>' +
+    admChk('an-on', n.enabled, '<b>فعال بودن تبلیغات خودکار</b>') +
+    '<div class="field"><label>آدرس پلتفرم تبلیغات</label><input id="an-url" dir="ltr" value="' + esc(n.url || '') + '" placeholder="https://ads.example.com"></div>' +
+    (n.secretFromEnv
+      ? '<div class="note">کلید اتصال از Secret ورکر (<code dir="ltr">ADNET_SECRET</code>) خوانده می‌شود.</div>'
+      : '<div class="field"><label>کلید اتصال (از پنل مدیریت پلتفرم تبلیغات ← تنظیمات ← اتصال سایت)</label><input id="an-secret" dir="ltr" type="password" autocomplete="off" placeholder="' + (n.secretSet ? ('تنظیم شده (' + esc(n.secret) + ') — برای تغییر، کلید تازه را وارد کنید') : 'حداقل ۱۶ نویسه') + '"></div>') +
+    '<div class="adm-row"><button type="button" class="btn btn-ghost btn-sm" id="an-test">🧪 تست اتصال</button><span class="badge" id="an-test-out" style="display:none"></span></div>' +
+    admChk('an-house', n.houseFallback !== false, 'اگر تبلیغ پولی مناسبی نبود، تبلیغ‌های داخلی (فهرست پایین همین صفحه) نمایش داده شود') +
+    admChk('an-bot', n.botLinks !== false, 'دکمهٔ تبلیغ لینکی خودکار زیر فایل‌های ارسالی ربات (کاربران بدون اشتراک)') +
+    '<div class="d-sec-h" style="margin-top:14px">🎬 تبلیغات داخل پلیر (فقط کاربران بدون اشتراک)</div>' +
+    admChk('pl-pre', n.plAdPre !== false, 'تبلیغ ویدئویی پیش از شروع پخش') +
+    admChk('pl-sw', n.plAdSwitch !== false, 'تبلیغ پیش از تعویض کیفیت یا دوبله ↔ زیرنویس (بعد از تبلیغ، پخش از همان ثانیه ادامه می‌یابد)') +
+    admChk('pl-ban', n.plAdBanner !== false, 'بنر روی تصویر حین پخش (قابل بستن پس از ۳ ثانیه)') +
+    admChk('pl-pause', n.plAdPause !== false, 'بنر هنگام توقف پخش') +
+    '<div class="form-2col">' +
+    admNum('pl-skip', 'دکمهٔ «رد کردن تبلیغ» پس از (ثانیه؛ ۰ = غیرقابل‌رد)', n.plAdSkip != null ? n.plAdSkip : 5, 0, 30) +
+    admNum('pl-gap', 'حداقل فاصلهٔ دو تبلیغ تعویض (ثانیه؛ ۰ = قبل از هر تعویض)', n.plAdSwitchGap || 0, 0, 3600) +
+    admNum('pl-bfirst', 'اولین بنر پس از چند ثانیه تماشا', n.plAdBannerFirst || 120, 10, 7200) +
+    admNum('pl-bevery', 'فاصلهٔ بنرها (ثانیه)', n.plAdBannerEvery || 600, 60, 7200) +
+    admNum('pl-bsec', 'مدت نمایش هر بنر (ثانیه)', n.plAdBannerSec || 15, 5, 60) +
+    admNum('pl-mid', 'تبلیغ میان‌پخش هر چند دقیقه (۰ = خاموش)', n.plAdMidroll || 0, 0, 240) +
+    '</div>' +
+    '<button type="button" class="btn btn-primary btn-sm" id="an-save">💾 ذخیرهٔ تبلیغات خودکار و پلیر</button></div>';
+}
+function bindAdNetAdmin (reload) {
+  var save = $('#an-save');
+  if (save) save.addEventListener('click', function () {
+    function ck (id) { var el = $('#' + id); return el ? el.checked : undefined; }
+    function vl (id) { var el = $('#' + id); return el ? el.value : undefined; }
+    var body = {
+      adNetEnabled: ck('an-on'), adNetUrl: (vl('an-url') || '').trim(), adNetHouseFallback: ck('an-house'), adNetBotLinks: ck('an-bot'),
+      plAdPre: ck('pl-pre'), plAdSwitch: ck('pl-sw'), plAdBanner: ck('pl-ban'), plAdPause: ck('pl-pause'),
+      plAdSkip: vl('pl-skip'), plAdSwitchGap: vl('pl-gap'), plAdBannerFirst: vl('pl-bfirst'), plAdBannerEvery: vl('pl-bevery'), plAdBannerSec: vl('pl-bsec'), plAdMidroll: vl('pl-mid')
+    };
+    var sec = $('#an-secret');
+    if (sec && sec.value.trim()) body.adNetSecret = sec.value.trim();
+    save.disabled = true;
+    api('/admin/settings', { method: 'POST', body: body }).then(function () { toast('ذخیره شد ✓', 'ok'); reload(); })
+      .catch(function (e) { toast(e.message, 'err'); }).then(function () { save.disabled = false; });
+  });
+  var test = $('#an-test');
+  if (test) test.addEventListener('click', function () {
+    var out = $('#an-test-out');
+    out.style.display = ''; out.className = 'badge'; out.textContent = 'در حال تست…';
+    var body = { url: (($('#an-url') && $('#an-url').value) || '').trim() };
+    var sec = $('#an-secret');
+    if (sec && sec.value.trim()) body.secret = sec.value.trim();
+    api('/admin/adnet/test', { method: 'POST', body: body }).then(function (r) {
+      var sm = r.summary || {};
+      out.className = 'badge acc';
+      out.textContent = 'اتصال ✓ ' + faNum(r.latency) + 'ms — کمپین فعال: ' + faNum(sm.active || 0) + ' — نمایش امروز: ' + faNum((sm.today && sm.today.imps) || 0) + ' — درآمد امروز: ' + faMoney((sm.today && sm.today.spend) || 0) + ' تومان';
+    }).catch(function (e) { out.className = 'badge red'; out.textContent = e.message; });
+  });
+}
+function streamLinesText (it) {
+  var lines = [];
+  function pad (n) { n = String(n || 0); return n.length < 2 ? '0' + n : n; }
+  function add (bag, pre) {
+    (bag.streams || []).forEach(function (x) { lines.push(pre + (Q_LABEL[x.quality] || x.quality) + ' ' + (x.track === 'dub' ? 'دوبله' : 'زیرنویس') + ' ' + x.url + (x.label ? ' | ' + x.label : '')); });
+    (bag.streamSubs || []).forEach(function (x) { lines.push(pre + 'زیرنویس ' + x.url + (x.label ? ' | ' + x.label : '')); });
+  }
+  if (it.type === 'series') seasonsOf(it).forEach(function (s) { (s.episodes || []).forEach(function (e) { add(e, 'S' + pad(s.n || 1) + 'E' + pad(e.n) + ' '); }); });
+  else add(it, '');
+  return lines.join(NL);
+}
 function bindShardAdmin (q) {
   function testPayload () {
     var u = $('#shard-url'), s = $('#shard-secret');
@@ -11327,7 +14125,8 @@ function adminTabHtml (tab, data, q) {
         '</div></div>';
     }).join('');
 
-    return '<div class="adm-h">📢 تبلیغات پیش از دانلود</div>' +
+    return '<div class="adm-h">📢 تبلیغات</div>' + adNetAdminHtml(data.net) +
+      '<div class="d-sec-h" style="margin-top:18px">📌 تبلیغات داخلی (دستی) — پیش از دانلود و جایگزین وقتی تبلیغ پولی نیست</div>' +
       '<div class="stat-cards">' +
       '<div class="stat"><b>' + faNum(tot.count || 0) + '</b><span>کل تبلیغ‌ها</span></div>' +
       '<div class="stat"><b>' + faNum(tot.active || 0) + '</b><span>فعال</span></div>' +
@@ -11461,7 +14260,7 @@ function adminTabHtml (tab, data, q) {
       '<div class="form-2col">' +
       '<div class="field"><label>نام واحد کیف پول</label><input id="set-unit" value="' + esc(data.walletUnitName || 'سکه') + '"></div>' +
       '<div class="field"><label>هدیه سکه اولین ثبت‌نام (صفر = بدون هدیه)</label><input id="set-signup-bonus" type="number" min="0" step="1" value="' + esc(data.signupBonus) + '"><small>فقط برای حساب‌های جدید؛ مستقل از پاداش دعوت.</small></div>' +
-      '<div class="field"><label>قیمت هر دانلود (فقط کاربر بدون اشتراک)</label><input id="set-dlp" type="number" value="' + esc(data.dlClickPrice) + '"></div>' +
+      '<div class="field"><label>قیمت هر دانلود (فقط وقتی «سکه بابت دانلود» روشن باشد)</label><input id="set-dlp" type="number" value="' + esc(data.dlClickPrice) + '"><label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer;margin-top:6px"><input type="checkbox" id="set-dlcharge" style="width:auto"' + (data.dlChargeEnabled ? ' checked' : '') + '> دریافت سکه بابت هر دانلود (مدل قدیمی). خاموش = دانلود و پخش رایگان برای همه؛ درآمد از تبلیغ و اشتراک.</label></div>' +
       '<div class="field"><label>اشتراک ۱ ماهه</label><input id="set-s1" type="number" value="' + esc(data.sub1m) + '"></div>' +
       '<div class="field"><label>اشتراک ۳ ماهه</label><input id="set-s3" type="number" value="' + esc(data.sub3m) + '"></div>' +
       '<div class="field"><label>اشتراک ۶ ماهه</label><input id="set-s6" type="number" value="' + esc(data.sub6m) + '"></div>' +
@@ -11515,6 +14314,7 @@ function adminTabHtml (tab, data, q) {
       '<div class="field"><label>متن دکمهٔ تبلیغ</label><input id="set-ad-txt" value="' + esc(data.adButtonText || '') + '" placeholder="🎭 جدیدترین اخبار سینما"></div>' +
       '<div class="field"><label>لینک دکمه (https://…)</label><input id="set-ad-url" dir="ltr" value="' + esc(data.adButtonUrl || '') + '" placeholder="https://t.me/movie_shatelup"></div>' +
       '</div>' +
+      streamAdminHtml(data.stream) +
       '<div class="adm-box"><h4>🗄️ ذخیره‌سازی و فدراسیون D1</h4>' +
       '<p class="note">معماری فعلی: داده‌های سنگین (کاربران، کیف پول، تراکنش‌ها، آثار و لینک‌ها) در <b>D1 اصلی</b>، موقتی‌ها (کش، rate-limit، توکن‌های موقت) در <b>KV</b>، صف‌های انتشار و mirrorها در <b>Durable Object</b>، و صفحات عمومی با <b>Cache API</b> کش می‌شوند. شاردهای D1 از اکانت‌های دیگر فقط «آثار» را بین دیتابیس‌ها تقسیم می‌کنند تا حد Free-plan دیرتر تمام شود.</p>' +
       shardStatusHtml(data.storage) +
@@ -11800,6 +14600,7 @@ function bindAdminTab (tab, q) {
       copyText(adSpecText(ADSEC.min, ADSEC.max), function () { toast('مشخصات تبلیغ کپی شد ✓', 'ok'); });
     });
 
+    bindAdNetAdmin(reload);
     var gs = $('#adg-save');
     if (gs) gs.addEventListener('click', function () {
       gs.disabled = true;
@@ -11981,6 +14782,7 @@ function bindAdminTab (tab, q) {
     bindDatabaseMaintenance();
     bindContentSetup();
     bindShardAdmin(q);
+    bindStreamAdmin(q);
     var shRef = $('#shard-refresh');
     if (shRef) shRef.addEventListener('click', function () { loadAdminTab('settings', q); });
     var contentSetup = $('#content-bot-setup');
@@ -12023,6 +14825,13 @@ function bindAdminTab (tab, q) {
         adEnabled: $('#set-ad-on').checked,
         adButtonText: $('#set-ad-txt').value.trim(),
         adButtonUrl: $('#set-ad-url').value.trim(),
+        dlChargeEnabled: $('#set-dlcharge') ? $('#set-dlcharge').checked : undefined,
+        streamEnabled: $('#set-st-on') ? $('#set-st-on').checked : undefined,
+        streamPublic: $('#set-st-pub') ? $('#set-st-pub').checked : undefined,
+        streamTokenMin: $('#set-st-ttl') ? $('#set-st-ttl').value : undefined,
+        streamMaxSessions: $('#set-st-max') ? $('#set-st-max').value : undefined,
+        streamBindIp: $('#set-st-ip') ? $('#set-st-ip').checked : undefined,
+        streamWatermark: $('#set-st-wm') ? $('#set-st-wm').checked : undefined,
       };
       var btEl = $('#set-bot');
       var bt = btEl ? btEl.value.trim() : '';
@@ -12195,8 +15004,28 @@ function openItemEditor (it, prefillUrl) {
       '<button class="btn btn-ghost btn-sm" id="e-ep-add">افزودن</button></div>' +
       '<div id="e-eps" style="margin-top:10px"></div>'
     ) : '') +
+    '<div class="d-sec-h" style="margin-top:18px">🎬 لینک‌های پخش آنلاین (اختیاری)</div>' +
+    '<p style="font-size:12px;color:var(--tx3);margin-bottom:8px">هر خط یک لینک: <span dir="ltr">' + (isSeries ? 'S01E05 ' : '') + '720 دوبله https://… | عنوان</span> — برای زیرنویس جدا، لینک فایل srt/vtt را با «زیرنویس» بنویسید. همین قالب در ربات مدیریت (دکمهٔ «🎬 لینک پخش آنلاین») هم کار می‌کند. با ذخیره، کل فهرست جایگزین می‌شود؛ لینک‌ها هرگز به کاربر نمایش داده نمی‌شوند.</p>' +
+    '<textarea id="e-streams" rows="6" dir="ltr" style="font-size:12px" placeholder="' + (isSeries ? 'S01E01 720 دوبله https://cdn.example.com/s01e01-720.mp4' : '1080 زیرنویس https://cdn.example.com/movie-1080.mp4') + '">' + esc(streamLinesText(it)) + '</textarea>' +
+    '<div class="adm-row" style="margin-top:6px"><button type="button" class="btn btn-ghost btn-sm" id="e-streams-save">💾 ذخیرهٔ لینک‌های پخش</button><span class="badge" id="e-streams-out" style="display:none"></span></div>' +
     '<div class="adm-row" style="justify-content:flex-end;gap:8px;margin-top:16px"><button class="btn btn-ghost" id="e-cancel">انصراف</button><button class="btn btn-primary" id="e-save">💾 ذخیره</button></div>';
   openModal('ویرایش محتوا', html, function (wrap, close) {
+    var stSave = $('#e-streams-save', wrap);
+    if (stSave) stSave.addEventListener('click', function () {
+      var out = $('#e-streams-out', wrap);
+      stSave.disabled = true; out.style.display = ''; out.className = 'badge'; out.textContent = 'در حال ذخیره…';
+      api('/admin/item/' + it.id + '/streams', { method: 'POST', body: { text: $('#e-streams', wrap).value } }).then(function (r) {
+        it = r.item;
+        $('#e-streams', wrap).value = r.lines || '';
+        var rs = r.result || {};
+        out.className = 'badge acc';
+        out.textContent = 'ذخیره شد ✓ — ' + faNum((rs.added || 0) + (rs.updated || 0)) + ' لینک' + ((r.warnings || []).length ? (' — ' + r.warnings[0].warning) : '');
+      }).catch(function (e) {
+        var errs = (e.data && e.data.errors) || [];
+        out.className = 'badge red';
+        out.textContent = e.message + (errs.length ? (' — خط ' + faNum(errs[0].line) + ': ' + errs[0].error) : '');
+      }).then(function () { stSave.disabled = false; });
+    });
     $('#e-cancel', wrap).addEventListener('click', close);
     /* نمایش فیلدهای مخصوص سریال بر اساس «نوع» */
     function syncSeriesBox () {
@@ -12600,6 +15429,7 @@ function render () {
   var app = $('#app');
   var active = 'home';
   var tgBack = TG && TG.BackButton;
+  var playerWasOpen = path.indexOf('/watch/') !== 0 && closePlayerByRoute();
 
   function backBtn (on) {
     if (tgBack) { try { on ? tgBack.show() : tgBack.hide(); } catch (e) { } }
@@ -12659,6 +15489,8 @@ function render () {
   var m;
   if ((m = path.match(new RegExp('^/item/(i_[a-z0-9]+)$')))) {
     var itemId = m[1];
+    /* بازگشت از پلیر: همان صفحهٔ اثر زیر پلیر مانده است؛ دوباره بارگذاری نمی‌کنیم */
+    if (playerWasOpen && __itemShown === itemId && $('#dl-box')) return;
     loadItemData(itemId, fresh).then(function (d) {
       if (seq !== __renderSeq) return; /* رندر جدیدتری (ناوبری/ورود) این را کنار زده است */
       if (d.economy) APP.economy = d.economy;
@@ -12673,8 +15505,24 @@ function render () {
     });
     return;
   }
-  if ((m = path.match(new RegExp('^/watch/(i_[a-z0-9]+)')))) {
-    nav('#/item/' + m[1]);
+  if ((m = path.match(new RegExp('^/watch/(i_[a-z0-9]+)$')))) {
+    var wId = m[1], wq = r.query;
+    var startWatch = function () {
+      var wit = (__itemData && __itemData.item && __itemData.item.id === wId) ? __itemData.item : { id: wId, title: '' };
+      launchPlayer(wit, { epId: wq.ep || '', track: wq.t || '', quality: wq.q || '' });
+    };
+    if (__itemShown === wId && $('#dl-box')) { startWatch(); return; }
+    loadItemData(wId, fresh).then(function (d) {
+      if (seq !== __renderSeq) return;
+      if (d.economy) APP.economy = d.economy;
+      shell(viewItem(d, wId), { active: '', back: true, float: true });
+      try { bindItem(d.item, d); } catch (eBind2) { captureErr('bindItem: ' + ((eBind2 && eBind2.message) || '')); }
+      startWatch();
+    }).catch(function (e) {
+      if (seq !== __renderSeq) return;
+      shell(itemErrorHtml(e), { active: '' });
+      bindItemRetry();
+    });
     return;
   }
   if (path === '/auth') {

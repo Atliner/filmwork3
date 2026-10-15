@@ -1,0 +1,30 @@
+# پلتفرم تبلیغ‌دهندگان (ads.js) — یک Worker مستقل، ترجیحاً روی یک اکانت دیگر Cloudflare.
+# راهنما: docs/ADS-PLATFORM.md   ·   این فایل نمونه است؛ IDها را جایگزین کنید.
+#   npx wrangler deploy --config wrangler.ads.example.toml
+name = "cinema-ads"
+main = "ads.js"
+compatibility_date = "2026-09-01"
+
+# دیتابیس پلتفرم (جدول‌ها خودکار ساخته می‌شوند)
+[[d1_databases]]
+binding = "ADS_DB"
+database_name = "cinema-ads"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# (توصیه) فایل‌های ویدئو/بنر تبلیغ؛ بدون آن، فایل‌ها تکه‌تکه در همان D1 ذخیره می‌شوند.
+[[kv_namespaces]]
+binding = "ADS_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# بستن خودکار کمپین‌های تاریخ‌گذشته (+ بازگشت باقی‌مانده) و پاک‌سازی فاکتورهای منقضی
+[triggers]
+crons = ["*/30 * * * *"]
+
+[vars]
+# ایمیل مدیران پلتفرم (با ویرگول). اگر خالی باشد، اولین حساب ثبت‌نام‌شده مدیر می‌شود.
+ADMIN_EMAILS = ""
+
+# Secretها را با داشبورد یا `wrangler secret put` بگذارید (نه در این فایل):
+#   NET_SECRET     کلید اتصال به سایت اصلی (همین را در پنل سایت ← تبلیغات وارد کنید)
+#   ADS_BOT_TOKEN  (اختیاری) ربات تلگرام برای پرداخت استارز، اعلان‌ها و تأیید کارت‌به‌کارت
+#   ADS_SECRET     (اختیاری) رمز امضای نشست‌ها؛ بدون آن خودکار ساخته می‌شود

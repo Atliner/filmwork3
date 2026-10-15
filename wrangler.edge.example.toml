@@ -1,0 +1,12 @@
+# لبهٔ پخش آنلاین (stream edge) — پراکسی امن ویدئو روی یک اکانت رایگان دیگر Cloudflare.
+# راهنما: docs/ONLINE-PLAYER.md (بخش لبه‌ها). این Worker هیچ Binding/دیتابیسی ندارد.
+#   npx wrangler deploy --config wrangler.edge.example.toml
+#   npx wrangler secret put EDGE_SECRET --config wrangler.edge.example.toml
+# سپس در پنل سایت ← تنظیمات ← «🎬 پخش آنلاین» ← افزودن لبه: آدرس + همان EDGE_SECRET.
+name = "cinema-edge-1"
+main = "scripts/stream-edge-worker.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+# اگر > 0 باشد، پاسخ مبدأ تا این تعداد ثانیه در کش Cloudflare می‌ماند (پیش‌فرض خاموش).
+CACHE_TTL = "0"
