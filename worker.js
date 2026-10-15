@@ -9764,23 +9764,41 @@ function MVX_PLAYER_MODULE(W) {
   function tgApp() {
     try { return (W.Telegram && W.Telegram.WebApp) || (P && P.host && P.host.tg) || null; } catch (e) { return null; }
   }
-  function isFs() { return !!(D.fullscreenElement || D.webkitFullscreenElement) || !!(P && P.tgFsOn); }
+  function isFs() {
+    var tg = tgApp();
+    return !!(D.fullscreenElement || D.webkitFullscreenElement) || !!(P && P.tgFsOn) || !!(tg && tg.isFullscreen);
+  }
+  /* آیا واقعاً داخل مینی‌اپ تلگرام هستیم؟ (SDK رسمی یا پل بومی کلاینت)
+     در مرورگر معمولی باید از Fullscreen خود مرورگر استفاده کرد. */
+  function tgNative() {
+    var tg = tgApp();
+    if (!tg) return null;
+    if (!tg.__fallback) return tg;
+    try { if (W.TelegramWebviewProxy !== undefined && W.TelegramWebviewProxy !== null) return tg; } catch (e) { }
+    try { if (W.webkit && W.webkit.messageHandlers && W.webkit.messageHandlers.TelegramWebviewProxy) return tg; } catch (e) { }
+    try { if (W.external && 'notify' in W.external) return tg; } catch (e) { }
+    return null;
+  }
   function toggleFs() {
     var r = P.root;
+    var tg = tgNative();
     if (isFs()) {
-      if (D.fullscreenElement || D.webkitFullscreenElement) {
-        try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { }
-      }
-      if (P.tgFsOn) tgFs(false);
+      if (tg || (P && P.tgFsOn)) tgFs(false);
+      else if (D.fullscreenElement || D.webkitFullscreenElement) { try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { } }
       try { if (W.screen.orientation && W.screen.orientation.unlock) W.screen.orientation.unlock(); } catch (e) { }
-      P.tgFsOn = false;
+      if (P) P.tgFsOn = false;
       syncFs();
       return;
     }
-    var req = r.requestFullscreen || r.webkitRequestFullscreen;
-    var ok = false;
-    if (req) { try { var pr = req.call(r, { navigationUI: 'hide' }); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(true); }); } catch (e) { ok = false; } }
-    if (!ok) tgFs(true);
+    /* در مینی‌اپ تلگرام اولویت با Fullscreen خود تلگرام است؛
+       Browser API داخل وب‌ویو تلگرام (مخصوصاً iOS) یا اصلاً نیست یا بی‌صدا کار نمی‌کند. */
+    if (tg) tgFs(true);
+    else {
+      var req = r.requestFullscreen || r.webkitRequestFullscreen;
+      var ok = false;
+      if (req) { try { var pr = req.call(r, { navigationUI: 'hide' }); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(true); }); } catch (e) { ok = false; } }
+      if (!ok) tgFs(true);
+    }
     try { if (W.screen.orientation && W.screen.orientation.lock) W.screen.orientation.lock('landscape').catch(function () { }); } catch (e) { }
   }
   function tgFs(on) {
@@ -9790,8 +9808,12 @@ function MVX_PLAYER_MODULE(W) {
       if (on && tg && typeof tg.requestFullscreen === 'function') { tg.requestFullscreen(); did = true; }
       else if (!on && tg && typeof tg.exitFullscreen === 'function') { tg.exitFullscreen(); did = true; }
     } catch (e) { }
-    if (!did && on) { try { if (tg && tg.expand) tg.expand(); } catch (e) { } }
-    if (P) { P.tgFsOn = !!on; syncFs(); }
+    if (!did && on) {
+      /* کلاینت از تمام‌صفحه پشتیبانی نمی‌کند — پیام مناسب */
+      try { if (tg && tg.expand) tg.expand(); } catch (e) { }
+      toast('تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود');
+    }
+    if (P) { P.tgFsOn = !!on && did; syncFs(); }
   }
   function syncFs() {
     if (!P) return;
@@ -10198,6 +10220,10 @@ const APP_HTML = `<!doctype html>
       var proxy = W.TelegramWebviewProxy;
       if (proxy !== undefined && proxy !== null) { proxy.postEvent(type, JSON.stringify(payload)); return 'native'; }
     } catch (e3) { }
+    try {
+      var hm = W.webkit && W.webkit.messageHandlers && W.webkit.messageHandlers.TelegramWebviewProxy;
+      if (hm && hm.postMessage) { hm.postMessage(JSON.stringify({ eventType: type, eventData: payload })); return 'webkit'; }
+    } catch (e3b) { }
     try {
       if (W.external && 'notify' in W.external) { W.external.notify(JSON.stringify({ eventType: type, eventData: payload })); return 'external'; }
     } catch (e4) { }
@@ -11103,7 +11129,11 @@ function buildTgFallback () {
     ready: function () { tgPost('web_app_ready'); },
     expand: function () { tgPost('web_app_expand'); },
     /* تمام‌صفحهٔ مینی‌اپ (مثل SDK رسمی) — بدون آن پلیر در iOS/مینی‌اپ تمام‌صفحه نمی‌شود */
-    requestFullscreen: function () { shim.isFullscreen = true; tgPost('web_app_request_fullscreen'); },
+    requestFullscreen: function () {
+      var how = tgPost('web_app_request_fullscreen');
+      if (!how) { shim.isFullscreen = false; setTimeout(function () { emit('fullscreenFailed', {}); }, 0); return; }
+      shim.isFullscreen = true;
+    },
     exitFullscreen: function () { shim.isFullscreen = false; tgPost('web_app_exit_fullscreen'); },
     close: noop,
     setHeaderColor: noop,
@@ -11132,10 +11162,32 @@ function buildTgFallback () {
       if (t === 'fullscreen_changed') {
         shim.isFullscreen = !!(ev && (ev.is_fullscreen === true || ev.is_fullscreen === 'true'));
         emit('fullscreenChanged', ev);
-      } else if (t === 'fullscreen_failed') emit('fullscreenFailed', ev);
+      } else if (t === 'fullscreen_failed') { shim.isFullscreen = false; emit('fullscreenFailed', ev); }
       else if (t === 'activated') emit('activated', ev);
       else if (t === 'viewport_changed') emit('viewportChanged', ev);
     });
+  } catch (e) { }
+  /* پل بومی کلاینت ← صفحه: کلاینت تلگرام روی موبایل TelegramWebviewProxy.receiveEvent
+     را صدا می‌زند؛ بدون آن رویدادهایی مثل fullscreen_changed گم می‌شوند و آیکن دکمهٔ
+     تمام‌صفحه از وضعیت واقعی عقب می‌ماند (بعد از یک‌بار تغییر، دکمه خراب به نظر می‌رسید). */
+  try {
+    var proxy = window.TelegramWebviewProxy = window.TelegramWebviewProxy || {};
+    var prevRecv = proxy.receiveEvent;
+    proxy.receiveEvent = function (type, data) {
+      try { if (prevRecv) prevRecv(type, data); } catch (e) { }
+      try {
+        var t = String(type || '');
+        var ev = data;
+        if (typeof ev === 'string') { try { ev = JSON.parse(ev || '{}'); } catch (er) { ev = {}; } }
+        if (!ev || typeof ev !== 'object') ev = {};
+        if (t === 'fullscreen_changed') {
+          shim.isFullscreen = !!(ev.is_fullscreen === true || ev.is_fullscreen === 'true');
+          emit('fullscreenChanged', ev);
+        } else if (t === 'fullscreen_failed') { shim.isFullscreen = false; emit('fullscreenFailed', ev); }
+        else if (t === 'activated') emit('activated', ev);
+        else if (t === 'viewport_changed') emit('viewportChanged', ev);
+      } catch (e) { }
+    };
   } catch (e) { }
   return shim;
 }

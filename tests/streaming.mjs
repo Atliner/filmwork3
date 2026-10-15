@@ -331,6 +331,9 @@ console.log('PASS: content-bot streams action (server-side revalidation, role ch
   const cues = fakeWin.MvxPlayer._parseVtt('WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<i>سلام</i>\nدنیا\n\n00:01:00,500 --> 00:01:02,000 align:start\nخط دوم\n');
   assert.equal(cues.length, 2); assert.equal(cues[0].t, 'سلام\nدنیا'); assert.equal(cues[1].s, 60.5);
   for (const k of ['controlslist="nodownload', 'disablepictureinpicture', "addEventListener('contextmenu'", 'mvp-wm', '/stream/open', '/stream/src', "'/api/ad/evs'", 'رد کردن تبلیغ']) assert.ok(a.code.includes(k), k);
+  /* تمام‌صفحه در مینی‌اپ: اولویت با WebApp.requestFullscreen، همگامی آیکن با وضعیت واقعی، پیام برای کلاینت بدون پشتیبانی */
+  for (const k of ['tgNative', 'requestFullscreen', 'fullscreenChanged', 'fullscreenFailed', 'تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود']) assert.ok(a.code.includes(k), k);
+  for (const k of ['web_app_request_fullscreen', 'web_app_exit_fullscreen', 'fullscreen_changed', 'receiveEvent', 'TelegramWebviewProxy']) assert.ok(W.APP_HTML.includes(k), k);
   assert.ok(W.APP_HTML.includes("'/assets/player.js?v=' + PLAYER_V"));
   assert.ok(!W.APP_HTML.includes('${'));
   const scripts = [...W.APP_HTML.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).filter(Boolean);
