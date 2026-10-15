@@ -11661,14 +11661,21 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
     var hasSt = !!st[k];
     var prem = !!(bagLock || (cell && cell.premium) || (st[k] && st[k].premium));
     var lab = (cell && cell.label) || (st[k] && st[k].label) || Q_LABEL[k] || k;
+    /* عنوان بخش دقیقاً همان چیزی است که در پنل ادمین ثبت شده (مثل
+       «Mymovies | 480p.WEB-DL.Doble | 357.9 MB»)؛ برچسب «480p — دوبله» فقط
+       جایزین است وقتی برای فایل عنوانی ثبت نشده باشد. */
+    var vTitle = (files.length === 1 && files[0].title && String(files[0].title).trim())
+      ? String(files[0].title).trim() : '';
     var meta = [];
-    if (files.length > 1) meta.push(esc(faNum(files.length) + ' نسخه'));
-    else if (files.length && cell && cell.sizeBytes) meta.push(esc(fmtBytes(cell.sizeBytes)));
+    if (!vTitle) {
+      if (files.length > 1) meta.push(esc(faNum(files.length) + ' نسخه'));
+      else if (files.length && cell && cell.sizeBytes) meta.push(esc(fmtBytes(cell.sizeBytes)));
+    }
     if (hasSt) meta.push('<span class="st">▶ پخش آنلاین</span>');
     if (prem && !sub) meta.push('⭐ ویژهٔ مشترکین');
     else if (files.length && price > 0) meta.push(esc(faMoney(price) + ' ' + unitName()));
     var html = '<div class="q-sec' + (prem && !sub ? ' lock' : '') + '">' +
-      '<div class="q-sec-h"><div class="q-head">' + esc(lab) + ' — ' + tLab + '</div>' +
+      '<div class="q-sec-h"><div class="q-head">' + esc(vTitle || (lab + ' — ' + tLab)) + '</div>' +
       (meta.length ? '<div class="q-meta">' + meta.join(' · ') + '</div>' : '') + '</div>';
     if (files.length > 1) {
       html += '<div class="q-alts">' + files.map(function (f, i) {
