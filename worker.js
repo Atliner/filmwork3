@@ -9765,6 +9765,16 @@ function MVX_PLAYER_MODULE(W) {
     try { return (W.Telegram && W.Telegram.WebApp) || (P && P.host && P.host.tg) || null; } catch (e) { return null; }
   }
   function isFs() { return !!(D.fullscreenElement || D.webkitFullscreenElement) || !!(P && P.tgFsOn); }
+  /* آیا سایت داخل مینی‌اپ تلگرام باز شده؟ وجود اسکرپت SDK کافی نیست
+     (همان اسکرپت روی مرورگر معمولی هم لود می‌شود). */
+  function tgInApp() {
+    var tg = tgApp();
+    try { if (tg && tg.initData) return true; } catch (e) { }
+    try { if (W.TelegramWebviewProxy && typeof W.TelegramWebviewProxy.postEvent === 'function') return true; } catch (e) { }
+    try { if (W.webkit && W.webkit.messageHandlers && W.webkit.messageHandlers.TelegramWebviewProxy) return true; } catch (e) { }
+    try { if (W.external && 'notify' in W.external) return true; } catch (e) { }
+    return false;
+  }
   function toggleFs() {
     var r = P.root;
     if (isFs()) {
@@ -9777,12 +9787,17 @@ function MVX_PLAYER_MODULE(W) {
       syncFs();
       return;
     }
-    /* اول Fullscreen مرورگر/وب‌ویو (در دسکتاپ و اندروید همین کار می‌کند)؛
-       فقط اگر نبود یا ناموفق بود، سراغ Fullscreen خود تلگرام می‌رویم. */
-    var req = r.requestFullscreen || r.webkitRequestFullscreen;
-    var ok = false;
-    if (req) { try { var pr = req.call(r, { navigationUI: 'hide' }); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(true); }); } catch (e) { ok = false; } }
-    if (!ok) tgFs(true);
+    if (tgInApp()) {
+      /* داخل مینی‌اپ تلگرام: اول خود مینی‌اپ با WebApp.requestFullscreen تمام‌صفحه می‌شود
+         (هدر تلگرام می‌رود) و بعد پلیر که کل صفحهٔ وب‌ویو را می‌گیرد، تمام‌صفحهٔ گوشی است. */
+      tgFs(true);
+    } else {
+      /* مرورگر معمولی: اول Fullscreen مرورگر؛ فقط اگر نبود یا ناموفق بود، تلگرام. */
+      var req = r.requestFullscreen || r.webkitRequestFullscreen;
+      var ok = false;
+      if (req) { try { var pr = req.call(r, { navigationUI: 'hide' }); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(true); }); } catch (e) { ok = false; } }
+      if (!ok) tgFs(true);
+    }
     try { if (W.screen.orientation && W.screen.orientation.lock) W.screen.orientation.lock('landscape').catch(function () { }); } catch (e) { }
   }
   function tgFs(on) {
@@ -9792,6 +9807,11 @@ function MVX_PLAYER_MODULE(W) {
       if (on && tg && typeof tg.requestFullscreen === 'function') { tg.requestFullscreen(); did = true; }
       else if (!on && tg && typeof tg.exitFullscreen === 'function') { tg.exitFullscreen(); did = true; }
     } catch (e) { }
+    if (!did) {
+      /* اگر متد در SDK نبود (نسخهٔ قدیمی)، رویداد خام تلگرام را مستقیم می‌فرستیم تا
+         کلاینت مینی‌اپ را تمام‌صفحه کند — همان رویدادی که SDK می‌فرستست. */
+      try { did = !!(W.__mvxPostEvent && W.__mvxPostEvent(on ? 'web_app_request_fullscreen' : 'web_app_exit_fullscreen', {})); } catch (e) { }
+    }
     if (!did && on) {
       /* نه مرورگر و نه تلگرام — پیام مناسب */
       try { if (tg && tg.expand) tg.expand(); } catch (e) { }
@@ -10201,8 +10221,13 @@ const APP_HTML = `<!doctype html>
   function post (type, data) {
     var payload = data === undefined ? '' : data;
     try {
+      var wv = W.Telegram && W.Telegram.WebView;
+      if (wv && typeof wv.postEvent === 'function') { wv.postEvent(type, payload === '' ? {} : payload); return 'sdk'; }
+    } catch (e2) { }
+    try {
       var proxy = W.TelegramWebviewProxy;
-      if (proxy !== undefined && proxy !== null) { proxy.postEvent(type, JSON.stringify(payload)); return 'native'; }
+      /* شیء باید واقعاً postEvent داشته باشد؛ یک شیء خالی (مثلاً از پل رویدادها) نباید پل بومی را بپوشاند */
+      if (proxy !== undefined && proxy !== null && typeof proxy.postEvent === 'function') { proxy.postEvent(type, JSON.stringify(payload)); return 'native'; }
     } catch (e3) { }
     try {
       var hm = W.webkit && W.webkit.messageHandlers && W.webkit.messageHandlers.TelegramWebviewProxy;
@@ -11113,11 +11138,7 @@ function buildTgFallback () {
     ready: function () { tgPost('web_app_ready'); },
     expand: function () { tgPost('web_app_expand'); },
     /* تمام‌صفحهٔ مینی‌اپ (مثل SDK رسمی) — بدون آن پلیر در iOS/مینی‌اپ تمام‌صفحه نمی‌شود */
-    requestFullscreen: function () {
-      var how = tgPost('web_app_request_fullscreen');
-      if (!how) { shim.isFullscreen = false; setTimeout(function () { emit('fullscreenFailed', {}); }, 0); return; }
-      shim.isFullscreen = true;
-    },
+    requestFullscreen: function () { shim.isFullscreen = true; tgPost('web_app_request_fullscreen'); },
     exitFullscreen: function () { shim.isFullscreen = false; tgPost('web_app_exit_fullscreen'); },
     close: noop,
     setHeaderColor: noop,
