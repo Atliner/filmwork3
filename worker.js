@@ -2750,8 +2750,11 @@ function streamEpisodeInfo(item, bag) {
   };
 }
 function streamWatermarkOf(user) {
-  const id = user.tgId ? String(user.tgId) : String(user.username || '');
-  return (user.tgUsername ? '@' + user.tgUsername + ' · ' : '') + id;
+  /* واترمارک فقط یک شناسه نشان می‌دهد: آیدی تلگرام (@یوزرنیم و اگر نبود شناسهٔ عددی).
+     قبلاً «@یوزرنیم · شناسه» با هم نمایش داده می‌شد و متن خیلی بلند می‌شد. */
+  if (user && user.tgUsername) return '@' + user.tgUsername;
+  if (user && user.tgId) return String(user.tgId);
+  return String((user && user.username) || '');
 }
 async function streamBuild(store, set, user, item, picked, sid, request, avoid) {
   const edge = await streamPickEdge(store, set, user, request, avoid);
@@ -2821,8 +2824,10 @@ async function apiStreamOpen(store, body, request, ctx) {
   const sess = await streamSessionTouch(store, set, user, /^[a-f0-9]{24}$/.test(String(body.sid || '')) ? String(body.sid) : '', reason === 'next' ? 'start' : (reason === 'mid' ? 'switch' : reason));
   if (sess.error) return json({ error: sess.error, code: sess.code }, 409);
   const adCfg = streamAdConfig(set);
-  const meta = { noAds: sub, adCfg: sub ? null : adCfg };
-  if (!sub && reason !== 'renew') {
+  /* تبلیغ‌های پلیر فقط برای مشترک واقعی خاموش است (نه مدیر) تا مدیر هم بتواند نمایش بنر/پیش‌پخش را آزمایش کند */
+  const adFree = adFreeUser(user);
+  const meta = { noAds: adFree, adCfg: adFree ? null : adCfg };
+  if (!adFree && reason !== 'renew') {
     const slot = reason === 'switch' ? 'sw' : (reason === 'mid' ? 'mid' : 'pre');
     const want = slot === 'sw' ? set.plAdSwitch !== false : (slot === 'mid' ? adCfg.midroll > 0 : set.plAdPre !== false);
     const lastAd = Number(body.lastAdAt) || 0;
@@ -2839,7 +2844,7 @@ async function apiStreamOpen(store, body, request, ctx) {
   }
   if (reason === 'mid') return json({ ok: true, noAd: true, sid: sess.sid }); // میان‌پخش بدون تبلیغ: پخش فعلی ادامه دارد
   const info = await streamBuild(store, set, user, item, picked, sess.sid, request, String(body.avoidEdge || ''));
-  if (!sub) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
+  if (!adFree) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
   return json(Object.assign(info, meta));
 }
 async function apiStreamSrc(store, body, request, ctx) {
@@ -2857,9 +2862,9 @@ async function apiStreamSrc(store, body, request, ctx) {
   if (picked.error) return json({ error: picked.error }, picked.status || 400);
   if (picked.premium && !hasActiveSub(user)) return json({ error: 'این کیفیت/قسمت فقط برای مشترکین قابل پخش است.', needSub: true }, 403);
   const info = await streamBuild(store, set, user, item, picked, g.sid, request, '');
-  const sub = hasActiveSub(user);
-  if (!sub) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
-  return json(Object.assign(info, { noAds: sub, adCfg: sub ? null : streamAdConfig(set) }));
+  const adFree = adFreeUser(user);
+  if (!adFree) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
+  return json(Object.assign(info, { noAds: adFree, adCfg: adFree ? null : streamAdConfig(set) }));
 }
 
 /* ═══════════════════════ شبکهٔ تبلیغات خودکار (اتصال به ads.js) ═══════════════════════
@@ -3028,7 +3033,7 @@ function adPayloadNet(c, slot, tok, cfg) {
 }
 /* انتخاب یک تبلیغ برای یک جایگاه: اول شبکهٔ خودکار، اگر نبود تبلیغ داخلی (دستی) */
 async function pickAdForSlot(store, set, user, item, slot, ctx, request, seen) {
-  if (!user || hasActiveSub(user)) return null;
+  if (!user || adFreeUser(user)) return null;
   const dev = adDeviceOf(request);
   const ictx = { ctype: item && item.type === 'series' ? 'series' : 'movie', genres: (item && item.genres) || [], dev: dev, seen: adSeenParse(seen) };
   const cfg = adNetConfig(set, store.env);
@@ -3052,28 +3057,57 @@ async function pickAdForSlot(store, set, user, item, slot, ctx, request, seen) {
   const tok = await adTokenMake(set, { c: a.id, k: 'h', s: slot, u: user.username, m: a.kind, d: a.sec });
   return Object.assign(publicAd(a), { at: tok, net: false, skipAfter: slot === 'dl' ? 0 : Math.min(a.sec, streamAdConfig(set).skipAfter) });
 }
-/* بنرهای پلیر: تا ۲ بنر پهن (روی تصویر) + ۱ بنر توقف؛ نمایش واقعی را پلیر گزارش می‌دهد */
+/* بنرهای پلیر: تا ۲ بنر پهن (روی تصویر) + ۱ بنر توقف؛ نمایش واقعی را پلیر گزارش می‌دهد.
+   اول شبکهٔ تبلیغات؛ هر جایگاهی که از شبکه پر نشد با تبلیغ داخلی (دستی) پر می‌شود تا
+   «بنر روی پلیر» همیشه قابل‌نمایش باشد (قبلاً بدون شبکه، هیچ بنری روی پلیر نمی‌آمد). */
 async function pickPlayerBanners(store, set, user, item, ctx, request, seen) {
-  if (!user || hasActiveSub(user)) return [];
-  const cfg = adNetConfig(set, store.env);
-  if (!cfg.on) return [];
-  const inv = await adNetInventory(store, set);
-  if (!inv || !inv.campaigns.length) return [];
-  const dev = adDeviceOf(request);
-  const ictx = { ctype: item && item.type === 'series' ? 'series' : 'movie', genres: (item && item.genres) || [], dev: dev, seen: adSeenParse(seen) };
-  const out = [];
+  if (!user || adFreeUser(user)) return [];
   const plan = [];
   if (set.plAdBanner !== false) plan.push('ov', 'ov');
   if (set.plAdPause !== false) plan.push('pause');
+  if (!plan.length) return [];
+  const out = [];
   const used = [];
-  for (const slot of plan) {
-    adNetRecord(ctx, store, set, { c: '*', s: slot, e: 'opp', d: dev, t: ictx.ctype });
-    const pool = inv.campaigns.filter(function (x) { return adNetEligible(x, slot, ictx); });
-    const c = adWeightedPick(pool, used) || adWeightedPick(pool);
-    if (!c) continue;
-    used.push(c.id);
-    const tok = await adTokenMake(set, { c: c.id, k: 'n', s: slot, u: user.username, m: 'banner', d: 6, v: 1, ct: ictx.ctype, dv: dev });
-    out.push(Object.assign(adPayloadNet(c, slot, tok, inv.cfg), { slot: slot }));
+  const dev = adDeviceOf(request);
+  const ictx = { ctype: item && item.type === 'series' ? 'series' : 'movie', genres: (item && item.genres) || [], dev: dev, seen: adSeenParse(seen) };
+  const cfg = adNetConfig(set, store.env);
+  const inv = cfg.on ? await adNetInventory(store, set) : null;
+  if (inv && inv.campaigns.length) {
+    for (const slot of plan) {
+      adNetRecord(ctx, store, set, { c: '*', s: slot, e: 'opp', d: dev, t: ictx.ctype });
+      const pool = inv.campaigns.filter(function (x) { return adNetEligible(x, slot, ictx); });
+      const c = adWeightedPick(pool, used) || adWeightedPick(pool);
+      if (!c) continue;
+      used.push(c.id);
+      const tok = await adTokenMake(set, { c: c.id, k: 'n', s: slot, u: user.username, m: 'banner', d: 6, v: 1, ct: ictx.ctype, dv: dev });
+      out.push(Object.assign(adPayloadNet(c, slot, tok, inv.cfg), { slot: slot }));
+    }
+  }
+  /* تبلیغ داخلی برای جایگاه‌های خالی (یک بار برای هر جایگاه) */
+  const needSlots = [];
+  plan.forEach(function (slot) {
+    if (needSlots.indexOf(slot) >= 0) return;
+    if (!out.some(function (b) { return b.slot === slot; })) needSlots.push(slot);
+  });
+  if (needSlots.length) {
+    const house = (await getAds(store)).filter(adIsPlayable);
+    for (const slot of needSlots) {
+      let pool = house.filter(function (a) { return a.kind === 'banner'; });
+      if (slot === 'ov') {
+        /* برای بنر پهنِ روی تصویر، اول تصویرهای عرضی (پهن)؛ اگر نبود هر بنری */
+        const wide = pool.filter(function (a) { return a.w && a.h && a.w / a.h >= 1.6; });
+        pool = wide.length ? wide : pool;
+      }
+      const a = pickAdForUser(pool, user);
+      if (!a) continue;
+      if (a.once) { markAdSeen(user, a.id); try { await saveUser(store, user); } catch (e) { } }
+      const tok = await adTokenMake(set, { c: a.id, k: 'h', s: slot, u: user.username, m: 'banner', d: 6 });
+      out.push({
+        at: tok, net: false, title: a.title || '', cta: a.cta || 'مشاهده', clickable: !!a.linkUrl,
+        kind: 'banner', mediaUrl: a.mediaUrl, size: slot === 'ov' ? 'wide' : 'rect',
+        sec: a.sec || 8, skipAfter: 0, slot: slot,
+      });
+    }
   }
   return out;
 }
@@ -3107,7 +3141,15 @@ async function apiAdEvents(store, body, request, ctx) {
   for (const e of evs) {
     if (!e || e.ev !== 'imp') continue;
     const p = await verifyToken(String(e.at || ''), set.secret);
-    if (!p || p.a !== 1 || p.k !== 'n' || (p.s !== 'ov' && p.s !== 'pause')) continue;
+    if (!p || p.a !== 1 || (p.s !== 'ov' && p.s !== 'pause')) continue;
+    if (p.k === 'h') {
+      /* بنر داخلی: نمایش در آمار همان تبلیغ ثبت می‌شود */
+      if (!adSeenOnce('bimp:h:' + p.c + ':' + p.t + ':' + p.n, 24)) continue;
+      try { await bumpAdStat(store, p.c, 'views', 1); } catch (er) { }
+      n++;
+      continue;
+    }
+    if (p.k !== 'n') continue;
     if (!adSeenOnce('bimp:' + p.c + ':' + p.t + ':' + p.n, 24)) continue;
     adNetRecord(ctx, store, set, { c: p.c, s: p.s, e: 'imp', d: p.dv, t: p.ct });
     n++;
@@ -3321,6 +3363,14 @@ function hasActiveSub(user) {
   if (user.role === 'admin' || user.role === 'premium') return true;
   const until = Number(user.subUntil) || 0;
   return until > Date.now();
+}
+/* «بدون تبلیغ» فقط با اشتراک واقعی (premium یا subUntil) است؛ نقش مدیر اینجا محسوب
+   نمی‌شود تا مدیر بتواند نمایش تبلیغ‌های پلیر (بنر پهن، پیش‌پخش و ...) را آزمایش کند.
+   (دانلود و دکمه‌های ربات همچنان از hasActiveSub استفاده می‌کنند.) */
+function adFreeUser(user) {
+  if (!user) return true;
+  if (user.role === 'premium') return true;
+  return (Number(user.subUntil) || 0) > Date.now();
 }
 function downloadPrice(user, set) {
   /* مدل جدید: دانلود و پخش آنلاین برای همه رایگان است؛ درآمد از تبلیغات و اشتراک
@@ -9125,7 +9175,7 @@ function MVX_PLAYER_MODULE(W) {
     '.mvp-eps{padding:6px 10px 12px}.mvp-ep{display:flex;align-items:center;gap:10px;width:100%;appearance:none;border:0;background:transparent;color:#fff;font:inherit;text-align:right;padding:9px 10px;border-radius:10px;cursor:pointer}' +
     '.mvp-ep:hover{background:rgba(255,255,255,.07)}.mvp-ep.on{background:rgba(255,122,26,.2)}.mvp-ep:disabled{opacity:.35;cursor:default}.mvp-ep i{font-style:normal;width:30px;height:30px;border-radius:9px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;flex:none}' +
     '.mvp-banner{position:absolute;z-index:9;left:50%;bottom:96px;transform:translateX(-50%);width:min(728px,92%);display:none;border-radius:10px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.5);background:#000}' +
-    '.mvp:not(.ui) .mvp-banner{bottom:18px}.mvp-banner.on{display:block;animation:mvpin .25s ease}.mvp-banner img{display:block;width:100%;height:auto;cursor:pointer}' +
+    '.mvp:not(.ui) .mvp-banner{bottom:18px}.mvp-banner.on{display:block;animation:mvpin .25s ease}.mvp-banner img{display:block;width:100%;height:auto;max-height:118px;object-fit:contain;background:#000;cursor:pointer}' +
     '.mvp-adtag{position:absolute;top:6px;left:6px;padding:2px 7px;border-radius:5px;background:rgba(0,0,0,.6);font-size:10.5px;font-weight:800;pointer-events:none}' +
     '.mvp-bx{position:absolute;top:6px;right:6px;width:26px;height:26px;border-radius:50%;border:0;background:rgba(0,0,0,.65);color:#fff;font-size:14px;cursor:pointer;display:none}.mvp-bx.on{display:block}' +
     '.mvp-pad{position:absolute;z-index:10;left:50%;top:50%;transform:translate(-50%,-50%);width:min(360px,86%);display:none;direction:rtl;text-align:center}' +
@@ -9206,9 +9256,10 @@ function MVX_PLAYER_MODULE(W) {
     if (!P) return;
     P.root.classList.add('ui');
     clearTimeout(P.uiT);
+    /* کنترل‌ها باید مدت بیشتری بمانند (قبلاً ۳.۲ ثانیه و خیلی زود مخفی می‌شدند) */
     if (!keep) P.uiT = setTimeout(function () {
       if (P && !P.video.paused && !P.panel && !P.drag) P.root.classList.remove('ui');
-    }, 3200);
+    }, 6500);
   }
 
   function build() {
@@ -9706,27 +9757,45 @@ function MVX_PLAYER_MODULE(W) {
   }
   function hideMsg() { if (P) q('.mvp-msg', P.root).classList.remove('on'); }
 
-  /* ── تمام‌صفحه ── */
-  function isFs() { return !!(D.fullscreenElement || D.webkitFullscreenElement); }
+  /* ── تمام‌صفحه ──
+     در مینی‌اپ تلگرام Fullscreen API مرورگر (به‌خصوص iOS) کار نمی‌کند؛ باید از
+     WebApp.requestFullscreen تلگرام استفاده شود تا پلیر تمام صفحهٔ گوشی را بگیرد. */
+  function tgApp() {
+    try { return (W.Telegram && W.Telegram.WebApp) || (P && P.host && P.host.tg) || null; } catch (e) { return null; }
+  }
+  function isFs() { return !!(D.fullscreenElement || D.webkitFullscreenElement) || !!(P && P.tgFsOn); }
   function toggleFs() {
     var r = P.root;
     if (isFs()) {
-      try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { }
+      if (D.fullscreenElement || D.webkitFullscreenElement) {
+        try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { }
+      }
+      if (P.tgFsOn) tgFs(false);
+      try { if (W.screen.orientation && W.screen.orientation.unlock) W.screen.orientation.unlock(); } catch (e) { }
+      P.tgFsOn = false;
+      syncFs();
       return;
     }
     var req = r.requestFullscreen || r.webkitRequestFullscreen;
     var ok = false;
-    if (req) { try { var pr = req.call(r); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(); }); } catch (e) { ok = false; } }
-    if (!ok) tgFs();
+    if (req) { try { var pr = req.call(r, { navigationUI: 'hide' }); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(true); }); } catch (e) { ok = false; } }
+    if (!ok) tgFs(true);
     try { if (W.screen.orientation && W.screen.orientation.lock) W.screen.orientation.lock('landscape').catch(function () { }); } catch (e) { }
   }
-  function tgFs() {
-    var tg = P.host.tg;
-    try { if (tg && tg.requestFullscreen) tg.requestFullscreen(); } catch (e) { }
+  function tgFs(on) {
+    var tg = tgApp();
+    var did = false;
+    try {
+      if (on && tg && typeof tg.requestFullscreen === 'function') { tg.requestFullscreen(); did = true; }
+      else if (!on && tg && typeof tg.exitFullscreen === 'function') { tg.exitFullscreen(); did = true; }
+    } catch (e) { }
+    if (!did && on) { try { if (tg && tg.expand) tg.expand(); } catch (e) { } }
+    if (P) { P.tgFsOn = !!on; syncFs(); }
   }
   function syncFs() {
     if (!P) return;
-    q('[data-a="fs"]', P.root).innerHTML = isFs() ? I.fsx : I.fs;
+    var b = q('[data-a="fs"]', P.root);
+    if (b) b.innerHTML = isFs() ? I.fsx : I.fs;
   }
 
   /* ── رویدادها ── */
@@ -9975,6 +10044,26 @@ function MVX_PLAYER_MODULE(W) {
     try { D.documentElement.style.overflow = 'hidden'; } catch (e) { }
     P.wmT = setInterval(moveWm, 20000);
     moveWm();
+    /* وضعیت تمام‌صفحهٔ مینی‌اپ تلگرام (درخواست/خروج از سمت کلاینت) با آیکن دکمه همگام می‌شود */
+    (function bindTgFs() {
+      var tg = tgApp();
+      if (!tg || !tg.onEvent) return;
+      function onFs(data) {
+        if (!P) return;
+        if (data && typeof data === 'object' && 'is_fullscreen' in data) P.tgFsOn = !!data.is_fullscreen;
+        syncFs();
+      }
+      function onFsFail() {
+        if (!P) return;
+        P.tgFsOn = false;
+        syncFs();
+        toast('تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود');
+      }
+      try { tg.onEvent('fullscreenChanged', onFs); tg.onEvent('fullscreenFailed', onFsFail); } catch (e) { }
+      P.offFsEvt = function () {
+        try { tg.offEvent('fullscreenChanged', onFs); tg.offEvent('fullscreenFailed', onFsFail); } catch (e) { }
+      };
+    })();
     if (P.host.tgBack) { try { P.host.tgBack(true, function () { close(); }); } catch (e) { } }
     requestOpen('start');
     return W.MvxPlayer;
@@ -9988,7 +10077,9 @@ function MVX_PLAYER_MODULE(W) {
     clearInterval(p.wmT); clearInterval(p.nxT); clearTimeout(p.uiT); clearTimeout(p.resT); clearTimeout(p.bhT); clearTimeout(p.padT);
     destroyHls();
     try { p.video.pause(); p.video.removeAttribute('src'); p.video.load(); } catch (e) { }
-    if (isFs()) { try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { } }
+    if (D.fullscreenElement || D.webkitFullscreenElement) { try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { } }
+    if (p.tgFsOn) { try { tgFs(false); } catch (e) { } }
+    if (p.offFsEvt) { try { p.offFsEvt(); } catch (e) { } }
     D.removeEventListener('keydown', onKey, true);
     D.removeEventListener('fullscreenchange', syncFs);
     D.removeEventListener('webkitfullscreenchange', syncFs);
@@ -10727,8 +10818,10 @@ button.dp-slide{cursor:zoom-in}
   .d-title-en{text-align:center;margin-top:-4px}
   .d-meta-row{justify-content:center;font-size:12.5px;gap:6px 10px}
   .d-genres{justify-content:center}
-  .d-cta{justify-content:center;width:100%}
-  .d-cta .btn-lg{min-width:0;flex:1;max-width:320px}
+  .d-cta{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:100%}
+  .d-cta .btn-lg{flex:1 1 calc(50% - 4px);min-width:calc(50% - 4px);max-width:100%;padding:12px 8px;font-size:13px;line-height:1.7;text-align:center;white-space:normal}
+  .d-cta .btn-ico{width:42px;height:42px;font-size:16px;flex:none}
+  .d-cta .st-test{display:block;margin:2px 0 0}
   .d-desc{text-align:center;font-size:13.5px}
   .d-more{align-self:center}
   .d-body{padding:4px 14px 100px}
@@ -10976,24 +11069,54 @@ function buildTgFallback () {
      نباید کاربری را که الان در صفحهٔ دیگری است دوباره به فیلمِ لانچ اول بپراند. */
   if (LAUNCH && LAUNCH.restored) delete un.start_param;
   var noop = function () { };
-  return {
+  var evs = {};
+  function emit (type, data) {
+    var l = evs[type] || [];
+    for (var i = 0; i < l.length; i++) { try { l[i](data); } catch (e) { } }
+  }
+  var shim = {
     initData: raw,
     initDataUnsafe: un,
     colorScheme: 'dark',
+    isFullscreen: false,
     ready: function () { tgPost('web_app_ready'); },
     expand: function () { tgPost('web_app_expand'); },
+    /* تمام‌صفحهٔ مینی‌اپ (مثل SDK رسمی) — بدون آن پلیر در iOS/مینی‌اپ تمام‌صفحه نمی‌شود */
+    requestFullscreen: function () { shim.isFullscreen = true; tgPost('web_app_request_fullscreen'); },
+    exitFullscreen: function () { shim.isFullscreen = false; tgPost('web_app_exit_fullscreen'); },
     close: noop,
     setHeaderColor: noop,
     setBackgroundColor: noop,
     disableVerticalSwipes: noop,
-    onEvent: noop,
-    offEvent: noop,
+    onEvent: function (type, cb) { if (cb) { (evs[type] = evs[type] || []).push(cb); } },
+    offEvent: function (type, cb) {
+      var l = evs[type] || [];
+      for (var i = l.length - 1; i >= 0; i--) if (l[i] === cb) l.splice(i, 1);
+    },
     openTelegramLink: function (url) { try { location.assign(String(url)); } catch (e) { } },
     HapticFeedback: { impactOccurred: noop, notificationOccurred: noop, selectionChanged: noop },
     BackButton: { show: noop, hide: noop, onClick: noop, offClick: noop },
     MainButton: { show: noop, hide: noop, setText: noop, onClick: noop, offClick: noop },
     __fallback: true
   };
+  /* رویدادهای کلاینت تلگرام (مثلاً تغییر وضعیت تمام‌صفحه) در تلگرام وب با postMessage
+     می‌آیند؛ اینجا به همان handlerهای onEvent می‌رسند. */
+  try {
+    window.addEventListener('message', function (e) {
+      var d = null;
+      try { d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch (er) { d = null; }
+      if (!d || !d.eventType) return;
+      var t = String(d.eventType);
+      var ev = d.eventData || {};
+      if (t === 'fullscreen_changed') {
+        shim.isFullscreen = !!(ev && (ev.is_fullscreen === true || ev.is_fullscreen === 'true'));
+        emit('fullscreenChanged', ev);
+      } else if (t === 'fullscreen_failed') emit('fullscreenFailed', ev);
+      else if (t === 'activated') emit('activated', ev);
+      else if (t === 'viewport_changed') emit('viewportChanged', ev);
+    });
+  } catch (e) { }
+  return shim;
 }
 var __bootErr = null;
 function captureErr (msg) { if (!__bootErr && msg) __bootErr = String(msg); }
@@ -12961,14 +13084,20 @@ function bindItem (it, data) {
 function shareOrCopy (it) {
   var siteUrl = location.origin + '/#/item/' + it.id;
   var miniUrl = miniAppItemUrl(it.id);
-  var html = '<p class="note">لینک مینی‌اپ، تلگرام را روی صفحه همین فیلم یا سریال باز می‌کند. لینک سایت در مرورگر باز می‌شود.</p>' +
+  /* لینک سایت فقط برای مدیر؛ بقیهٔ کاربران فقط لینک مینی‌اپ را می‌بینند و کپی می‌کنند */
+  var isAdmin = !!(APP.user && APP.user.role === 'admin');
+  var html = '<p class="note">لینک مینی‌اپ، تلگرام را روی صفحه همین فیلم یا سریال باز می‌کند.' +
+    (isAdmin ? ' لینک سایت فقط برای مدیران نمایش داده می‌شود.' : '') + '</p>' +
     '<div class="field"><label for="share-mini-url">لینک مینی‌اپ تلگرام</label><input id="share-mini-url" dir="ltr" readonly value="' + esc(miniUrl) + '"></div>' +
     '<div class="adm-row"><button type="button" class="btn btn-primary" id="share-mini-copy">کپی لینک مینی‌اپ</button><button type="button" class="btn btn-ghost" id="share-mini-send">اشتراک در تلگرام</button></div>' +
-    '<div class="field" style="margin-top:20px"><label for="share-site-url">لینک سایت</label><input id="share-site-url" dir="ltr" readonly value="' + esc(siteUrl) + '"></div>' +
-    '<button type="button" class="btn btn-ghost" id="share-site-copy">کپی لینک سایت</button>';
+    (isAdmin
+      ? '<div class="field" style="margin-top:20px"><label for="share-site-url">لینک سایت (فقط مدیر)</label><input id="share-site-url" dir="ltr" readonly value="' + esc(siteUrl) + '"></div>' +
+        '<button type="button" class="btn btn-ghost" id="share-site-copy">کپی لینک سایت</button>'
+      : '');
   openModal('اشتراک‌گذاری ' + (it.title || ''), html, function (wrap) {
     $('#share-mini-copy', wrap).addEventListener('click', function () { copyText(miniUrl, function () { toast('لینک مینی‌اپ کپی شد', 'ok'); }); });
-    $('#share-site-copy', wrap).addEventListener('click', function () { copyText(siteUrl, function () { toast('لینک سایت کپی شد', 'ok'); }); });
+    var siteCopy = $('#share-site-copy', wrap);
+    if (siteCopy) siteCopy.addEventListener('click', function () { copyText(siteUrl, function () { toast('لینک سایت کپی شد', 'ok'); }); });
     $('#share-mini-send', wrap).addEventListener('click', function () {
       openBot('https://t.me/share/url?url=' + encodeURIComponent(miniUrl) + '&text=' + encodeURIComponent(it.title || ''));
     });

@@ -199,7 +199,7 @@ const setSet = async patch => { const s = await store.get('set'); await store.se
   assert.match(r.body.src, /^https:\/\/site\.test\/sv\/v\/[A-Za-z0-9_-]+$/);
   assert.equal(r.body.cur.quality, '720'); assert.equal(r.body.subs.length, 1);
   assert.equal(r.body.subDefault, '', 'نسخهٔ دوبله: زیرنویس پیش‌فرض خاموش');
-  assert.match(r.body.wm, /viewer/);
+  assert.equal(r.body.wm, '@viewer', 'واترمارک فقط آیدی تلگرام است؛ نه ترکیب دو شناسه');
   assert.ok(!JSON.stringify(r.body).includes('cdn.example.com'), 'API پخش لینک مبدأ را نشان نمی‌دهد');
   assert.ok(r.body.options.dub.length === 2 && r.body.options.sub.length === 0);
   /* لبهٔ داخلی Worker (/sv) همان توکن را با رمز ذخیره‌شده باز می‌کند */
@@ -356,5 +356,29 @@ console.log('PASS: player is a separate immutable asset with anti-download attri
   } finally { globalThis.fetch = realF; }
 }
 console.log('PASS: ad platform outage falls back to house ads with a 30s backoff (no per-request timeouts).');
+
+/* ── ۱۰. بنرهای پلیر: تبلیغ داخلی برای جایگاه‌های خالی، مدیر تبلیغ‌ها را می‌بیند، مشترک نه ── */
+{
+  await setSet({ plAdPre: false, plAdBanner: true, plAdPause: true, adNetEnabled: false, adNetUrl: '', adNetSecret: '' });
+  await store.set('ads', [{ id: 'adw', kind: 'banner', mediaUrl: 'https://ads.example.com/wide.jpg', w: 728, h: 90, linkUrl: 'https://shop.example.com/', sec: 8, active: true, weight: 1 }]); W.bustAds();
+  const r = await call(W.apiStreamOpen, userTok, { itemId: movie.id, track: 'dub' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const ov = (r.body.banners || []).filter(b => b.slot === 'ov');
+  const pz = (r.body.banners || []).filter(b => b.slot === 'pause');
+  assert.equal(ov.length, 1, 'بنر پهن داخلی برای «روی پلیر» انتخاب شد');
+  assert.equal(ov[0].mediaUrl, 'https://ads.example.com/wide.jpg');
+  assert.equal(ov[0].net, false);
+  assert.equal(pz.length, 1, 'بنر توقف داخلی انتخاب شد');
+  assert.ok(r.body.adCfg && r.body.adCfg.banner === true, 'زمان‌بندی بنر پلیر برای کاربر بدون اشتراک روشن است');
+  const adm = await call(W.apiStreamOpen, adminTok, { itemId: movie.id, track: 'dub' });
+  assert.ok(!adm.body.noAds, 'مدیر برای آزمایش، تبلیغ‌های پلیر را می‌بیند');
+  assert.ok((adm.body.banners || []).length > 0, 'مدیر هم بنرهای پلیر را می‌بیند');
+  assert.equal(adm.body.wm, '1001', 'واترمارک بدون یوزرنیم: فقط شناسهٔ عددی تلگرام');
+  const sub2 = await W.createTgUser(store, { tgId: '7007', tgName: 'S2' }); sub2.role = 'free'; sub2.subUntil = Date.now() + 86400000; await W.saveUser(store, sub2);
+  const sub2Open = await call(W.apiStreamOpen, await W.makeToken(store, sub2), { itemId: movie.id, track: 'dub' });
+  assert.equal(sub2Open.body.noAds, true, 'مشترک واقعی بدون تبلیغ');
+  assert.equal(sub2Open.body.banners, undefined, 'مشترک واقعی بنر نمی‌بیند');
+}
+console.log('PASS: player banners fall back to house ads (wide overlay + pause), watermark is a single Telegram id, admins see player ads for testing while real subscribers stay ad-free.');
 // تایمر ارسال دسته‌ای رویدادها (waitUntil ۲۰ ثانیه‌ای) را در Node منتظر نمی‌مانیم.
 process.exit(0);
