@@ -9817,6 +9817,12 @@ function MVX_PLAYER_MODULE(W) {
       /* رویداد خروج را حتماً می‌فرستیم: متد exitFullscreen ممکن است چون وضعیت داخلی SDK
          به‌روز نشده (isFullscreen=false مانده) بی‌صدا هیچ کاری نکند و مینی‌اپ تمام‌صفحه بماند. */
       try { if (W.__mvxPostEvent && W.__mvxPostEvent('web_app_exit_fullscreen', {})) did = true; } catch (e) { }
+      /* بعد از خروج از تمام‌صفحه، مینی‌اپ باید به حالت «فول‌سایز» (expand) قبلی برگردد،
+         نه حالت نیمه‌باز — وگرنه کاربر فکر می‌کند خروج انجام نشده است. */
+      try {
+        if (tg && typeof tg.expand === 'function') tg.expand();
+        else if (W.__mvxPostEvent) W.__mvxPostEvent('web_app_expand', {});
+      } catch (e) { }
     }
     if (!did && on) {
       /* نه مرورگر و نه تلگرام — پیام مناسب */
