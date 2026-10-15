@@ -10734,6 +10734,17 @@ button.dp-slide{cursor:zoom-in}
 .q-act .btn{flex:1;min-width:140px;justify-content:center}
 .q-btn .q-st{color:var(--acc2);font-weight:800}
 .q-head{font-size:12.5px;color:var(--tx2);font-weight:700;margin-top:4px}
+/* بخش هر کیفیت: عنوان کیفیت نوشته می‌شود و زیر آن لینک‌های دانلود و پخش آنلاین همان کیفیت */
+.q-secs{display:flex;flex-direction:column;gap:12px;max-width:560px;margin:8px 0 12px}
+.q-sec{display:flex;flex-direction:column;gap:10px;border:1px solid var(--glass-line);border-radius:14px;padding:12px 12px 11px;background:rgba(255,255,255,.045)}
+.q-sec.lock{border-color:rgba(255,176,31,.45);box-shadow:inset 0 0 0 1px rgba(255,176,31,.18)}
+.q-sec .q-head{font-size:15px;color:var(--tx);font-weight:900;margin:0}
+.q-sec .q-meta{font-size:11.5px;color:var(--tx3);font-weight:700;margin:0;display:flex;flex-wrap:wrap;gap:2px 10px}
+.q-sec .q-meta .st{color:var(--acc2)}
+.q-sec .q-alts{margin:0;max-width:none;gap:8px}
+.q-sec .q-act{margin:0;max-width:none}
+.q-sec .q-act .btn{flex:1 1 150px}
+.q-sec .q-alt{width:100%}
 .ep .ep-st{display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:30px;padding:0 8px;border-radius:999px;background:var(--grad);color:#111;font-size:12px;font-weight:900;flex:none}
 .card-st{position:absolute;bottom:8px;right:8px;z-index:3;font-size:10px;font-weight:900;padding:3px 8px;border-radius:999px;background:linear-gradient(135deg,#ff5f2e,#ffb01f);color:#111;box-shadow:0 4px 12px rgba(255,122,26,.35)}
 .st-test{font-size:11px;font-weight:800;color:var(--warn);margin-inline-start:6px}
@@ -11614,7 +11625,7 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
   var st = (stm && streamReady() && stm[track]) || {};
   var price = currentDlPrice();
   var sub = hasSub();
-  var classic = ['480', '720', '1080', '4k'];
+  var classic = ['4k', '1080', '720', '480']; /* بهترین کیفیت بالاتر — مثل چیدمان قبلی */
   var keys = Object.keys(v).filter(function (k) {
     var cell = v[k];
     return cell && (cell.has || cell.source || (cell.files && cell.files.length));
@@ -11627,24 +11638,43 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
     if (ib >= 0) return 1;
     return String((v[a] && v[a].label) || a).localeCompare(String((v[b] && v[b].label) || b), 'fa');
   });
+  keys = keys.filter(function (k) { return cellFilesOf(v[k]).length || st[k]; });
   if (!keys.length) {
     return '<p class="note">برای «' + (track === 'dub' ? 'دوبله' : 'زیرنویس') + '» هنوز کیفیتی ثبت نشده.</p>';
   }
-  return '<div class="q-row">' + keys.map(function (k) {
+  var tLab = track === 'dub' ? 'دوبله' : 'زیرنویس';
+  /* مثل قدیم: برای هر کیفیت یک عنوان نوشته می‌شود و زیر همان عنوان،
+     لینک‌های دانلود و پخش آنلاینِ همان کیفیت قرار می‌گیرد (بدون کلیک روی کارت). */
+  return '<div class="q-secs">' + keys.map(function (k) {
     var cell = v[k];
     var files = cellFilesOf(cell);
     var hasSt = !!st[k];
-    var on = files.length > 0 || hasSt;
     var prem = !!(bagLock || (cell && cell.premium) || (st[k] && st[k].premium));
     var lab = (cell && cell.label) || (st[k] && st[k].label) || Q_LABEL[k] || k;
-    var extra = '';
-    if (files.length > 1) extra += '<span>' + faNum(files.length) + ' نسخه</span>';
-    else if (files.length && cell.sizeBytes) extra += '<span>' + fmtBytes(cell.sizeBytes) + '</span>';
-    if (hasSt) extra += '<span class="q-st">▶ پخش آنلاین</span>';
-    if (on && prem && !sub) extra += '<span>⭐ اشتراک</span>';
-    else if (files.length && price > 0) extra += '<span>' + faMoney(price) + ' ' + unitName() + '</span>';
-    return '<button type="button" class="q-btn' + (on ? '' : ' off') + (on && prem && !sub ? ' lock' : '') + '" data-q="' + esc(k) + '" data-nf="' + files.length + '" data-st="' + (hasSt ? 1 : 0) + '"' + (on ? '' : ' disabled') + '>' + esc(lab) + extra + '</button>';
-  }).join('') + '</div><div class="q-alts" id="q-alts"></div>';
+    var meta = [];
+    if (files.length > 1) meta.push(esc(faNum(files.length) + ' نسخه'));
+    else if (files.length && cell && cell.sizeBytes) meta.push(esc(fmtBytes(cell.sizeBytes)));
+    if (hasSt) meta.push('<span class="st">▶ پخش آنلاین</span>');
+    if (prem && !sub) meta.push('⭐ ویژهٔ مشترکین');
+    else if (files.length && price > 0) meta.push(esc(faMoney(price) + ' ' + unitName()));
+    var html = '<div class="q-sec' + (prem && !sub ? ' lock' : '') + '">' +
+      '<div class="q-sec-h"><div class="q-head">' + esc(lab) + ' — ' + tLab + '</div>' +
+      (meta.length ? '<div class="q-meta">' + meta.join(' · ') + '</div>' : '') + '</div>';
+    if (files.length > 1) {
+      html += '<div class="q-alts">' + files.map(function (f, i) {
+        var flab = (f.title && f.title.trim()) ? f.title : (lab + (i ? (' — نسخه ' + faNum(i + 1)) : ''));
+        return '<button type="button" class="q-alt" data-q="' + esc(k) + '" data-fid="' + esc(f.id || '') + '"><span>' + esc(flab) + '</span><span class="go">📥 دانلود</span></button>';
+      }).join('') + '</div>';
+      if (hasSt) html += '<div class="q-act"><button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '">▶ پخش آنلاین</button></div>';
+    } else {
+      html += '<div class="q-act">' +
+        (files.length ? '<button type="button" class="btn btn-primary q-dl" data-q="' + esc(k) + '" data-fid="' + esc((files[0] && files[0].id) || '') + '">📥 دانلود</button>' : '') +
+        (hasSt ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '">▶ پخش آنلاین</button>' : '') +
+        '</div>';
+      if (!files.length) html += '<p class="note" style="margin:0">این کیفیت فقط پخش آنلاین دارد.</p>';
+    }
+    return html + '</div>';
+  }).join('') + '</div>';
 }
 function trackTabsHtml (id, onTrack) {
   return '<div class="seg" id="' + id + '">' +
@@ -12900,54 +12930,32 @@ function requestDownload (itemId, opts, btn) {
 }
 
 function bindQualityClicks (root, it, track, ep, bagLock) {
-  var bag = ep || it;
-  var variants = variantsOf(bag, it);
-  var stm = stmOf(bag);
-  $all('.q-btn', root).forEach(function (b) {
+  /* لینک‌های هر کیفیت زیر عنوان همان کیفیت آماده است؛ فقط کلیک‌ها را می‌بندیم */
+  function lockGuard (btn) {
+    var sec = btn.closest ? btn.closest('.q-sec') : null;
+    if (sec && sec.classList.contains('lock')) {
+      toast('این کیفیت فقط با اشتراک فعال در دسترس است', 'err');
+      nav('#/subscribe');
+      return true;
+    }
+    return false;
+  }
+  $all('.q-dl', root).forEach(function (b) {
     b.addEventListener('click', function () {
-      if (b.classList.contains('lock')) {
-        toast('این کیفیت فقط با اشتراک فعال در دسترس است', 'err');
-        nav('#/subscribe');
-        return;
-      }
-      /* رنگ دکمهٔ کیفیتِ انتخاب‌شده مثل حالت هاور می‌شود تا دکمه‌های زیر
-         مشخص باشد برای کدام کیفیت است */
-      $all('.q-btn', root).forEach(function (x) { x.classList.remove('on'); });
-      b.classList.add('on');
-      var q = b.getAttribute('data-q');
-      var cell = (variants[track] || {})[q] || {};
-      var files = cellFilesOf(cell);
-      var canStream = b.getAttribute('data-st') === '1' && streamReady();
-      var alts = $('#q-alts', root) || $('#q-alts');
-      if (!alts) {
-        if (files.length) requestDownload(it.id, { epId: ep && ep.id, track: track, quality: q, fileId: (files[0] && files[0].id) || '' }, b);
-        else if (canStream) openPlayer(it, { epId: ep && ep.id, track: track, quality: q });
-        return;
-      }
-      var qlab = cell.label || ((stm[track] || {})[q] || {}).label || Q_LABEL[q] || q;
-      /* کنار کیفیت انتخاب‌شده دو دکمه: «دانلود» و «پخش آنلاین» */
-      var html = '<div class="q-head">' + esc(qlab) + ' — ' + (track === 'dub' ? 'دوبله' : 'زیرنویس') + '</div><div class="q-act">' +
-        (files.length === 1 ? '<button type="button" class="btn btn-primary q-dl">📥 دانلود</button>' : '') +
-        (canStream ? '<button type="button" class="btn btn-white q-play">▶ پخش آنلاین</button>' : '') + '</div>';
-      /* نسخه‌ها را همیشه نشان بده وقتی بیش از یکی است (هر نسخه دکمهٔ دانلود خودش را دارد) */
-      if (files.length > 1) {
-        html += files.map(function (f, i) {
-          var lab = (f.title && f.title.trim()) ? f.title : (qlab + (i ? (' — نسخه ' + faNum(i + 1)) : ''));
-          return '<button type="button" class="q-alt" data-q="' + q + '" data-fid="' + esc(f.id || '') + '"><span>' + esc(lab) + '</span><span class="go">📥 دانلود</span></button>';
-        }).join('');
-      } else if (!files.length) html += '<p class="note" style="margin:4px 0 0">این کیفیت فقط پخش آنلاین دارد.</p>';
-      alts.innerHTML = html;
-      var dlb = $('.q-dl', alts);
-      if (dlb) dlb.addEventListener('click', function () {
-        requestDownload(it.id, { epId: ep && ep.id, track: track, quality: q, fileId: (files[0] && files[0].id) || '' }, dlb);
-      });
-      var pb = $('.q-play', alts);
-      if (pb) pb.addEventListener('click', function () { openPlayer(it, { epId: ep && ep.id, track: track, quality: q }); });
-      $all('.q-alt', alts).forEach(function (a) {
-        a.addEventListener('click', function () {
-          requestDownload(it.id, { epId: ep && ep.id, track: track, quality: a.getAttribute('data-q'), fileId: a.getAttribute('data-fid') }, a);
-        });
-      });
+      if (lockGuard(b)) return;
+      requestDownload(it.id, { epId: ep && ep.id, track: track, quality: b.getAttribute('data-q'), fileId: b.getAttribute('data-fid') || '' }, b);
+    });
+  });
+  $all('.q-play', root).forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (lockGuard(b)) return;
+      openPlayer(it, { epId: ep && ep.id, track: track, quality: b.getAttribute('data-q') });
+    });
+  });
+  $all('.q-alt', root).forEach(function (a) {
+    a.addEventListener('click', function () {
+      if (lockGuard(a)) return;
+      requestDownload(it.id, { epId: ep && ep.id, track: track, quality: a.getAttribute('data-q'), fileId: a.getAttribute('data-fid') || '' }, a);
     });
   });
 }
@@ -13075,8 +13083,6 @@ function bindItem (it, data) {
   if (main) main.addEventListener('click', function () {
     var box = $('#dl-box');
     if (box) { try { box.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { box.scrollIntoView(); } }
-    var first = $('#dl-box .q-btn:not(.off)') || $('#dl-box .ep');
-    if (first && it.type !== 'series' && $all('#dl-box .q-btn:not(.off)').length === 1) first.click();
   });
   if (it.type === 'series') bindSeriesDl(it);
   else bindMovieDl(it);
