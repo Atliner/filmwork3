@@ -9777,16 +9777,22 @@ function MVX_PLAYER_MODULE(W) {
   }
   function toggleFs() {
     var r = P.root;
-    if (isFs()) {
+    /* جهت دکمه با فشار کاربر تعیین می‌شود (P.fsWanted)؛ وضعیت رویدادها نباید جهت را
+       بچرخانند — وگرنه فشار دوم دوباره «ورود» می‌زد، کلاینت ارور می‌داد و مینی‌اپ
+       همان‌طور تمام‌صفحه می‌ماند. */
+    var wantOff = (P && P.fsWanted) || isFs();
+    if (wantOff) {
+      if (P) P.fsWanted = false;
       if (D.fullscreenElement || D.webkitFullscreenElement) {
         try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { }
       }
-      tgFs(false); /* حتی اگر پرچم وضعیت جابه‌جا شده باشد، خروج را حتماً بفرست */
+      tgFs(false); /* خروج از تمام‌صفحه + بازگشت مینی‌اپ به حالت فول‌سایز */
       try { if (W.screen.orientation && W.screen.orientation.unlock) W.screen.orientation.unlock(); } catch (e) { }
       P.tgFsOn = false;
       syncFs();
       return;
     }
+    if (P) P.fsWanted = true;
     if (tgInApp()) {
       /* داخل مینی‌اپ تلگرام: اول خود مینی‌اپ با WebApp.requestFullscreen تمام‌صفحه می‌شود
          (هدر تلگرام می‌رود) و بعد پلیر که کل صفحهٔ وب‌ویو را می‌گیرد، تمام‌صفحهٔ گوشی است. */
@@ -9807,16 +9813,10 @@ function MVX_PLAYER_MODULE(W) {
       if (on && tg && typeof tg.requestFullscreen === 'function') { tg.requestFullscreen(); did = true; }
       else if (!on && tg && typeof tg.exitFullscreen === 'function') { tg.exitFullscreen(); did = true; }
     } catch (e) { }
-    if (on) {
-      if (!did) {
-        /* اگر متد در SDK نبود (نسخهٔ قدیمی)، رویداد خام تلگرام را مستقیم می‌فرستیم تا
-           کلاینت مینی‌اپ را تمام‌صفحه کند — همان رویدادی که SDK می‌فرستست. */
-        try { did = !!(W.__mvxPostEvent && W.__mvxPostEvent('web_app_request_fullscreen', {})); } catch (e) { }
-      }
-    } else {
-      /* رویداد خروج را حتماً می‌فرستیم: متد exitFullscreen ممکن است چون وضعیت داخلی SDK
-         به‌روز نشده (isFullscreen=false مانده) بی‌صدا هیچ کاری نکند و مینی‌اپ تمام‌صفحه بماند. */
-      try { if (W.__mvxPostEvent && W.__mvxPostEvent('web_app_exit_fullscreen', {})) did = true; } catch (e) { }
+    /* رویداد خام تلگرام را همیشه می‌فرستیم (تکرار آن بی‌خطر است) تا تحویل هرگز گم نشود؛
+       متد SDK ممکن است بی‌صدا کاری نکند. */
+    try { if (W.__mvxPostEvent && W.__mvxPostEvent(on ? 'web_app_request_fullscreen' : 'web_app_exit_fullscreen', {})) did = true; } catch (e) { }
+    if (!on) {
       /* بعد از خروج از تمام‌صفحه، مینی‌اپ باید به حالت «فول‌سایز» (expand) قبلی برگردد،
          نه حالت نیمه‌باز — وگرنه کاربر فکر می‌کند خروج انجام نشده است. */
       try {
@@ -10100,15 +10100,17 @@ function MVX_PLAYER_MODULE(W) {
         if (!P) return;
         if (data && typeof data === 'object' && 'is_fullscreen' in data) {
           var v = data.is_fullscreen;
-          P.tgFsOn = v === true || v === 'true' || v === 1;
+          P.tgFsOn = !!v && v !== 'false' && v !== '0';
+          P.fsWanted = P.tgFsOn;
         }
         syncFs();
       }
       function onFsFail() {
+        /* فقط وضعیت را اصلاح می‌کنیم؛ ارور ندهیم چون شکستِ تکراریِ خروج/ورود طبیعی است */
         if (!P) return;
         P.tgFsOn = false;
+        P.fsWanted = false;
         syncFs();
-        toast('تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود');
       }
       try { tg.onEvent('fullscreenChanged', onFs); tg.onEvent('fullscreenFailed', onFsFail); } catch (e) { }
       P.offFsEvt = function () {
@@ -10235,10 +10237,6 @@ const APP_HTML = `<!doctype html>
   /* ارسال رویداد به کلاینت تلگرام — همان منطق Telegram.WebView.postEvent در SDK رسمی */
   function post (type, data) {
     var payload = data === undefined ? '' : data;
-    try {
-      var wv = W.Telegram && W.Telegram.WebView;
-      if (wv && typeof wv.postEvent === 'function') { wv.postEvent(type, payload === '' ? {} : payload); return 'sdk'; }
-    } catch (e2) { }
     try {
       var proxy = W.TelegramWebviewProxy;
       /* شیء باید واقعاً postEvent داشته باشد؛ یک شیء خالی (مثلاً از پل رویدادها) نباید پل بومی را بپوشاند */

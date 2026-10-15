@@ -332,7 +332,7 @@ console.log('PASS: content-bot streams action (server-side revalidation, role ch
   assert.equal(cues.length, 2); assert.equal(cues[0].t, 'سلام\nدنیا'); assert.equal(cues[1].s, 60.5);
   for (const k of ['controlslist="nodownload', 'disablepictureinpicture', "addEventListener('contextmenu'", 'mvp-wm', '/stream/open', '/stream/src', "'/api/ad/evs'", 'رد کردن تبلیغ']) assert.ok(a.code.includes(k), k);
   /* تمام‌صفحه در مینی‌اپ: اولویت با WebApp.requestFullscreen، همگامی آیکن با وضعیت واقعی، پیام برای کلاینت بدون پشتیبانی */
-  for (const k of ['tgInApp', 'requestFullscreen', 'web_app_request_fullscreen', 'web_app_exit_fullscreen', 'web_app_expand', 'fullscreenChanged', 'fullscreenFailed', 'تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود']) assert.ok(a.code.includes(k), k);
+  for (const k of ['tgInApp', 'fsWanted', 'requestFullscreen', 'web_app_request_fullscreen', 'web_app_exit_fullscreen', 'web_app_expand', 'fullscreenChanged', 'fullscreenFailed', 'تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود']) assert.ok(a.code.includes(k), k);
   for (const k of ['web_app_request_fullscreen', 'web_app_exit_fullscreen', 'fullscreen_changed', 'receiveEvent', 'TelegramWebviewProxy']) assert.ok(W.APP_HTML.includes(k), k);
   assert.ok(W.APP_HTML.includes("'/assets/player.js?v=' + PLAYER_V"));
   assert.ok(!W.APP_HTML.includes('${'));
