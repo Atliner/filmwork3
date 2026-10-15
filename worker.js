@@ -9781,7 +9781,7 @@ function MVX_PLAYER_MODULE(W) {
       if (D.fullscreenElement || D.webkitFullscreenElement) {
         try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { }
       }
-      if (P.tgFsOn) tgFs(false);
+      tgFs(false); /* حتی اگر پرچم وضعیت جابه‌جا شده باشد، خروج را حتماً بفرست */
       try { if (W.screen.orientation && W.screen.orientation.unlock) W.screen.orientation.unlock(); } catch (e) { }
       P.tgFsOn = false;
       syncFs();
@@ -9807,10 +9807,16 @@ function MVX_PLAYER_MODULE(W) {
       if (on && tg && typeof tg.requestFullscreen === 'function') { tg.requestFullscreen(); did = true; }
       else if (!on && tg && typeof tg.exitFullscreen === 'function') { tg.exitFullscreen(); did = true; }
     } catch (e) { }
-    if (!did) {
-      /* اگر متد در SDK نبود (نسخهٔ قدیمی)، رویداد خام تلگرام را مستقیم می‌فرستیم تا
-         کلاینت مینی‌اپ را تمام‌صفحه کند — همان رویدادی که SDK می‌فرستست. */
-      try { did = !!(W.__mvxPostEvent && W.__mvxPostEvent(on ? 'web_app_request_fullscreen' : 'web_app_exit_fullscreen', {})); } catch (e) { }
+    if (on) {
+      if (!did) {
+        /* اگر متد در SDK نبود (نسخهٔ قدیمی)، رویداد خام تلگرام را مستقیم می‌فرستیم تا
+           کلاینت مینی‌اپ را تمام‌صفحه کند — همان رویدادی که SDK می‌فرستست. */
+        try { did = !!(W.__mvxPostEvent && W.__mvxPostEvent('web_app_request_fullscreen', {})); } catch (e) { }
+      }
+    } else {
+      /* رویداد خروج را حتماً می‌فرستیم: متد exitFullscreen ممکن است چون وضعیت داخلی SDK
+         به‌روز نشده (isFullscreen=false مانده) بی‌صدا هیچ کاری نکند و مینی‌اپ تمام‌صفحه بماند. */
+      try { if (W.__mvxPostEvent && W.__mvxPostEvent('web_app_exit_fullscreen', {})) did = true; } catch (e) { }
     }
     if (!did && on) {
       /* نه مرورگر و نه تلگرام — پیام مناسب */
@@ -10086,7 +10092,10 @@ function MVX_PLAYER_MODULE(W) {
       if (!tg || !tg.onEvent) return;
       function onFs(data) {
         if (!P) return;
-        if (data && typeof data === 'object' && 'is_fullscreen' in data) P.tgFsOn = !!data.is_fullscreen;
+        if (data && typeof data === 'object' && 'is_fullscreen' in data) {
+          var v = data.is_fullscreen;
+          P.tgFsOn = v === true || v === 'true' || v === 1;
+        }
         syncFs();
       }
       function onFsFail() {
@@ -11180,6 +11189,12 @@ function buildTgFallback () {
     var prevRecv = proxy.receiveEvent;
     proxy.receiveEvent = function (type, data) {
       try { if (prevRecv) prevRecv(type, data); } catch (e) { }
+      try {
+        /* اگر SDK رسمی بعداً لود شده، رویداد باید به آن هم برسد تا وضعیت داخلی‌اش
+           (مثل WebApp.isFullscreen) به‌روز شود و exitFullscreen کار کند. */
+        var wv = window.Telegram && window.Telegram.WebView;
+        if (wv && typeof wv.receiveEvent === 'function' && wv.receiveEvent !== prevRecv && wv.receiveEvent !== proxy.receiveEvent) wv.receiveEvent(type, data);
+      } catch (e) { }
       try {
         var t = String(type || '');
         var ev = data;
