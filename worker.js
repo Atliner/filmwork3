@@ -1693,7 +1693,7 @@ function variantFilesOf(cell) {
     return cell.files.filter(function (f) { return f && f.source; });
   }
   if (cell.source) {
-    return [{ id: cell.fileId || '', title: cell.title || '', source: cell.source, sizeBytes: cell.sizeBytes || null }];
+    return [{ id: cell.fileId || '', title: cell.title || '', source: cell.source, sizeBytes: cell.sizeBytes || null, pl: cell.pl || '' }];
   }
   return [];
 }
@@ -1717,7 +1717,7 @@ function setVariantCell(bag, track, quality, source, sizeBytes) {
     return save(files);
   }
   if (files.length) {
-    files[0] = { id: files[0].id || ('f_' + randomHex(3)), title: files[0].title || '', source: source, sizeBytes: sizeBytes || null };
+    files[0] = { ...files[0], id: files[0].id || ('f_' + randomHex(3)), title: files[0].title || '', source: source, sizeBytes: sizeBytes || null };
   } else {
     files = [{ id: 'f_' + randomHex(3), title: '', source: source, sizeBytes: sizeBytes || null }];
   }
@@ -1760,6 +1760,25 @@ function setVariantPremium(bag, track, quality, on) {
   if (!q) return;
   if (!v[t][q]) v[t][q] = { source: null, sizeBytes: null };
   v[t][q].premium = !!on;
+}
+/* «لینک پخش آنلاین» هر نسخه (f.pl) — بدون عنوان؛ روی همان فایل نسخه ذخیره می‌شود
+   (فایل‌های قدیمی بدون شناسه، روی خود سلول: cell.pl). */
+function setVariantFilePl(bag, track, quality, fileId, plVal) {
+  const v = ensureVariants(bag);
+  const t = track === 'dub' ? 'dub' : 'sub';
+  const q = qualityKey(quality);
+  if (!q || !v[t][q]) return;
+  const cell = v[t][q];
+  const fid = String(fileId || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 20);
+  const fl = Array.isArray(cell.files) && cell.files.length ? cell.files : null;
+  if (fl) {
+    const targets = fid ? fl.filter(function (f) { return f && f.id === fid; }) : fl.slice(0, 1);
+    targets.forEach(function (f) {
+      if (plVal) f.pl = plVal; else delete f.pl;
+    });
+  } else {
+    if (plVal) cell.pl = plVal; else delete cell.pl;
+  }
 }
 function qualityLabel(q) {
   const k = qualityKey(q);
@@ -2343,7 +2362,7 @@ function streamLinesOf(item) {
   const lines = [];
   streamBagsOf(item).forEach(function (x) {
     const pre = item.type === 'series' ? ('S' + String(x.season).padStart(2, '0') + 'E' + String(x.episode).padStart(2, '0') + ' ') : '';
-    (x.bag.streams || []).forEach(function (s) {
+    streamsOf(x.bag).forEach(function (s) {
       lines.push(pre + displayQuality(s.quality) + ' ' + (s.track === 'dub' ? 'دوبله' : 'زیرنویس') + ' ' + s.url + (s.label ? ' | ' + s.label : ''));
     });
     (x.bag.streamSubs || []).forEach(function (t) { lines.push(pre + 'زیرنویس ' + t.url + (t.label ? ' | ' + t.label : '')); });
@@ -2357,10 +2376,36 @@ function streamPremium(item, bag, track, q) {
   const cell = v[q] || v[qualityKey(q)];
   return !!(cell && cell.premium);
 }
+/* لینک پخش هر نسخه (f.pl، فیلد «لینک پخش آنلاین» زیر لینک فایل) عنوان ندارد و
+   اینجا با فهرست bag.streams ادغام می‌شود تا همهٔ مسیرهای پخش و نمایش هر دو را ببینند. */
+function streamsOf(bag) {
+  const out = [];
+  const seen = new Set();
+  const push = function (s) {
+    if (!s || !s.url) return;
+    const key = (s.track === 'dub' ? 'dub' : 'sub') + '|' + qualityKey(s.quality) + '|' + s.url;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(s);
+  };
+  ((bag && bag.streams) || []).forEach(push);
+  const v = (bag && bag.variants) || {};
+  ['sub', 'dub'].forEach(function (t) {
+    Object.keys(v[t] || {}).forEach(function (q) {
+      variantFilesOf(v[t][q] || {}).forEach(function (f) {
+        if (!f || !f.pl) return;
+        const url = String(f.pl).trim();
+        if (!/^https?:\/\//i.test(url)) return;
+        push({ id: 'vf_' + (f.id || (t + '_' + q)), track: t, quality: q, url: url, fmt: streamFmtOf(url), label: '', at: 0 });
+      });
+    });
+  });
+  return out;
+}
 /* نقشهٔ عمومی بدون لینک: {sub:{'720':{label,n,premium}}, dub:{…}, subs:n} */
 function publicStreamMap(bag, item) {
   const out = { sub: {}, dub: {}, subs: 0 };
-  (bag && bag.streams || []).forEach(function (s) {
+  streamsOf(bag).forEach(function (s) {
     if (!s || !s.url) return;
     const t = s.track === 'dub' ? 'dub' : 'sub';
     const q = qualityKey(s.quality) || String(s.quality || '');
@@ -2375,7 +2420,7 @@ function streamMapHas(map) {
   return !!map && (Object.keys(map.sub || {}).length + Object.keys(map.dub || {}).length) > 0;
 }
 function itemHasStreams(item) {
-  return streamBagsOf(item).some(function (x) { return (x.bag.streams || []).length > 0; });
+  return streamBagsOf(item).some(function (x) { return streamsOf(x.bag).length > 0; });
 }
 const STREAM_Q_PREF = ['720', '1080', '480', '4k'];
 function streamQRank(q) {
@@ -2389,7 +2434,7 @@ function pickStream(item, opts) {
     bag = opts.epId ? findEpisode(item, String(opts.epId)) : null;
     if (!bag) return { error: 'قسمت پیدا نشد', status: 404 };
   }
-  const list = (bag.streams || []).filter(function (s) { return s && s.url; });
+  const list = streamsOf(bag).filter(function (s) { return s && s.url; });
   if (!list.length) return { error: 'برای این ' + (bag === item ? 'اثر' : 'قسمت') + ' لینک پخش آنلاین ثبت نشده است', status: 404 };
   const track = opts.track === 'dub' ? 'dub' : (opts.track === 'sub' ? 'sub' : '');
   const want = qualityKey(opts.quality);
@@ -2406,7 +2451,7 @@ function pickStream(item, opts) {
 function streamOptionsOf(item, bag, user) {
   const sub = hasActiveSub(user);
   const out = { sub: [], dub: [] };
-  (bag.streams || []).slice().sort(function (a, b) { return streamQRank(a.quality) - streamQRank(b.quality); }).forEach(function (s) {
+  streamsOf(bag).slice().sort(function (a, b) { return streamQRank(a.quality) - streamQRank(b.quality); }).forEach(function (s) {
     const t = s.track === 'dub' ? 'dub' : 'sub';
     const q = qualityKey(s.quality) || s.quality;
     const prem = streamPremium(item, bag, t, q);
@@ -2740,13 +2785,13 @@ function streamEpisodeInfo(item, bag) {
   const flat = [];
   seasons.forEach(function (s) { (s.episodes || []).forEach(function (e) { flat.push({ s: Number(s.n || 1), e: e }); }); });
   const i = flat.findIndex(function (x) { return x.e.id === bag.id; });
-  function brief(x) { return x ? { id: x.e.id, n: x.e.n, season: x.s, title: x.e.title || ('قسمت ' + x.e.n), has: (x.e.streams || []).length > 0 } : null; }
+  function brief(x) { return x ? { id: x.e.id, n: x.e.n, season: x.s, title: x.e.title || ('قسمت ' + x.e.n), has: streamsOf(x.e).length > 0 } : null; }
   let next = null, prev = null;
-  for (let j = i + 1; j < flat.length; j++) if ((flat[j].e.streams || []).length) { next = flat[j]; break; }
-  for (let j = i - 1; j >= 0; j--) if ((flat[j].e.streams || []).length) { prev = flat[j]; break; }
+  for (let j = i + 1; j < flat.length; j++) if (streamsOf(flat[j].e).length) { next = flat[j]; break; }
+  for (let j = i - 1; j >= 0; j--) if (streamsOf(flat[j].e).length) { prev = flat[j]; break; }
   return {
     cur: brief(flat[i]), next: brief(next), prev: brief(prev),
-    list: seasons.map(function (s) { return { n: Number(s.n || 1), title: s.title || ('فصل ' + (s.n || 1)), eps: (s.episodes || []).map(function (e) { return { id: e.id, n: e.n, title: e.title || ('قسمت ' + e.n), has: (e.streams || []).length > 0 }; }) }; }),
+    list: seasons.map(function (s) { return { n: Number(s.n || 1), title: s.title || ('فصل ' + (s.n || 1)), eps: (s.episodes || []).map(function (e) { return { id: e.id, n: e.n, title: e.title || ('قسمت ' + e.n), has: streamsOf(e).length > 0 }; }) }; }),
   };
 }
 function streamWatermarkOf(user) {
@@ -7577,6 +7622,11 @@ async function handleAdmin(store, url, request, adminUser) {
         }
       }
     }
+    if (Object.prototype.hasOwnProperty.call(body, 'pl')) {
+      const plVal = String(body.pl || '').trim().slice(0, 500);
+      if (plVal && !/^https?:\/\//i.test(plVal)) return json({ error: 'لینک پخش آنلاین معتبر نیست (باید با http:// یا https:// شروع شود)' }, 400);
+      setVariantFilePl(bag, track, qk, fileId, plVal);
+    }
     if (body.premium !== undefined) {
       setVariantPremium(bag, track, qk, !!body.premium);
     }
@@ -10797,7 +10847,7 @@ button.dp-slide{cursor:zoom-in}
 .var-row-lab{grid-template-columns:1fr auto auto}
 .var-q{margin-bottom:10px;padding-bottom:8px;border-bottom:1px dashed var(--line)}
 .var-q:last-child{border-bottom:0}
-.var-extra{display:grid;grid-template-columns:minmax(100px,160px) 1fr auto auto;gap:8px;align-items:center;margin:6px 0}
+.var-extra{display:grid;grid-template-columns:minmax(100px,160px) 1fr 1fr auto;gap:8px;align-items:center;margin:6px 0}
 .var-add{margin:4px 0 8px}
 .var-newq{grid-template-columns:minmax(120px,1fr) auto}
 .q-alts{display:flex;flex-direction:column;gap:6px;margin:8px 0 12px;max-width:560px}
@@ -15192,6 +15242,7 @@ function openItemEditor (it, prefillUrl) {
           return '<div class="var-extra">' +
             '<input data-vt="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="عنوان نسخه" value="' + esc(f.title || '') + '">' +
             '<input data-vu2="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی" value="' + esc(sourceHref(f.source) || '') + '" dir="ltr">' +
+            '<input data-vpl="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="لینک پخش آنلاین (اختیاری)" title="برای دکمهٔ تماشای آنلاین همین نسخه؛ خالی = بدون پخش آنلاین" value="' + esc(f.pl || '') + '" dir="ltr">' +
             '<button type="button" class="btn btn-danger btn-sm" data-vd="' + t.k + ':' + q + ':' + (epId || '') + ':' + esc(f.id) + '">حذف</button></div>';
         }).join('');
         return '<div class="var-q">' +
@@ -15250,7 +15301,7 @@ function openItemEditor (it, prefillUrl) {
     galleryEditorHtml(it) +
     '<div class="field"><label>توضیحات</label><textarea id="e-desc">' + esc(it.description || '') + '</textarea></div>' +
     '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-bottom:12px"><input type="checkbox" id="e-featured" style="width:auto"' + (it.featured ? ' checked' : '') + '> ⭐ نمایش در هیرو صفحهٔ اصلی</label>' +
-    (isSeries ? '' : ('<div class="d-sec-h">کیفیت‌ها و نوع صدا</div><p style="font-size:12px;color:var(--tx3);margin-bottom:8px">کیفیت اصلی فقط عنوان است (بدون لینک). زیر هر کیفیت با «نسخه دیگر» فایل را با عنوان و لینک اضافه کنید. ستاره یعنی فقط اشتراک.</p><div id="e-var">' + variantGridHtml(it, '') + '</div>')) +
+    (isSeries ? '' : ('<div class="d-sec-h">کیفیت‌ها و نوع صدا</div><p style="font-size:12px;color:var(--tx3);margin-bottom:8px">کیفیت اصلی فقط عنوان است (بدون لینک). زیر هر کیفیت با «نسخه دیگر» فایل را با عنوان و لینک اضافه کنید. ستاره یعنی فقط اشتراک. هر نسخه می‌تواند زیر لینک فایل، «لینک پخش آنلاین» هم داشته باشد (بدون عنوان؛ خالی = بدون پخش آنلاین).</p><div id="e-var">' + variantGridHtml(it, '') + '</div>')) +
     (isSeries ? (
       '<div class="d-sec-h">فصل‌ها و قسمت‌ها</div>' +
       '<p style="font-size:12px;color:var(--tx3);margin-bottom:8px">ستاره روی قسمت کل قسمت را قفل اشتراک می‌کند؛ ستاره کنار کیفیت همان فایل را.</p>' +
@@ -15439,6 +15490,7 @@ function openItemEditor (it, prefillUrl) {
           row.className = 'var-extra';
           row.innerHTML = '<input class="vf-new-t" placeholder="عنوان نسخه مثلاً دوبله دوم">' +
             '<input class="vf-new-u" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی؛ برای ذخیره از فیلد خارج شوید" dir="ltr">' +
+            '<span></span>' +
             '<button type="button" class="btn btn-ghost btn-sm vf-new-x">انصراف</button>';
           b.parentNode.insertBefore(row, b);
           $('.vf-new-x', row).addEventListener('click', function () { row.remove(); });
@@ -15463,15 +15515,18 @@ function openItemEditor (it, prefillUrl) {
         if (!row) return;
         var titleEl = $('[data-vt]', row);
         var urlEl = $('[data-vu2]', row);
-        var ident = ((urlEl && urlEl.getAttribute('data-vu2')) || (titleEl && titleEl.getAttribute('data-vt')) || '');
+        var plEl = $('[data-vpl]', row);
+        var ident = ((urlEl && urlEl.getAttribute('data-vu2')) || (titleEl && titleEl.getAttribute('data-vt')) || (plEl && plEl.getAttribute('data-vpl')) || '');
         var parts = ident.split('-');
         var track = parts[0], q = parts[1], epid = parts[2] || epId || '', fid = parts[3] || '';
         var url = urlEl ? urlEl.value.trim() : '';
-        api('/admin/item/' + it.id + '/variant', { method: 'POST', body: {
+        var body = {
           track: track, quality: q, epId: epid, fileId: fid,
           title: titleEl ? titleEl.value.trim() : '',
           url: url
-        } }).then(function (r) {
+        };
+        if (plEl) body.pl = plEl.value.trim();
+        api('/admin/item/' + it.id + '/variant', { method: 'POST', body: body }).then(function (r) {
           it = r.item;
           toast(url ? 'نسخه ذخیره شد ✓' : 'نسخه حذف شد', 'ok');
           if (!url) rebindVar(root, epid); // ردیف خالی حذف شد → بازچینش
@@ -15481,6 +15536,9 @@ function openItemEditor (it, prefillUrl) {
         el.addEventListener('change', function () { saveVarRow(el); });
       });
       $all('[data-vu2]', root).forEach(function (el) {
+        el.addEventListener('change', function () { saveVarRow(el); });
+      });
+      $all('[data-vpl]', root).forEach(function (el) {
         el.addEventListener('change', function () { saveVarRow(el); });
       });
       $all('[data-vd]', root).forEach(function (b) {

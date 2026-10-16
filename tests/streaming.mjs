@@ -79,6 +79,65 @@ const series = { id: 'i_ser1', type: 'series', title: 'سیلو | Silo', access:
 }
 console.log('PASS: stream entries merge/dedupe/remove, auto episode creation, premium inheritance and URL-free public map.');
 
+/* ── ۲.الف. «لینک پخش آنلاین» هر نسخه (زیر لینک فایل) — بدون عنوان، ادغام با bag.streams ── */
+{
+  const series2 = { id: 'i_ser2', type: 'series', title: 'اثر تست', access: 'free', seasons: [{ n: 1, episodes: [{ id: 'e_pl1', n: 1, variants: {
+    sub: { '720': { files: [{ id: 'f_a', title: 'نسخه ۱', source: { chatId: '-1001', msgId: '10' }, pl: 'https://cdn.example.com/play/720.mp4' }] } },
+    dub: { '480': { label: 'دوبلاژ', files: [{ id: 'f_b', title: 'Filimo | 480p', source: { chatId: '-1001', msgId: '11' }, pl: 'https://cdn.example.com/play/480.m3u8' }] } }
+  } }] }], episodes: [] };
+  const ep = series2.seasons[0].episodes[0];
+  const map = W.publicStreamMap(ep, series2);
+  assert.deepEqual(Object.keys(map.sub), ['720']);
+  assert.deepEqual(Object.keys(map.dub), ['480']);
+  assert.ok(!JSON.stringify(map).includes('cdn.example.com'), 'نقشهٔ عمومی بدون لینک بماند');
+  const pick = W.pickStream(series2, { epId: ep.id, track: 'dub' });
+  assert.equal(pick.quality, '480');
+  assert.equal(pick.stream.label, '', 'لینک پخش نسخه عنوان ندارد');
+  assert.equal(pick.stream.url, 'https://cdn.example.com/play/480.m3u8');
+  assert.equal(pick.stream.fmt, 'hls');
+  const pick2 = W.pickStream(series2, { epId: ep.id, track: 'sub', quality: '720' });
+  assert.equal(pick2.stream.id, 'vf_f_a', 'شناسهٔ پخش از شناسهٔ فایل پایدار می‌ماند');
+  assert.match(W.streamLinesOf(series2), /https:\/\/cdn\.example\.com\/play\/720\.mp4/);
+  // ادغام با فهرست دستی: همان لینک دوبار شمرده نشود؛ نسخهٔ دارای عنوان مقدم است
+  ep.streams = [{ id: 'v_1', track: 'sub', quality: '720', url: 'https://cdn.example.com/play/720.mp4', fmt: 'mp4', label: 'دستی' }];
+  const map2 = W.publicStreamMap(ep, series2);
+  assert.equal(map2.sub['720'].n, 1, 'همان لینک از فایل و فهرست دستی دوبار نمایش داده نشود');
+  assert.equal(W.pickStream(series2, { epId: ep.id, track: 'sub', quality: '720' }).stream.label, 'دستی');
+  delete ep.variants.sub['720'].files[0].pl;
+  assert.deepEqual(Object.keys(W.publicStreamMap(ep, series2).sub), ['720'], 'فهرست دستی همچنان هست');
+  delete ep.streams;
+  assert.deepEqual(Object.keys(W.publicStreamMap(ep, series2).sub), [], 'بدون لینک پخش، آن کیفیت از نقشهٔ پخش می‌رود');
+}
+console.log('PASS: per-version online-play link (title-less) merges into streams and drives playback.');
+
+/* ── ۲.ب. ذخیرهٔ لینک پخش نسخه از همان مسیر عنوان/لینک فایل (endpoint نسخه) ── */
+{
+  const store = new W.Store(null, {});
+  W.bustSettings(store);
+  const admin = await W.createTgUser(store, { tgId: '7770009' });
+  admin.role = 'admin';
+  await W.saveUser(store, admin);
+  const item = { id: 'i_pltest', type: 'movie', title: 'فیلم تست', access: 'free', variants: { sub: {}, dub: {} }, episodes: [] };
+  await W.saveItemRecord(store, item);
+  const u = (p) => new URL('http://localhost/api/admin' + p);
+  const post = (p, body) => new Request(u(p), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let r = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', title: 'Filimo | 480p', url: 'https://t.me/c/1234567890/89', pl: 'https://cdn.example.com/play/480.mp4', addFile: true }), admin);
+  assert.equal(r.status, 200);
+  let saved = (await r.json()).item;
+  let f = saved.variants.dub['480'].files[0];
+  assert.equal(f.pl, 'https://cdn.example.com/play/480.mp4', 'لینک پخش کنار عنوان و لینک فایل ذخیره شود');
+  assert.equal(f.title, 'Filimo | 480p');
+  assert.equal(W.pickStream(saved, { track: 'dub' }).stream.url, 'https://cdn.example.com/play/480.mp4');
+  r = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', fileId: f.id, title: f.title, url: 'https://t.me/c/1234567890/89', pl: '' }), admin);
+  saved = (await r.json()).item;
+  assert.ok(!saved.variants.dub['480'].files[0].pl, 'خالی‌کردن فیلد = حذف لینک پخش');
+  assert.ok(W.pickStream(saved, { track: 'dub' }).error, 'بدون لینک پخش، پخشی در کار نیست');
+  r = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', fileId: f.id, url: 'https://t.me/c/1234567890/89', pl: 'ftp://x' }), admin);
+  assert.equal(r.status, 400, 'لینک پخش نامعتبر رد شود');
+}
+console.log('PASS: per-version play link saves through the same variant endpoint as title/file-link.');
+
+
 /* ── ۳. توکن پخش و لبه (همان کد در worker.js و scripts/stream-edge-worker.js) ── */
 execFileSync(process.execPath, [new URL('../scripts/build-stream-edge.mjs', import.meta.url).pathname, '--check'], { stdio: 'pipe' });
 const SECRET = 'edge-secret-0123456789abcdef';
