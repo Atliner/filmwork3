@@ -48,7 +48,7 @@ const SLOT_INFO = {
   mid: { f: 'video', title: 'میان‌پخش', desc: 'وسط تماشا (اگر سایت فعال کرده باشد)' },
   ov: { f: 'banner', title: 'بنر روی پلیر', desc: 'نوار پهن پایین تصویر حین پخش (۷۲۸×۹۰)' },
   pause: { f: 'banner', title: 'بنر توقف', desc: 'وسط تصویر هنگام Pause (۳۰۰×۲۵۰)' },
-  bot: { f: 'link', title: 'دکمهٔ زیر فایل ربات', desc: 'دکمهٔ لینک زیر هر فایل ارسالی ربات' },
+  bot: { f: 'link', title: 'دکمهٔ زیر فایل ربات', desc: 'دکمهٔ لینک زیر هر فایل ارسالی ربات (زیر هر فایل روی‌هم حداکثر ۳ لینک — با دکمهٔ سایت، ۲ لینک تبلیغی)' },
 };
 const FORMAT_SLOTS = { video: ['dl', 'pre', 'sw', 'mid'], banner: ['ov', 'pause', 'dl'], link: ['bot'] };
 const FORMAT_TITLE = { video: 'ویدئویی', banner: 'بنری', link: 'لینکی' };

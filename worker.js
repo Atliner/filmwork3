@@ -3232,6 +3232,10 @@ async function handleAdRedirect(request, url, store, ctx) {
 /* دکمه‌های زیر فایل ارسالی ربات: تبلیغ لینکی خودکار (برای کاربران بدون اشتراک) + دکمهٔ خود سایت */
 async function deliveryKeyboard(store, set, dl, item, ctx) {
   const rows = [];
+  /* سقف کلی: زیر هر فایل روی‌هم حداکثر ۳ لینک (دکمه) — دکمهٔ خودِ سایت هم جزو همین
+     سقف است؛ با وجود آن ۲ لینک تبلیغی و بدون آن ۳ لینک تبلیغی می‌آید. */
+  const LINKS_MAX = 3;
+  const own = adKeyboard(set);
   try {
     const cfg = adNetConfig(set, store.env);
     if (cfg.on && set.adNetBotLinks !== false && item) {
@@ -3240,8 +3244,14 @@ async function deliveryKeyboard(store, set, dl, item, ctx) {
         const ictx = { ctype: item.type === 'series' ? 'series' : 'movie', genres: item.genres || [], dev: 'm', seen: null };
         adNetRecord(ctx, store, set, { c: '*', s: 'bot', e: 'opp', d: 'm', t: ictx.ctype });
         const inv = await adNetInventory(store, set);
-        const c = inv ? adWeightedPick(inv.campaigns.filter(function (x) { return adNetEligible(x, 'bot', ictx); })) : null;
-        if (c) {
+        const pool = (inv && inv.campaigns) ? inv.campaigns.filter(function (x) { return adNetEligible(x, 'bot', ictx); }) : [];
+        /* لینک‌های تبلیغ: کمپین‌های متفاوت با وزن انتخاب می‌شوند؛ با ۱۰ تبلیغ‌دهنده هم
+           بیش از سقف ۳ لینک زیر فایل نمی‌آید و بقیه در نمایش‌های بعدی می‌چرخند. */
+        const used = [];
+        for (let n = 0, adMax = LINKS_MAX - (own ? 1 : 0); n < adMax; n++) {
+          const c = adWeightedPick(pool, used);
+          if (!c) break;
+          used.push(c.id);
           /* «شمارش کلیک لینک‌های تلگرامی» (تنظیم پلتفرم): دکمه به لینک عمیق ربات تبدیل
              می‌شود (URL معمولی — هنگام فورواد می‌ماند)؛ کلیک با /start ثبت و مقصد نشان داده می‌شود. */
           const dest = (c.link && c.link.url) || '';
@@ -3252,7 +3262,6 @@ async function deliveryKeyboard(store, set, dl, item, ctx) {
       }
     }
   } catch (e) { /* تبلیغ نباید تحویل فایل را خراب کند */ }
-  const own = adKeyboard(set);
   if (own) rows.push(own.inline_keyboard[0]);
   return rows.length ? { inline_keyboard: rows } : null;
 }

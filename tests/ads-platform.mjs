@@ -307,6 +307,21 @@ try {
   const adOwn = await SITE.pickAdForSlot(store, set, viewer, item, 'dl', null, req(), { [b1.body.id]: 1 });
   assert.equal(adOwn.kind, 'banner'); assert.equal(adOwn.sec, 12, 'ثانیه‌شمار بنر = مدت اختصاصی تبلیغ‌دهنده');
 
+  /* ── ۱۰.۶ سقف ۳ لینک تبلیغ زیر هر فایل — برای همهٔ تبلیغ‌دهنده‌ها روی‌هم ── */
+  await call('/api/campaigns/' + b1.body.id + '/stop', { method: 'POST' });
+  await call('/api/campaigns/' + b2.body.id + '/stop', { method: 'POST' });
+  for (let i = 1; i <= 4; i++) {
+    const lc = await call('/api/campaigns', { body: { format: 'link', name: 'لینک ' + i, slots: ['bot'], creative: { link: { text: '🎁 پیشنهاد ' + i, url: 'https://t.me/deals' + i } }, budget: 50000, submit: true } });
+    assert.equal(lc.status, 200, JSON.stringify(lc.body));
+    await call('/api/admin/review/' + lc.body.id, { token: ADMIN, body: { approve: true } });
+  }
+  SITE.AD_NET.invAt = 0;
+  const kb4 = await SITE.deliveryKeyboard(store, set, { username: viewer.username }, item, null);
+  assert.equal(kb4.inline_keyboard.length, 3, 'زیر هر فایل روی‌هم حداکثر ۳ لینک — حتی با ۴ کمپین فعال (۲ تبلیغ + دکمهٔ خود سایت)');
+  const adRows4 = kb4.inline_keyboard.filter(r => /start=adk_/.test(r[0].url || ''));
+  assert.equal(adRows4.length, 2, 'با دکمهٔ خودِ سایت، ۲ لینک تبلیغی می‌ماند');
+  assert.equal(new Set(adRows4.map(r => r[0].text)).size, 2, 'دو کمپین متفاوت انتخاب می‌شوند');
+
   /* ── ۱۱. مدیر: مسدودسازی تبلیغ‌دهنده کمپین‌ها را متوقف و نشست را باطل می‌کند ── */
   const users = (await call('/api/admin/users', { token: ADMIN })).body.users;
   const shop = users.find(u => u.email === 'shop@example.com');
