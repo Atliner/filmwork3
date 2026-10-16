@@ -1463,7 +1463,7 @@ function ADS_APP(W) {
         '<label>مدت نمایش/ثانیه‌شمار (ثانیه)<input id="e-bsec" type="number" min="3" max="30" value="' + esc(cr.sec || '') + '" placeholder="پیش‌فرض ' + fa(cfg.bannerSec || 8) + '"><small>در «قبل از دانلود»، ثانیه‌شمار به همین اندازه است؛ خالی = پیش‌فرض پلتفرم (سایت‌ها حداکثر ۲۰ ثانیه)</small></label>';
       var l = cr.link || {};
       return '<label>متن دکمه (۳ تا ۳۲ نویسه)<input id="e-ltext" maxlength="32" value="' + esc(l.text || '') + '" placeholder="🎁 تخفیف ویژهٔ امروز"></label>' +
-        '<label>لینک (https یا https://t.me/…)<input id="e-lurl" dir="ltr" value="' + esc(l.url || '') + '" placeholder="https://t.me/yourchannel"></label>' +
+        '<label>لینک (https یا https://t.me/…)<input id="e-lurl" dir="ltr" value="' + esc(l.url || '') + '" placeholder="https://t.me/yourchannel"><small>لینک تلگرامی (t.me) مستقیم باز می‌شود و کاربر از تلگرام خارج نمی‌شود؛ کلیک چنین لینکی شمرده نمی‌شود. کلیک لینک‌های دیگر از مسیر سایت ثبت می‌شود.</small></label>' +
         '<div class="tgprev"><div class="bub"><b>🎬 نام فیلم.1080p.mkv</b><small>فایل ارسالی ربات</small></div><div class="tbtn" id="e-lprev">' + esc(l.text || 'متن دکمهٔ شما') + '</div></div>';
     }
     function slotsHtml() {

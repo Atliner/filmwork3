@@ -13,7 +13,7 @@ const ads = ADS.default;
 const siteSrc = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 const SITE = await import('data:text/javascript;base64,' + Buffer.from(siteSrc + `
 export { Store, createTgUser, saveUser, saveItemRecord, makeToken, bustSettings, apiDlRequest, apiDlGate, apiAdTokenClick, pickAdForSlot, adNetInventory, adNetFlush, adNetConfig,
-  deliveryKeyboard, handleAdRedirect, AD_NET, apiStreamOpen, apiStreamSrc, bustAds };`).toString('base64'));
+  deliveryKeyboard, handleAdRedirect, adRedirectUrl, AD_NET, apiStreamOpen, apiStreamSrc, bustAds };`).toString('base64'));
 
 function d1() {
   const sql = new DatabaseSync(':memory:');
@@ -236,9 +236,13 @@ try {
   SITE.AD_NET.invAt = 0;
   const kb = await SITE.deliveryKeyboard(store, set, { username: viewer.username }, item, null);
   assert.equal(kb.inline_keyboard[0][0].text, '🎁 تخفیف ویژهٔ امروز');
-  assert.match(kb.inline_keyboard[0][0].url, /^https:\/\/site\.test\/r\//);
-  const redir = await SITE.handleAdRedirect(new Request(kb.inline_keyboard[0][0].url, { headers: { 'cf-connecting-ip': '8.8.8.8' } }), new URL(kb.inline_keyboard[0][0].url), store, null);
-  assert.equal(redir.status, 302); assert.equal(redir.headers.get('location'), 'https://t.me/shopdeals');
+  assert.equal(kb.inline_keyboard[0][0].url, 'https://t.me/shopdeals', 'لینک تلگرامی مستقیم روی دکمه می‌نشیند — بدون سایت');
+  assert.ok(!/\/r\/|site\.test/.test(kb.inline_keyboard[0][0].url), 'آدرس سایت نباید در لینک تلگرامی باشد');
+  assert.equal(await SITE.adRedirectUrl(set, { id: 'c_x', link: { url: 'https://telegram.me/shopdeals' } }), 'https://telegram.me/shopdeals', 'دامنه‌های هم‌خانوادهٔ تلگرام هم مستقیم');
+  const webUrl = await SITE.adRedirectUrl(set, { id: link.body.id, link: { url: 'https://shop.example.com/deal' } });
+  assert.match(webUrl, /^https:\/\/site\.test\/r\//, 'لینک غیرتلگرامی برای شمارش دقیق کلیک از /r/ می‌گذرد');
+  const redir = await SITE.handleAdRedirect(new Request(webUrl, { headers: { 'cf-connecting-ip': '8.8.8.8' } }), new URL(webUrl), store, null);
+  assert.equal(redir.status, 302); assert.equal(redir.headers.get('location'), 'https://shop.example.com/deal');
   const forged = await SITE.handleAdRedirect(new Request('https://site.test/r/abc.def'), new URL('https://site.test/r/abc.def'), store, null);
   assert.equal(forged.headers.get('location'), 'https://site.test/', 'توکن جعلی به مقصد دلخواه نمی‌برد');
   const subscriber = await SITE.createTgUser(store, { tgId: '6006', tgName: 'S' }); subscriber.subUntil = Date.now() + 86400000; subscriber.role = 'free'; await SITE.saveUser(store, subscriber);

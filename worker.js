@@ -3177,11 +3177,23 @@ async function apiAdTokenClick(store, body, request, ctx) {
   }
   return json({ ok: true, url: url });
 }
-/* لینک دکمهٔ تبلیغ زیر فایل: از /r/ سایت عبور می‌کند تا کلیک دقیق شمرده شود */
+/* لینک‌های تلگرامی (t.me و دامنه‌های هم‌خانواده) نباید از سایت رد شوند: دکمه همان لینک
+   تلگرام را مستقیم می‌گیرد تا کاربر داخل تلگرام بماند (تگرام آن را بومی باز می‌کند و
+   کاربر از اپ خارج/برنمی‌گردد). کلیک این دکمه‌ها شمرده نمی‌شود چون تگرام روی لینک
+   مستقیم بازخورد نمی‌دهد؛ نمایش (Impression) همچنان ثبت می‌شود.
+   بقیهٔ لینک‌ها از /r/ سایت عبور می‌کنند تا کلیک دقیق شمرده شود. */
+function isTgLink (u) {
+  try {
+    const h = new URL(String(u || '')).hostname.toLowerCase().replace(/^www\./, '');
+    return h === 't.me' || h === 'telegram.me' || h === 'telegram.dog';
+  } catch (e) { return false; }
+}
 async function adRedirectUrl(set, c) {
+  const dest = c.link.url;
+  if (isTgLink(dest)) return dest;
   const origin = String(set.publicUrl || '').replace(/\/+$/, '');
-  if (!/^https:\/\//.test(origin)) return c.link.url;
-  return origin + '/r/' + (await signToken({ r: 1, c: c.id, l: c.link.url }, set.secret));
+  if (!/^https:\/\//.test(origin)) return dest;
+  return origin + '/r/' + (await signToken({ r: 1, c: c.id, l: dest }, set.secret));
 }
 async function handleAdRedirect(request, url, store, ctx) {
   const set = await getSettings(store);
