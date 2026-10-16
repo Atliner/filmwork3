@@ -3195,21 +3195,27 @@ async function adRedirectUrl(set, c) {
   if (!/^https:\/\//.test(origin)) return dest;
   return origin + '/r/' + (await signToken({ r: 1, c: c.id, l: dest }, set.secret));
 }
-/* دکمهٔ callback تبلیغ لینکی (وقتی «شمارش کلیک لینک‌های تلگرامی» در پنل پلتفرم روشن است):
-   کلیک ثبت می‌شود و بعد همان لینک (مثلاً t.me) باز می‌شود — بدون عبور از سایت. */
-async function handleAdClickCallback(store, set, cq, cid, ctx, token) {
+/* دکمهٔ ردیاب تبلیغ لینکی (وقتی «شمارش کلیک لینک‌های تلگرامی» در پنل پلتفرم روشن است):
+   دکمه به‌جای callback (که تلگرام هنگام فورواد کل کیبورد را حذف می‌کند) یک لینک عمیق
+   t.me به ربات است (start=adk_…) — مثل لینک معمولی هنگام فورواد می‌ماند، کاربر از
+   تلگرام خارج نمی‌شود و با رسیدن /start کلیک ثبت می‌شود و مقصد واقعی با یک
+   دکمهٔ مستقیم (همان لینک تبلیغ‌دهنده) نشان داده می‌شود. */
+async function handleAdDeepClick(store, set, ctx, from, chatId, cid, token) {
   const inv = await adNetInventory(store, set);
   const c = inv && inv.campaigns.find(function (x) { return x.id === cid && x.link; });
   const url = c ? (c.link.url || c.landing || '') : '';
   if (!url) {
-    await botApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'این تبلیغ دیگر فعال نیست', show_alert: true });
+    await tgSend(token, chatId, 'این تبلیغ دیگر فعال نیست.');
     return;
   }
-  const from = cq.from || {};
-  if (memRate('rcb:' + cid + ':' + (from.id || ''), 1, 3600000)) {
+  if (memRate('rcb:' + cid + ':' + String((from && from.id) || ''), 1, 3600000)) {
     adNetRecord(ctx, store, set, { c: cid, s: 'bot', e: 'click', d: 'm', t: '' });
   }
-  await botApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, url: url });
+  await botApi(token, 'sendMessage', {
+    chat_id: chatId,
+    text: '🎁 ' + (c.link.text || c.title || 'تبلیغ'),
+    reply_markup: { inline_keyboard: [[{ text: (c.cta || 'مشاهده') + ' ↗', url: url }]] },
+  });
 }
 async function handleAdRedirect(request, url, store, ctx) {
   const set = await getSettings(store);
@@ -3236,14 +3242,11 @@ async function deliveryKeyboard(store, set, dl, item, ctx) {
         const inv = await adNetInventory(store, set);
         const c = inv ? adWeightedPick(inv.campaigns.filter(function (x) { return adNetEligible(x, 'bot', ictx); })) : null;
         if (c) {
-          /* «شمارش کلیک لینک‌های تلگرامی» (تنظیم پلتفرم): دکمهٔ callback می‌شود تا ربات
-             کلیک را ثبت کند و بعد همان لینک را باز کند — بدون عبور از سایت. */
+          /* «شمارش کلیک لینک‌های تلگرامی» (تنظیم پلتفرم): دکمه به لینک عمیق ربات تبدیل
+             می‌شود (URL معمولی — هنگام فورواد می‌ماند)؛ کلیک با /start ثبت و مقصد نشان داده می‌شود. */
           const dest = (c.link && c.link.url) || '';
-          if (inv.cfg && inv.cfg.trackTgClicks && isTgLink(dest)) {
-            rows.push([{ text: c.link.text, callback_data: 'adclk:' + c.id }]);
-          } else {
-            rows.push([{ text: c.link.text, url: await adRedirectUrl(set, c) }]);
-          }
+          const deep = inv.cfg && inv.cfg.trackTgClicks && isTgLink(dest) ? (fileBotLink(set, 'adk_' + c.id) || botLink(set, 'adk_' + c.id)) : '';
+          rows.push([{ text: c.link.text, url: deep || await adRedirectUrl(set, c) }]);
           adNetRecord(ctx, store, set, { c: c.id, s: 'bot', e: 'imp', d: 'm', t: ictx.ctype });
         }
       }
@@ -5295,6 +5298,10 @@ async function handleStartPayload(store, ctx, set, from, chatId, payload, token)
   const tgId = String(from.id);
   let user = await findUserByTg(store, tgId);
 
+  if (payload.indexOf('adk_') === 0) {
+    await handleAdDeepClick(store, set, ctx, from, chatId, payload.slice(4), token);
+    return;
+  }
   let loginTicket = null;
   if (payload.indexOf('tglogin_') === 0) loginTicket = payload.slice(8);
   else if (payload.indexOf('login_') === 0) loginTicket = payload.slice(6);
@@ -5459,11 +5466,6 @@ async function handleTgUpdate(store, update, ctx, request, opts) {
   }
 
   if (update.callback_query) {
-    const cqData = String(update.callback_query.data || '');
-    if (cqData.indexOf('adclk:') === 0) {
-      await handleAdClickCallback(store, set, update.callback_query, cqData.slice(6), ctx, token);
-      return json({ ok: true });
-    }
     if (fileMode) {
       await botApi(token, 'answerCallbackQuery', { callback_query_id: update.callback_query.id });
       return json({ ok: true });
