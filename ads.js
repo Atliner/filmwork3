@@ -80,7 +80,7 @@ const SETTINGS_DEFAULTS = {
   tariffs: { video: { cpm: 0, cpv: 60, cpc: 0 }, banner: { cpm: 12000, cpv: 0, cpc: 0 }, link: { cpm: 8000, cpv: 0, cpc: 0 } },
   minBudget: 100000, minDaily: 20000, maxBid: 5,
   viewSec: 10, skipAfter: 5, bannerSec: 8, maxVideoSec: 30, minVideoSec: 5, maxVideoMB: 8, maxImageKB: 600, invTtl: 90,
-  allowExternalMedia: true,
+  allowExternalMedia: true, trackTgClicks: false,
   rules: DEFAULT_RULES,
   bannedWords: 'شرط‌بندی,شرطبندی,کازینو,قمار,پوکر,بت فوروارد,پورن,سکسی,بزرگسالان,هک اکانت,فروش اکانت',
   shorteners: 'bit.ly,tinyurl.com,goo.gl,t.co,cutt.ly,is.gd,ow.ly,rebrand.ly,shorturl.at,tiny.cc,yun.ir,b2n.ir',
@@ -695,7 +695,7 @@ async function buildInventory(env, set) {
     else item.cr.link = cr.link || {};
     campaigns.push(item);
   }
-  const data = { v: 1, rev: rid(4), ttl: intOf(set.invTtl, 90, 30, 600), cfg: { viewSec: intOf(set.viewSec, 10, 1, 60), skipAfter: intOf(set.skipAfter, 5, 0, 30), maxSec: intOf(set.maxVideoSec, 30, 5, 120) }, campaigns: campaigns };
+  const data = { v: 1, rev: rid(4), ttl: intOf(set.invTtl, 90, 30, 600), cfg: { viewSec: intOf(set.viewSec, 10, 1, 60), skipAfter: intOf(set.skipAfter, 5, 0, 30), maxSec: intOf(set.maxVideoSec, 30, 5, 120), trackTgClicks: !!set.trackTgClicks }, campaigns: campaigns };
   INV_CACHE = { t: Date.now(), data: data };
   return data;
 }
@@ -816,7 +816,7 @@ async function marketStats(env, set) {
 function publicConfig(set) {
   return {
     brand: set.brand, siteName: set.siteName, siteUrl: set.siteUrl, support: set.support, rules: set.rules,
-    tariffs: set.tariffs, minBudget: set.minBudget, minDaily: set.minDaily, maxBid: set.maxBid, viewSec: set.viewSec, skipAfter: set.skipAfter, bannerSec: set.bannerSec,
+    tariffs: set.tariffs, minBudget: set.minBudget, minDaily: set.minDaily, maxBid: set.maxBid, viewSec: set.viewSec, skipAfter: set.skipAfter, bannerSec: set.bannerSec, trackTgClicks: !!set.trackTgClicks,
     maxVideoSec: set.maxVideoSec, minVideoSec: set.minVideoSec, maxVideoMB: set.maxVideoMB, maxImageKB: set.maxImageKB, allowExternalMedia: set.allowExternalMedia !== false,
     slots: SLOT_INFO, formatSlots: FORMAT_SLOTS, formatTitle: FORMAT_TITLE,
     k2k: { enabled: !!(set.k2k && set.k2k.enabled && set.k2k.card), min: set.k2k.min, max: set.k2k.max, presets: set.k2k.presets || [] },
@@ -1071,6 +1071,7 @@ async function adminSettingsSave(request, env, set) {
   for (const k of Object.keys(ints)) if (b[k] !== undefined) s[k] = intOf(b[k], s[k], ints[k][0], ints[k][1]);
   if (b.maxBid !== undefined) s.maxBid = numOf(b.maxBid, 5, 1, 20);
   if (b.allowExternalMedia !== undefined) s.allowExternalMedia = !!b.allowExternalMedia;
+  if (b.trackTgClicks !== undefined) s.trackTgClicks = !!b.trackTgClicks;
   if (b.adminTgIds !== undefined) s.adminTgIds = String(b.adminTgIds).replace(/[^\d,\s]/g, '').slice(0, 300);
   if (b.botUsername !== undefined) s.botUsername = String(b.botUsername).replace(/^@/, '').replace(/[^A-Za-z0-9_]/g, '').slice(0, 40);
   if (b.k2k) {
@@ -1463,7 +1464,7 @@ function ADS_APP(W) {
         '<label>مدت نمایش/ثانیه‌شمار (ثانیه)<input id="e-bsec" type="number" min="3" max="30" value="' + esc(cr.sec || '') + '" placeholder="پیش‌فرض ' + fa(cfg.bannerSec || 8) + '"><small>در «قبل از دانلود»، ثانیه‌شمار به همین اندازه است؛ خالی = پیش‌فرض پلتفرم (سایت‌ها حداکثر ۲۰ ثانیه)</small></label>';
       var l = cr.link || {};
       return '<label>متن دکمه (۳ تا ۳۲ نویسه)<input id="e-ltext" maxlength="32" value="' + esc(l.text || '') + '" placeholder="🎁 تخفیف ویژهٔ امروز"></label>' +
-        '<label>لینک (https یا https://t.me/…)<input id="e-lurl" dir="ltr" value="' + esc(l.url || '') + '" placeholder="https://t.me/yourchannel"><small>لینک تلگرامی (t.me) مستقیم باز می‌شود و کاربر از تلگرام خارج نمی‌شود؛ کلیک چنین لینکی شمرده نمی‌شود. کلیک لینک‌های دیگر از مسیر سایت ثبت می‌شود.</small></label>' +
+        '<label>لینک (https یا https://t.me/…)<input id="e-lurl" dir="ltr" value="' + esc(l.url || '') + '" placeholder="https://t.me/yourchannel"><small>' + (cfg.trackTgClicks ? 'لینک تلگرامی (t.me) با دکمهٔ ردیابی باز می‌شود و کلیک آن ثبت می‌شود' : 'لینک تلگرامی (t.me) مستقیم باز می‌شود و کاربر از تلگرام خارج نمی‌شود؛ کلیک چنین لینکی شمرده نمی‌شود') + '. کلیک لینک‌های دیگر از مسیر سایت ثبت می‌شود.</small></label>' +
         '<div class="tgprev"><div class="bub"><b>🎬 نام فیلم.1080p.mkv</b><small>فایل ارسالی ربات</small></div><div class="tbtn" id="e-lprev">' + esc(l.text || 'متن دکمهٔ شما') + '</div></div>';
     }
     function slotsHtml() {
@@ -1810,7 +1811,8 @@ function ADS_APP(W) {
         '<label>کلید اتصال (در پنل سایت ← تبلیغات ← «کلید اتصال» وارد کنید)<div class="row2"><input id="s-net" dir="ltr" readonly value="' + esc(s.netSecret || '') + '" placeholder="هنوز ساخته نشده"><div class="acts"><button class="btn" id="s-netcp">کپی</button><button class="btn" id="s-netgen">' + (s.netSecret ? 'ساخت کلید تازه' : 'ساخت کلید') + '</button></div></div><small>با ساخت کلید تازه، اتصال سایت تا وارد کردن کلید جدید قطع می‌شود.</small></label>') +
       '<p class="mut">آدرس این پلتفرم برای پنل سایت: <b dir="ltr">' + esc(location.origin) + '</b> <button class="btn sm" id="s-orcp">کپی</button></p>' +
       '<div class="row2"><label>نام سایت<input id="s-site" value="' + esc(s.siteName) + '"></label><label>آدرس سایت (برای فهرست ژانرها)<input id="s-url" dir="ltr" value="' + esc(s.siteUrl) + '" placeholder="https://example.com"></label></div>' +
-      '<div class="row2"><label>نام برند پلتفرم<input id="s-brand" value="' + esc(s.brand) + '"></label><label>پشتیبانی (آیدی/شماره)<input id="s-sup" value="' + esc(s.support) + '"></label></div></section>' +
+      '<div class="row2"><label>نام برند پلتفرم<input id="s-brand" value="' + esc(s.brand) + '"></label><label>پشتیبانی (آیدی/شماره)<input id="s-sup" value="' + esc(s.support) + '"></label></div>' +
+      '<label class="chk"><input type="checkbox" id="s-tgclk"' + (s.trackTgClicks ? ' checked' : '') + '> شمارش کلیک لینک‌های تلگرامی (دکمهٔ callback)<small>روشن = دکمهٔ لینک t.me به‌جای لینک مستقیم، دکمهٔ callback می‌شود؛ ربات تحویل‌دهندهٔ فایل کلیک را ثبت می‌کند و بعد همان لینک را باز می‌کند (نیازمند وبهوک ربات تحویل). خاموش = لینک t.me مستقیم روی دکمه می‌نشیند، کاربر از تلگرام خارج نمی‌شود و کلیک شمرده نمی‌شود.</small></label></section>' +
       '<section class="card"><h2>💲 تعرفه‌ها (تومان)</h2><div class="tbl"><table><thead><tr><th>نوع</th><th>هر ۱۰۰۰ نمایش (CPM)</th><th>هر بازدید کامل (CPV)</th><th>هر کلیک (CPC)</th></tr></thead><tbody>' + tRow('video') + tRow('banner') + tRow('link') + '</tbody></table></div><small class="mut">تعرفه هنگام ارسال هر کمپین قفل می‌شود.</small>' +
       '<div class="row2">' + n('s-minb', 'حداقل بودجهٔ کمپین', s.minBudget) + n('s-mind', 'حداقل سقف روزانه', s.minDaily) + n('s-maxbid', 'حداکثر ضریب پیشنهاد', s.maxBid) + n('s-view', 'بازدید کامل = چند ثانیه', s.viewSec) + n('s-skip', 'دکمهٔ رد کردن پس از (ثانیه)', s.skipAfter) + n('s-bsec', 'مدت پیش‌فرض نمایش بنر (ثانیه)', s.bannerSec, 'وقتی کمپین بنری مدت اختصاصی ندارد') + n('s-vmax', 'حداکثر مدت ویدئو', s.maxVideoSec) + n('s-vmin', 'حداقل مدت ویدئو', s.minVideoSec) + n('s-vmb', 'حداکثر حجم ویدئو (MB)', s.maxVideoMB) + n('s-ikb', 'حداکثر حجم تصویر (KB)', s.maxImageKB) + n('s-ttl', 'تازه‌سازی فهرست در سایت (ثانیه)', s.invTtl, 'کمتر = سریع‌تر، ولی درخواست بیشتر') + '</div>' +
       '<label class="chk"><input type="checkbox" id="s-ext"' + (s.allowExternalMedia ? ' checked' : '') + '> اجازهٔ لینک مستقیم فایل (به‌جای آپلود)</label></section>' +
@@ -1830,7 +1832,7 @@ function ADS_APP(W) {
       $$('[data-t]').forEach(function (i) { var p = i.getAttribute('data-t').split(':'); t[p[0]][p[1]] = Number(i.value) || 0; });
       var packs = String(v('st-packs') || '').split('\n').map(function (l) { var p = l.split('|'); return p.length === 2 ? { stars: Number(p[0].trim()), toman: Number(p[1].trim()) } : null; }).filter(Boolean);
       var body = { siteName: v('s-site'), siteUrl: v('s-url'), brand: v('s-brand'), support: v('s-sup'), tariffs: t, minBudget: v('s-minb'), minDaily: v('s-mind'), maxBid: v('s-maxbid'), viewSec: v('s-view'), skipAfter: v('s-skip'), bannerSec: v('s-bsec'), maxVideoSec: v('s-vmax'), minVideoSec: v('s-vmin'), maxVideoMB: v('s-vmb'), maxImageKB: v('s-ikb'), invTtl: v('s-ttl'),
-        allowExternalMedia: $('#s-ext').checked, rules: v('s-rules'), bannedWords: v('s-ban'), shorteners: v('s-short'), adminTgIds: v('s-admtg'),
+        allowExternalMedia: $('#s-ext').checked, trackTgClicks: $('#s-tgclk').checked, rules: v('s-rules'), bannedWords: v('s-ban'), shorteners: v('s-short'), adminTgIds: v('s-admtg'),
         k2k: { enabled: $('#k-on').checked, card: v('k-card'), holder: v('k-holder'), bank: v('k-bank'), ttlMin: v('k-ttl'), min: v('k-min'), max: v('k-max'), presets: v('k-pre') },
         stars: { enabled: $('#st-on').checked, packs: packs } };
       api('/admin/settings', { body: body }).then(function () { toast('ذخیره شد ✓', 'ok'); return loadCfg(); }).catch(function (e) { toast(e.message, 'err'); });

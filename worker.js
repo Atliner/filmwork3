@@ -2912,7 +2912,7 @@ function adNetNormalize(data) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.campaigns)) return out;
   out.rev = String(data.rev || '').slice(0, 40);
   const cfg = data.cfg || {};
-  out.cfg = { viewSec: Math.round(adNum(cfg.viewSec, 10, 1, 60)), skipAfter: Math.round(adNum(cfg.skipAfter, 5, 0, 30)), maxSec: Math.round(adNum(cfg.maxSec, 30, 5, 120)) };
+  out.cfg = { viewSec: Math.round(adNum(cfg.viewSec, 10, 1, 60)), skipAfter: Math.round(adNum(cfg.skipAfter, 5, 0, 30)), maxSec: Math.round(adNum(cfg.maxSec, 30, 5, 120)), trackTgClicks: !!cfg.trackTgClicks };
   function arr(v) { return Array.isArray(v) ? v : []; }
   for (const c of data.campaigns.slice(0, 300)) {
     if (!c || !/^c_[a-z0-9]{4,32}$/.test(String(c.id || ''))) continue;
@@ -3195,6 +3195,22 @@ async function adRedirectUrl(set, c) {
   if (!/^https:\/\//.test(origin)) return dest;
   return origin + '/r/' + (await signToken({ r: 1, c: c.id, l: dest }, set.secret));
 }
+/* دکمهٔ callback تبلیغ لینکی (وقتی «شمارش کلیک لینک‌های تلگرامی» در پنل پلتفرم روشن است):
+   کلیک ثبت می‌شود و بعد همان لینک (مثلاً t.me) باز می‌شود — بدون عبور از سایت. */
+async function handleAdClickCallback(store, set, cq, cid, ctx, token) {
+  const inv = await adNetInventory(store, set);
+  const c = inv && inv.campaigns.find(function (x) { return x.id === cid && x.link; });
+  const url = c ? (c.link.url || c.landing || '') : '';
+  if (!url) {
+    await botApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'این تبلیغ دیگر فعال نیست', show_alert: true });
+    return;
+  }
+  const from = cq.from || {};
+  if (memRate('rcb:' + cid + ':' + (from.id || ''), 1, 3600000)) {
+    adNetRecord(ctx, store, set, { c: cid, s: 'bot', e: 'click', d: 'm', t: '' });
+  }
+  await botApi(token, 'answerCallbackQuery', { callback_query_id: cq.id, url: url });
+}
 async function handleAdRedirect(request, url, store, ctx) {
   const set = await getSettings(store);
   let tok = '';
@@ -3220,7 +3236,14 @@ async function deliveryKeyboard(store, set, dl, item, ctx) {
         const inv = await adNetInventory(store, set);
         const c = inv ? adWeightedPick(inv.campaigns.filter(function (x) { return adNetEligible(x, 'bot', ictx); })) : null;
         if (c) {
-          rows.push([{ text: c.link.text, url: await adRedirectUrl(set, c) }]);
+          /* «شمارش کلیک لینک‌های تلگرامی» (تنظیم پلتفرم): دکمهٔ callback می‌شود تا ربات
+             کلیک را ثبت کند و بعد همان لینک را باز کند — بدون عبور از سایت. */
+          const dest = (c.link && c.link.url) || '';
+          if (inv.cfg && inv.cfg.trackTgClicks && isTgLink(dest)) {
+            rows.push([{ text: c.link.text, callback_data: 'adclk:' + c.id }]);
+          } else {
+            rows.push([{ text: c.link.text, url: await adRedirectUrl(set, c) }]);
+          }
           adNetRecord(ctx, store, set, { c: c.id, s: 'bot', e: 'imp', d: 'm', t: ictx.ctype });
         }
       }
@@ -5436,6 +5459,11 @@ async function handleTgUpdate(store, update, ctx, request, opts) {
   }
 
   if (update.callback_query) {
+    const cqData = String(update.callback_query.data || '');
+    if (cqData.indexOf('adclk:') === 0) {
+      await handleAdClickCallback(store, set, update.callback_query, cqData.slice(6), ctx, token);
+      return json({ ok: true });
+    }
     if (fileMode) {
       await botApi(token, 'answerCallbackQuery', { callback_query_id: update.callback_query.id });
       return json({ ok: true });

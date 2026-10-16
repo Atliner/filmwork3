@@ -13,7 +13,7 @@ const ads = ADS.default;
 const siteSrc = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 const SITE = await import('data:text/javascript;base64,' + Buffer.from(siteSrc + `
 export { Store, createTgUser, saveUser, saveItemRecord, makeToken, bustSettings, apiDlRequest, apiDlGate, apiAdTokenClick, pickAdForSlot, adNetInventory, adNetFlush, adNetConfig,
-  deliveryKeyboard, handleAdRedirect, adRedirectUrl, AD_NET, apiStreamOpen, apiStreamSrc, bustAds };`).toString('base64'));
+  deliveryKeyboard, handleAdRedirect, adRedirectUrl, handleAdClickCallback, AD_NET, apiStreamOpen, apiStreamSrc, bustAds };`).toString('base64'));
 
 function d1() {
   const sql = new DatabaseSync(':memory:');
@@ -248,9 +248,22 @@ try {
   const subscriber = await SITE.createTgUser(store, { tgId: '6006', tgName: 'S' }); subscriber.subUntil = Date.now() + 86400000; subscriber.role = 'free'; await SITE.saveUser(store, subscriber);
   const kbSub = await SITE.deliveryKeyboard(store, set, { username: subscriber.username }, item, null);
   assert.ok(!kbSub || !kbSub.inline_keyboard.some(r => /t\.me\/shopdeals|\/r\//.test(r[0].url)), 'مشترک تبلیغ لینکی نمی‌بیند');
+  /* «شمارش کلیک لینک‌های تلگرامی» (تنظیم پنل ads.js): دکمه callback می‌شود، ربات کلیک را
+     ثبت می‌کند و بعد همان لینک تلگرام را باز می‌کند — بدون آدرس سایت */
+  await call('/api/admin/settings', { token: ADMIN, body: { trackTgClicks: true } });
+  SITE.AD_NET.invAt = 0;
+  const invT = await SITE.adNetInventory(store, set);
+  assert.equal(invT.cfg.trackTgClicks, true, 'تنظیم از پنل ads.js به سایت می‌رسد');
+  const kbT = await SITE.deliveryKeyboard(store, set, { username: viewer.username }, item, null);
+  assert.equal(kbT.inline_keyboard[0][0].callback_data, 'adclk:' + link.body.id);
+  assert.ok(!kbT.inline_keyboard[0][0].url, 'در حالت شمارش، لینک مستقیم/آدرس سایت روی دکمه نیست');
+  const nTg = tg.length;
+  await SITE.handleAdClickCallback(store, set, { id: 'cbq1', from: { id: 5005 } }, link.body.id, null, 'bot:token');
+  const ans = tg.slice(nTg).find(x => x.method === 'answerCallbackQuery');
+  assert.ok(ans && ans.body.url === 'https://t.me/shopdeals', 'کلیک ثبت و لینک تلگرام باز می‌شود');
   await drain();
   const lstats = (await call('/api/campaigns/' + link.body.id + '/stats?days=1')).body.total;
-  assert.equal(lstats.imps, 1); assert.equal(lstats.clicks, 1);
+  assert.equal(lstats.imps, 2, '۲ نمایش: دکمهٔ مستقیم + دکمهٔ callback'); assert.equal(lstats.clicks, 2, '۱ کلیک از /r/ + ۱ کلیک از دکمهٔ callback');
 
   /* ── ۱۰. ویرایش کمپین فعال → دوباره صف بررسی؛ توقف → بازگشت باقی‌مانده؛ رد → بازگشت ── */
   const before = (await call('/api/me')).body.user.balance;
