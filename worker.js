@@ -9476,7 +9476,7 @@ function MVX_PLAYER_MODULE(W) {
     seenBump(ad.at);
     var media = q(isVid ? 'video' : 'img', box);
     var cd = q('.cd', box), bar = q('.bar i', box), skip = q('.skip', box);
-    var watched = 0, real = 0, last = Date.now(), finished = false, failed = false;
+    var watched = 0, real = 0, last = Date.now(), finished = false, failed = false, adLoaded = false;
     var t0 = Date.now();
     function finish(skipped) {
       if (finished) return;
@@ -9506,7 +9506,8 @@ function MVX_PLAYER_MODULE(W) {
       last = now;
       var playing = isVid && !failed && media && !media.paused && !media.ended && media.readyState >= 2;
       if (playing) real += dt;
-      if (!isVid || failed || playing) watched += dt;
+      /* ثانیه‌شمار فقط بعد از لود/پخش واقعی رسانه جلو می‌رود (نه از لحظهٔ باز شدن) */
+      if (failed || playing || (!isVid && adLoaded)) watched += dt;
       if (isVid && !failed && media.ended) { real = Math.max(real, Math.min(total, media.duration || total)); watched = Math.max(watched, total); }
       paint();
       if (watched >= total) finish(false);
@@ -9529,6 +9530,7 @@ function MVX_PLAYER_MODULE(W) {
       if (pr && pr.catch) pr.catch(function () { media.muted = true; setSnd(); media.play().catch(function () { failed = true; }); });
       setSnd();
     } else {
+      media.onload = function () { adLoaded = true; };
       media.onerror = function () { failed = true; };
       media.src = ad.mediaUrl;
     }
@@ -10736,10 +10738,6 @@ button.dp-slide{cursor:zoom-in}
 .adx-stage img,.adx-stage video{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block}
 .adx-stage.no-link{cursor:default}
 .adx-fail{color:var(--tx3);font-size:13.5px;text-align:center;padding:24px}
-.adx-cta{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);z-index:5;background:var(--grad);color:#fff;font-weight:900;font-size:14px;padding:11px 26px;border-radius:999px;box-shadow:0 10px 30px rgba(0,0,0,.6);pointer-events:none;max-width:88%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.adx-foot{position:relative;z-index:5;padding:12px 14px calc(14px + env(safe-area-inset-bottom));background:linear-gradient(0deg,rgba(5,7,10,.96),rgba(5,7,10,0))}
-.adx-go{width:100%;border-radius:var(--rad-s);padding:14px;font-size:15px;font-weight:900;background:var(--bg2);border:1px solid var(--line);color:var(--tx3);display:flex;align-items:center;justify-content:center;gap:8px;cursor:not-allowed}
-.adx-go.on{background:var(--grad);color:#fff;border-color:transparent;cursor:pointer;box-shadow:0 8px 26px rgba(255,122,26,.4);animation:pop .2s}
 .adx-mute{position:absolute;top:calc(56px + env(safe-area-inset-top,0px));inset-inline-end:14px;z-index:6;width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.6);border:1px solid var(--line);color:#fff;font-size:15px;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)}
 #toasts{position:fixed;bottom:24px;right:50%;transform:translateX(50%);z-index:500;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
 .toast{background:rgba(26,32,44,.8);border:1px solid var(--glass-line-2);border-radius:999px;padding:10px 20px;font-size:13.5px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.5);animation:toastIn .2s;max-width:90vw;backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur)}
@@ -12843,17 +12841,16 @@ function showAdThen (res, done) {
     mediaHtml = '<img id="adx-i" alt="' + esc(ad.title || 'تبلیغ') + '" src="' + esc(ad.mediaUrl) + '">';
   }
 
+  /* متن/دکمه‌های زیر تبلیغ (cta و دکمهٔ «ادامه») برداشته شدند؛
+     بعد از پایان ثانیه‌شمار، دریافت فایل خودکار ادامه می‌یابد. */
   el.innerHTML =
     '<div class="adx-bar"><i id="adx-fill"></i></div>' +
     '<div class="adx-top">' +
       '<span class="adx-sec">⏳ <b id="adx-n">' + faNum(total) + '</b> ثانیه</span>' +
       '<button type="button" class="adx-nosub" id="adx-nosub">' + esc(gate.btnText || '🚫 حذف تبلیغ‌ها') + '</button>' +
     '</div>' +
-    '<div class="adx-stage' + (ad.clickable ? '' : ' no-link') + '" id="adx-stage">' + mediaHtml +
-      (ad.clickable ? '<span class="adx-cta">' + esc(ad.cta || 'برای مشاهده کلیک کنید') + ' ↗</span>' : '') +
-    '</div>' +
-    (ad.kind === 'video' ? '<button type="button" class="adx-mute" id="adx-mute">' + (ad.muted === false ? '🔊' : '🔇') + '</button>' : '') +
-    '<div class="adx-foot"><button type="button" class="adx-go" id="adx-go" disabled>⏳ لطفاً تا پایان تبلیغ صبر کنید</button></div>';
+    '<div class="adx-stage' + (ad.clickable ? '' : ' no-link') + '" id="adx-stage">' + mediaHtml + '</div>' +
+    (ad.kind === 'video' ? '<button type="button" class="adx-mute" id="adx-mute">' + (ad.muted === false ? '🔊' : '🔇') + '</button>' : '');
 
   document.body.appendChild(el);
   try { document.body.style.overflow = 'hidden'; } catch (e) { }
@@ -12862,15 +12859,41 @@ function showAdThen (res, done) {
 
   var fill = $('#adx-fill', el);
   var num = $('#adx-n', el);
-  var go = $('#adx-go', el);
   var stage = $('#adx-stage', el);
   var finished = false;
 
+  /* ثانیه‌شمار فقط بعد از لود کامل رسانه شروع می‌شود؛ اگر رسانه خطا داد یا
+     بیش از حد معطل شد، پیام خطا می‌آید و تایمر (برای آزاد شدن دانلود) شروع می‌شود. */
+  var started = false;
+  function startTick () {
+    if (started || finished) return;
+    if (!AD_LAYER || AD_LAYER.el !== el) return;
+    started = true;
+    try { clearTimeout(loadT); } catch (e) { }
+    AD_LAYER.tick = setInterval(function () {
+      remain -= 1;
+      paint();
+      if (remain <= 0) unlock();
+    }, 1000);
+  }
+  function mediaFail () {
+    if (!finished && stage && !$('.adx-fail', stage)) {
+      stage.innerHTML = '<div class="adx-fail">نمایش این تبلیغ ممکن نشد.' + NL + 'تایمر ادامه دارد و بعد از پایان، دانلود شما آزاد می‌شود.</div>';
+    }
+    startTick();
+  }
+  var loadT = setTimeout(function () { if (!started) mediaFail(); }, 15000);
+
   var media = $('#adx-v', el) || $('#adx-i', el);
   if (media) {
-    media.addEventListener('error', function () {
-      stage.innerHTML = '<div class="adx-fail">نمایش این تبلیغ ممکن نشد.' + NL + 'تایمر ادامه دارد و بعد از پایان، دانلود شما آزاد می‌شود.</div>';
-    });
+    media.addEventListener('error', mediaFail);
+    if (ad.kind === 'video') {
+      media.addEventListener('canplaythrough', startTick);
+      if (media.readyState >= 4) startTick();
+    } else {
+      media.addEventListener('load', startTick);
+      if (media.complete && media.naturalWidth) startTick();
+    }
   }
   var vid = $('#adx-v', el);
   if (vid) {
@@ -12910,34 +12933,23 @@ function showAdThen (res, done) {
     if (fill) fill.style.width = '100%';
     var sec = $('.adx-sec', el);
     if (sec) sec.innerHTML = '✅ تبلیغ تمام شد';
-    go.className = 'adx-go on';
-    go.disabled = false;
-    go.innerHTML = '🚀 ادامه و دریافت فایل';
     haptic('light');
-    go.addEventListener('click', function () {
-      go.disabled = true;
-      go.innerHTML = 'در حال آماده‌سازی…';
-      api('/dl/gate/' + res.gate, { method: 'POST' }).then(function (g) {
-        adCloseLayer();
-        done(g);
-      }).catch(function (e) {
-        if (e.data && e.data.remain) {
-          go.disabled = false;
-          go.innerHTML = '🚀 ادامه و دریافت فایل';
-          toast('هنوز ' + faNum(e.data.remain) + ' ثانیه مانده', 'err');
-          return;
-        }
-        adCloseLayer();
-        toast(e.message, 'err');
-      });
+    /* دکمهٔ «ادامه» حذف شده؛ دریافت فایل خودکار ادامه می‌یابد */
+    proceed();
+  }
+  function proceed () {
+    api('/dl/gate/' + res.gate, { method: 'POST' }).then(function (g) {
+      adCloseLayer();
+      done(g);
+    }).catch(function (e) {
+      if (e.data && e.data.remain) {
+        setTimeout(proceed, Math.max(1, Number(e.data.remain) || 1) * 1000);
+        return;
+      }
+      adCloseLayer();
+      toast(e.message, 'err');
     });
   }
-
-  AD_LAYER.tick = setInterval(function () {
-    remain -= 1;
-    paint();
-    if (remain <= 0) unlock();
-  }, 1000);
 }
 
 /* پس از ثبت درخواست دانلود: کاربر را به چتِ ربات دریافت می‌بریم و

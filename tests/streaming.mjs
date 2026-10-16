@@ -334,6 +334,10 @@ console.log('PASS: content-bot streams action (server-side revalidation, role ch
   /* تمام‌صفحه در مینی‌اپ: اولویت با WebApp.requestFullscreen، همگامی آیکن با وضعیت واقعی، پیام برای کلاینت بدون پشتیبانی */
   for (const k of ['tgInApp', 'fsWanted', 'requestFullscreen', 'web_app_request_fullscreen', 'web_app_exit_fullscreen', 'web_app_expand', 'fullscreenChanged', 'fullscreenFailed', 'تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود']) assert.ok(a.code.includes(k), k);
   for (const k of ['web_app_request_fullscreen', 'web_app_exit_fullscreen', 'fullscreen_changed', 'receiveEvent', 'TelegramWebviewProxy']) assert.ok(W.APP_HTML.includes(k), k);
+  /* تبلیغ پیش از دانلود: بدون دکمه/متن اضافه زیر تبلیغ؛ ثانیه‌شمار فقط بعد از لود کامل رسانه */
+  assert.ok(!W.APP_HTML.includes('id="adx-go"'), 'دکمهٔ «ادامه» زیر تبلیغ پیش از دانلود حذف شده');
+  assert.ok(!W.APP_HTML.includes('adx-cta'), 'متن cta روی تبلیغ پیش از دانلود حذف شده');
+  for (const k of ['canplaythrough', 'startTick', 'mediaFail']) assert.ok(W.APP_HTML.includes(k), k);
   assert.ok(W.APP_HTML.includes("'/assets/player.js?v=' + PLAYER_V"));
   assert.ok(!W.APP_HTML.includes('${'));
   const scripts = [...W.APP_HTML.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).filter(Boolean);
