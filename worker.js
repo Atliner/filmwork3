@@ -2932,7 +2932,7 @@ function adNetNormalize(data) {
       if (!n.video.src && !n.video.srcP) continue;
     } else if (f === 'banner') {
       const b = cr.banner || {};
-      n.banner = { wide: adHttps(b.wide), rect: adHttps(b.rect), tall: adHttps(b.tall) };
+      n.banner = { wide: adHttps(b.wide), rect: adHttps(b.rect), tall: adHttps(b.tall), sec: adNum(b.sec, 0, 0, 60) };
       if (!n.banner.wide && !n.banner.rect && !n.banner.tall) continue;
     } else {
       const l = cr.link || {};
@@ -3030,7 +3030,8 @@ function adPayloadNet(c, slot, tok, cfg) {
   if (slot === 'ov') { img = b.wide; size = 'wide'; }
   else if (slot === 'pause') { img = b.rect || b.wide; size = b.rect ? 'rect' : 'wide'; }
   else { img = b.tall || b.rect || b.wide; size = b.tall ? 'tall' : (b.rect ? 'rect' : 'wide'); }
-  return Object.assign(base, { kind: 'banner', mediaUrl: img, size: size, sec: slot === 'dl' ? 8 : 6, skipAfter: 0 });
+  /* مدت نمایش بنر: اول مدت اختصاصی کمپین (تبلیغ‌دهنده)، بعد پیش‌فرض پلتفرم؛ سقف سایت ۲۰ ثانیه */
+  return Object.assign(base, { kind: 'banner', mediaUrl: img, size: size, sec: Math.max(3, Math.round(Math.min(CONFIG.AD_MAX_SEC, (c.banner && c.banner.sec) || (slot === 'dl' ? 8 : 6)))), skipAfter: 0 });
 }
 /* انتخاب یک تبلیغ برای یک جایگاه: اول شبکهٔ خودکار، اگر نبود تبلیغ داخلی (دستی) */
 async function pickAdForSlot(store, set, user, item, slot, ctx, request, seen) {

@@ -266,6 +266,29 @@ try {
   const txs = (await call('/api/wallet')).body.txs;
   assert.ok(txs.some(x => x.type === 'campaign_refund') && txs.some(x => x.type === 'campaign_hold') && txs.some(x => x.type === 'stars') && txs.some(x => x.type === 'k2k'));
 
+  /* ── ۱۰.۵ مدت نمایش بنر: تبلیغ‌دهنده برای هر کمپین تعیین می‌کند؛ خالی = پیش‌فرض پلتفرم (ادمین) ── */
+  await call('/api/admin/settings', { token: ADMIN, body: { bannerSec: 10 } });
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10, ...new Array(24).fill(0)]);
+  const imgUp = await call('/api/media?kind=image&w=1080&h=1920', { method: 'POST', raw: png, headers: { 'content-type': 'image/png' } });
+  assert.equal(imgUp.status, 200, JSON.stringify(imgUp.body));
+  const imgRef = imgUp.body.media.url.split('/').pop();
+  const b1 = await call('/api/campaigns', { body: { format: 'banner', name: 'بنر بدون مدت', slots: ['dl'], creative: { tall: imgRef, landing: 'https://shop.example.com/banner' }, budget: 50000, freqCap: 1, submit: true } });
+  assert.equal(b1.status, 200, JSON.stringify(b1.body));
+  await call('/api/admin/review/' + b1.body.id, { token: ADMIN, body: { approve: true } });
+  const b2 = await call('/api/campaigns', { body: { format: 'banner', name: 'بنر با مدت', slots: ['dl'], creative: { tall: imgRef, landing: 'https://shop.example.com/banner', sec: 12 }, budget: 50000, freqCap: 1, submit: true } });
+  assert.equal(b2.status, 200, JSON.stringify(b2.body));
+  assert.equal(b2.body.campaign.creative.sec, 12);
+  await call('/api/admin/review/' + b2.body.id, { token: ADMIN, body: { approve: true } });
+  SITE.AD_NET.invAt = 0;
+  const invB = await SITE.adNetInventory(store, set);
+  const n1 = invB.campaigns.find(x => x.id === b1.body.id), n2 = invB.campaigns.find(x => x.id === b2.body.id);
+  assert.equal(n1.banner.sec, 10, 'بدون مدت اختصاصی → مدت پیش‌فرض پلتفرم');
+  assert.equal(n2.banner.sec, 12);
+  const adDef = await SITE.pickAdForSlot(store, set, viewer, item, 'dl', null, req(), { [b2.body.id]: 1 });
+  assert.equal(adDef.net, true); assert.equal(adDef.kind, 'banner'); assert.equal(adDef.sec, 10, 'ثانیه‌شمار بنر بدون مدت = پیش‌فرض ادمین');
+  const adOwn = await SITE.pickAdForSlot(store, set, viewer, item, 'dl', null, req(), { [b1.body.id]: 1 });
+  assert.equal(adOwn.kind, 'banner'); assert.equal(adOwn.sec, 12, 'ثانیه‌شمار بنر = مدت اختصاصی تبلیغ‌دهنده');
+
   /* ── ۱۱. مدیر: مسدودسازی تبلیغ‌دهنده کمپین‌ها را متوقف و نشست را باطل می‌کند ── */
   const users = (await call('/api/admin/users', { token: ADMIN })).body.users;
   const shop = users.find(u => u.email === 'shop@example.com');
