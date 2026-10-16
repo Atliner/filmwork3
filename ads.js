@@ -249,53 +249,88 @@ function pubUser(u) {
 function isAdminEmail(env, email) {
   return String(env.ADMIN_EMAILS || '').toLowerCase().split(',').map(function (x) { return x.trim(); }).filter(Boolean).indexOf(String(email).toLowerCase()) >= 0;
 }
-async function apiRegister(request, env, set) {
-  if (!rateOk('reg:' + clientIp(request), 5, 3600000)) return err('تعداد ثبت‌نام از این اینترنت زیاد است؛ بعداً تلاش کنید.', 429);
-  const b = await readJson(request, 8192);
-  const email = String(b.email || '').trim().toLowerCase();
-  const name = String(b.name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
-  const pass = String(b.password || '');
-  if (!/^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,24}$/.test(email)) return err('ایمیل معتبر وارد کنید');
-  if (name.length < 2) return err('نام (یا نام برند) را وارد کنید');
-  if (pass.length < 8 || pass.length > 128) return err('رمز عبور باید حداقل ۸ نویسه باشد');
-  if (b.accept !== true) return err('برای ثبت‌نام باید قوانین را بپذیرید');
-  const exists = await one(env, 'SELECT id FROM adv_users WHERE email = ?', email);
-  if (exists) return err('این ایمیل قبلاً ثبت شده است؛ وارد شوید.', 409);
+/* ── ورود و ثبت‌نام فقط با تلگرام (مثل سایت اصلی worker.js):
+   سایت «ورود با تلگرام» ← لینک ربات با تیکت ← ارسال شماره موبایل (request_contact)
+   ← ساخت/اتصال حساب ← تیکت آماده ← سایت خودکار وارد می‌شود. ایمیل و رمز عبور حذف شد. */
+const AUTH_TTL_MS = 300000;
+function normPhone(p) {
+  p = String(p || '').replace(/[^\d+]/g, '');
+  if (p.indexOf('00') === 0) p = '+' + p.slice(2);
+  if (p.indexOf('+98') === 0) p = '0' + p.slice(3);
+  if (p.indexOf('98') === 0 && p.length >= 12) p = '0' + p.slice(2);
+  return p;
+}
+function tgDisplayName(from) {
+  return String(((from && from.first_name) || '') + ' ' + ((from && from.last_name) || '')).replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+function contactKeyboard() {
+  return { keyboard: [[{ text: 'ارسال شماره موبایل', request_contact: true }]], resize_keyboard: true, one_time_keyboard: false, is_persistent: true };
+}
+function isOwnContact(msg, tgId) {
+  if (!msg || !msg.contact || !msg.contact.phone_number) return false;
+  if (msg.forward_date || msg.forward_from || msg.forward_origin || msg.forward_sender_name || msg.external_reply) return false;
+  if (msg.contact.user_id == null || msg.contact.user_id === '') return false;
+  return String(msg.contact.user_id) === String(tgId);
+}
+async function completeTgTicket(env, set, ticketId, user) {
+  const t = await kvGet(env, 'tick:' + String(ticketId || ''));
+  if (!t) return;
+  await kvSet(env, 'tick:' + ticketId, { status: 'ready', at: t.at || Date.now(), token: await makeSession(env, set, user), user: pubUser(user) }, AUTH_TTL_MS);
+}
+async function tgAuthUser(env, set, from, phone) {
+  const tgId = String(from.id);
+  let u = await one(env, 'SELECT * FROM adv_users WHERE tg_id = ?', tgId);
+  if (u) {
+    if (u.status !== 'active') return { error: 'حساب شما مسدود شده است؛ با پشتیبانی تماس بگیرید.' };
+    if (phone && !u.phone) { await run(env, 'UPDATE adv_users SET phone = ? WHERE id = ?', phone, u.id); u.phone = phone; }
+    await run(env, 'UPDATE adv_users SET last_login = ? WHERE id = ?', Date.now(), u.id);
+    return { user: u, isNew: false };
+  }
+  if (phone) {
+    u = await one(env, 'SELECT * FROM adv_users WHERE phone = ? ORDER BY created_at LIMIT 1', phone);
+    if (u) {
+      if (u.status !== 'active') return { error: 'حساب شما مسدود شده است؛ با پشتیبانی تماس بگیرید.' };
+      await run(env, 'UPDATE adv_users SET tg_id = ?, last_login = ? WHERE id = ?', tgId, Date.now(), u.id);
+      u.tg_id = tgId;
+      return { user: u, isNew: false };
+    }
+  }
+  /* حساب قدیمیِ بدون هویت (مدیر اولِ ثبت‌نام‌شده) → همان حساب به تلگرام وصل می‌شود */
+  const legacy = await all(env, "SELECT * FROM adv_users WHERE role = 'admin' AND (tg_id IS NULL OR tg_id = '') AND (phone IS NULL OR phone = '')");
+  if (legacy.length === 1) {
+    u = legacy[0];
+    await run(env, 'UPDATE adv_users SET tg_id = ?, phone = ?, last_login = ? WHERE id = ?', tgId, phone || '', Date.now(), u.id);
+    u.tg_id = tgId; u.phone = phone || '';
+    return { user: u, isNew: false };
+  }
   const count = await one(env, 'SELECT COUNT(*) AS n FROM adv_users');
   const adminEnv = String(env.ADMIN_EMAILS || '').trim();
-  const role = isAdminEmail(env, email) || (!adminEnv && !(count && count.n)) ? 'admin' : 'adv';
+  const role = (!adminEnv && !(count && count.n)) ? 'admin' : 'adv';
   const salt = rid(16);
-  const user = { id: 'u_' + rid(6), email: email, name: name, phone: enDigits(String(b.phone || '')).replace(/[^\d+]/g, '').slice(0, 15), company: String(b.company || '').trim().slice(0, 80), pass: await hashPassword(pass, salt), salt: salt, role: role, status: 'active', balance: 0, created_at: Date.now(), last_login: Date.now(), sess_ver: 1 };
-  await run(env, 'INSERT INTO adv_users (id, email, name, phone, company, pass, salt, role, status, balance, created_at, last_login, sess_ver) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-    user.id, user.email, user.name, user.phone, user.company, user.pass, user.salt, user.role, user.status, 0, user.created_at, user.last_login, 1);
-  return json({ ok: true, token: await makeSession(env, set, user), user: pubUser(user) });
+  u = { id: 'u_' + rid(6), email: 'tg' + tgId + '@telegram', name: tgDisplayName(from) || ('کاربر ' + tgId), phone: phone || '', company: '', pass: await hashPassword(rid(16), salt), salt: salt, role: role, status: 'active', balance: 0, created_at: Date.now(), last_login: Date.now(), sess_ver: 1, tg_id: tgId };
+  await run(env, 'INSERT INTO adv_users (id, email, name, phone, company, pass, salt, role, status, balance, created_at, last_login, sess_ver, tg_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+    u.id, u.email, u.name, u.phone, u.company, u.pass, u.salt, u.role, u.status, 0, u.created_at, u.last_login, 1, u.tg_id);
+  return { user: u, isNew: true };
 }
-async function apiLogin(request, env, set) {
-  const b = await readJson(request, 4096);
-  const email = String(b.email || '').trim().toLowerCase();
-  if (!rateOk('login:' + clientIp(request), 20, 600000) || !rateOk('login:' + email, 8, 600000)) return err('تلاش‌های ورود زیاد است؛ ۱۰ دقیقه بعد دوباره امتحان کنید.', 429);
-  const u = await one(env, 'SELECT * FROM adv_users WHERE email = ?', email);
-  if (!u || !safeEq(u.pass, await hashPassword(String(b.password || ''), u.salt))) return err('ایمیل یا رمز عبور اشتباه است', 401);
-  if (u.status !== 'active') return err('حساب شما مسدود شده است؛ با پشتیبانی تماس بگیرید.', 403);
-  if (u.role !== 'admin' && isAdminEmail(env, u.email)) { await run(env, "UPDATE adv_users SET role = 'admin' WHERE id = ?", u.id); u.role = 'admin'; }
-  await run(env, 'UPDATE adv_users SET last_login = ? WHERE id = ?', Date.now(), u.id);
-  return json({ ok: true, token: await makeSession(env, set, u), user: pubUser(u) });
+async function apiAuthStart(request, env, set) {
+  if (!botToken(env) || !set.botUsername) return err('ربات تلگرام پلتفرم هنوز تنظیم نشده است', 400);
+  if (!rateOk('astart:' + clientIp(request), 20, 600000)) return err('تعداد درخواست زیاد است؛ کمی صبر کنید', 429);
+  const ticket = rid(8);
+  await kvSet(env, 'tick:' + ticket, { status: 'pending', at: Date.now() }, AUTH_TTL_MS);
+  return json({ ticket: ticket, botLink: 'https://t.me/' + set.botUsername + '?start=tglogin_' + ticket, expireSec: Math.round(AUTH_TTL_MS / 1000) });
+}
+async function apiAuthTicket(env, set, id) {
+  const rec = await kvGet(env, 'tick:' + String(id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 20));
+  if (!rec) return err('لینک ورود منقضی شده است؛ دوباره تلاش کنید.', 404);
+  if (rec.status === 'ready') return json({ status: 'ready', token: rec.token, user: rec.user });
+  return json({ status: 'pending' });
 }
 async function apiProfile(request, env, set, user) {
   const b = await readJson(request, 8192);
   const name = b.name !== undefined ? String(b.name).replace(/\s+/g, ' ').trim().slice(0, 60) : user.name;
   if (name.length < 2) return err('نام کوتاه است');
-  const phone = b.phone !== undefined ? enDigits(String(b.phone)).replace(/[^\d+]/g, '').slice(0, 15) : user.phone;
+  const phone = b.phone !== undefined ? normPhone(b.phone).slice(0, 15) : user.phone;
   const company = b.company !== undefined ? String(b.company).trim().slice(0, 80) : user.company;
-  if (b.newPassword) {
-    if (!safeEq(user.pass, await hashPassword(String(b.password || ''), user.salt))) return err('رمز فعلی اشتباه است', 401);
-    if (String(b.newPassword).length < 8) return err('رمز جدید باید حداقل ۸ نویسه باشد');
-    const salt = rid(16);
-    await run(env, 'UPDATE adv_users SET pass = ?, salt = ?, sess_ver = sess_ver + 1 WHERE id = ?', await hashPassword(String(b.newPassword), salt), salt, user.id);
-    const fresh = await one(env, 'SELECT * FROM adv_users WHERE id = ?', user.id);
-    await run(env, 'UPDATE adv_users SET name = ?, phone = ?, company = ? WHERE id = ?', name, phone, company, user.id);
-    return json({ ok: true, token: await makeSession(env, set, fresh), user: pubUser(Object.assign(fresh, { name: name, phone: phone, company: company })) });
-  }
   await run(env, 'UPDATE adv_users SET name = ?, phone = ?, company = ? WHERE id = ?', name, phone, company, user.id);
   return json({ ok: true, user: pubUser(Object.assign({}, user, { name: name, phone: phone, company: company })) });
 }
@@ -863,7 +898,7 @@ async function notifyAdmins(env, set, text, markup) {
   for (const chat of await adminChats(env, set)) await tgApi(env, 'sendMessage', { chat_id: chat, text: text, reply_markup: markup || undefined, disable_web_page_preview: true }, 4000);
 }
 async function notifyAdminsReview(env, set, cid, name, user) {
-  await notifyAdmins(env, set, '🆕 کمپین برای بررسی: «' + name + '»\nتبلیغ‌دهنده: ' + (user.name || '') + ' (' + (user.email || '') + ')\nپنل مدیریت ← صف بررسی' + (originOf(set) ? '\n' + originOf(set) + '/#/admin/review' : ''));
+  await notifyAdmins(env, set, '🆕 کمپین برای بررسی: «' + name + '»\nتبلیغ‌دهنده: ' + (user.name || '') + ' (' + (user.phone || user.email || '') + ')\nپنل مدیریت ← صف بررسی' + (originOf(set) ? '\n' + originOf(set) + '/#/admin/review' : ''));
 }
 async function apiTgLink(env, set, user) {
   if (!botToken(env) || !set.botUsername) return err('ربات تلگرام پلتفرم هنوز تنظیم نشده است');
@@ -983,8 +1018,52 @@ async function tgWebhook(request, env, set) {
     if (!out.error && cq.message) await tgApi(env, 'editMessageText', { chat_id: cq.message.chat.id, message_id: cq.message.message_id, text: (cq.message.text || '') + '\n\n' + (out.status === 'paid' ? '✅ تأیید شد' : '❌ رد شد') });
     return json({ ok: true });
   }
-  if (msg && msg.chat && msg.chat.type === 'private' && typeof msg.text === 'string') {
-    const mm = /^\/start\s+link_([a-f0-9]{16})$/.exec(msg.text.trim());
+  if (msg && msg.chat && msg.chat.type === 'private') {
+    const tgId = String((msg.from && msg.from.id) || '');
+    const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+    const state = await kvGet(env, 'tgstate:' + tgId);
+    if (msg.contact) {
+      if (!isOwnContact(msg, tgId)) {
+        await tgApi(env, 'sendMessage', { chat_id: msg.chat.id, text: 'فقط دکمهٔ «ارسال شماره موبایل» پایین را بزن و Share را بزن. شماره را تایپ نکن.', reply_markup: contactKeyboard() });
+        return json({ ok: true });
+      }
+      const phone = normPhone(msg.contact.phone_number);
+      const st = state || {};
+      const got = await tgAuthUser(env, set, msg.from, phone);
+      if (got.error) {
+        await tgApi(env, 'sendMessage', { chat_id: msg.chat.id, text: got.error });
+        return json({ ok: true });
+      }
+      await kvSet(env, 'tgstate:' + tgId, { mode: 'done' }, 60000);
+      if (st.ticket) await completeTgTicket(env, set, st.ticket, got.user);
+      await tgApi(env, 'sendMessage', { chat_id: msg.chat.id, text: (got.isNew ? '✅ ثبت‌نام انجام شد.' : '✅ ورود انجام شد.') + (st.ticket ? ' حالا به پنل برگردید؛ ورود شما خودکار کامل می‌شود.' : ''), reply_markup: { remove_keyboard: true } });
+      if (st.ticket && originOf(set)) await tgApi(env, 'sendMessage', { chat_id: msg.chat.id, text: 'بازگشت به پنل:', reply_markup: { inline_keyboard: [[{ text: 'بازگشت به پنل تبلیغات', url: originOf(set) }]] } });
+      return json({ ok: true });
+    }
+    const mt = /^\/start\s+tglogin_([a-zA-Z0-9]{4,20})$/.exec(text);
+    if (mt) {
+      const rec = await kvGet(env, 'tick:' + mt[1]);
+      if (!rec || rec.status === 'ready') {
+        await tgApi(env, 'sendMessage', { chat_id: msg.chat.id, text: '⌛️ این لینک ورود منقضی شده. از سایت دوباره «ورود با تلگرام» را بزنید.' });
+        return json({ ok: true });
+      }
+      const u0 = await one(env, 'SELECT * FROM adv_users WHERE tg_id = ?', tgId);
+      if (u0 && u0.phone && u0.status === 'active') {
+        await run(env, 'UPDATE adv_users SET last_login = ? WHERE id = ?', Date.now(), u0.id);
+        await completeTgTicket(env, set, mt[1], u0);
+        await tgApi(env, 'sendMessage', { chat_id: msg.chat.id, text: '✅ ورود انجام شد. حالا به پنل برگردید؛ ورود شما خودکار کامل می‌شود.' });
+        if (originOf(set)) await tgApi(env, 'sendMessage', { chat_id: msg.chat.id, text: 'بازگشت به پنل:', reply_markup: { inline_keyboard: [[{ text: 'بازگشت به پنل تبلیغات', url: originOf(set) }]] } });
+        return json({ ok: true });
+      }
+      await kvSet(env, 'tgstate:' + tgId, { mode: 'wait_contact', ticket: mt[1] }, 1800000);
+      await tgApi(env, 'sendMessage', { chat_id: msg.chat.id, text: 'برای ورود / ثبت‌نام در پنل تبلیغات، روی دکمهٔ زیر بزن تا شماره‌ات ارسال بشه:\n\nاین اطلاعات نزد ما محفوظ می‌ماند و صرفاً برای تکمیل حساب کاربری شما دریافت می‌شود.', reply_markup: contactKeyboard() });
+      return json({ ok: true });
+    }
+    if (state && state.mode === 'wait_contact') {
+      await tgApi(env, 'sendMessage', { chat_id: msg.chat.id, text: 'شماره را تایپ نکن. فقط دکمهٔ «ارسال شماره موبایل» را بزن.', reply_markup: contactKeyboard() });
+      return json({ ok: true });
+    }
+    const mm = /^\/start\s+link_([a-f0-9]{16})$/.exec(text);
     if (mm) {
       const uid = await kvGet(env, 'tglink:' + mm[1]);
       if (uid) {
@@ -1015,9 +1094,9 @@ async function adminOverview(env, set) {
   });
 }
 async function adminCampaigns(env, set, status) {
-  const rows = status ? await all(env, 'SELECT c.*, u.email AS u_email, u.name AS u_name FROM adv_campaigns c LEFT JOIN adv_users u ON u.id = c.uid WHERE c.status = ? ORDER BY c.updated_at DESC LIMIT 300', status)
-    : await all(env, 'SELECT c.*, u.email AS u_email, u.name AS u_name FROM adv_campaigns c LEFT JOIN adv_users u ON u.id = c.uid ORDER BY c.updated_at DESC LIMIT 300');
-  return json({ campaigns: rows.map(function (r) { return Object.assign(campaignPublic(r, originOf(set)), { owner: { id: r.uid, email: r.u_email || '', name: r.u_name || '' } }); }) });
+  const rows = status ? await all(env, 'SELECT c.*, u.email AS u_email, u.name AS u_name, u.phone AS u_phone FROM adv_campaigns c LEFT JOIN adv_users u ON u.id = c.uid WHERE c.status = ? ORDER BY c.updated_at DESC LIMIT 300', status)
+    : await all(env, 'SELECT c.*, u.email AS u_email, u.name AS u_name, u.phone AS u_phone FROM adv_campaigns c LEFT JOIN adv_users u ON u.id = c.uid ORDER BY c.updated_at DESC LIMIT 300');
+  return json({ campaigns: rows.map(function (r) { return Object.assign(campaignPublic(r, originOf(set)), { owner: { id: r.uid, email: r.u_email || '', phone: r.u_phone || '', name: r.u_name || '' } }); }) });
 }
 async function adminUsers(env, url) {
   const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
@@ -1146,8 +1225,9 @@ async function route(request, env, ctx) {
     const mk = await marketStats(env, set);
     return json({ config: publicConfig(set), genres: await siteGenres(set), market: { slots: mk.slots, active: mk.active, advertisers: mk.advertisers } });
   }
-  if (a === 'auth/register' && m === 'POST') return apiRegister(request, env, set);
-  if (a === 'auth/login' && m === 'POST') return apiLogin(request, env, set);
+  if ((a === 'auth/register' || a === 'auth/login') && m === 'POST') return err('ورود و ثبت‌نام فقط با تلگرام است.', 410);
+  if (a === 'auth/start' && m === 'POST') return apiAuthStart(request, env, set);
+  if ((mm = /^auth\/ticket\/([a-zA-Z0-9]{4,20})$/.exec(a)) && m === 'GET') return apiAuthTicket(env, set, mm[1]);
   const user = await currentUser(request, env, set);
   if (!user) return err('ابتدا وارد شوید', 401);
   if (a === 'me' && m === 'GET') return json({ user: pubUser(user) });
@@ -1338,7 +1418,7 @@ function ADS_APP(W) {
     var brand = (S.cfg && S.cfg.brand) || 'تبلیغات';
     $('#app').innerHTML = '<header class="top"><a class="logo" href="#/' + (u ? 'dash' : '') + '"><span>📢</span>' + esc(brand) + '</a><nav>' +
       links.map(function (l) { return '<a href="#/' + l[0] + '" class="' + (active === l[0] ? 'on' : '') + '">' + l[1] + '</a>'; }).join('') + '</nav><div class="me">' +
-      (u ? '<a class="chip" href="#/wallet">💰 ' + money(u.balance) + '</a><a class="chip" href="#/account">👤 ' + esc(u.name) + '</a>' : '<a class="btn sm" href="#/login">ورود</a><a class="btn sm pri" href="#/register">ثبت‌نام تبلیغ‌دهنده</a>') +
+      (u ? '<a class="chip" href="#/wallet">💰 ' + money(u.balance) + '</a><a class="chip" href="#/account">👤 ' + esc(u.name) + '</a>' : '<a class="btn sm pri" href="#/login">ورود / ثبت‌نام</a>') +
       '</div></header><main>' + inner + '</main><footer>' + esc(brand) + ' — ' + (S.cfg && S.cfg.siteName ? 'تبلیغ در ' + esc(S.cfg.siteName) : '') + (S.cfg && S.cfg.support ? ' · پشتیبانی: ' + esc(S.cfg.support) : '') + '</footer>';
   }
   function needLogin() { if (!S.user) { nav('#/login'); return true; } return false; }
@@ -1349,7 +1429,7 @@ function ADS_APP(W) {
     var slots = (S.market && S.market.slots) || [];
     var fmt = function (f, ic, t, d) { return '<div class="feat"><div class="ic">' + ic + '</div><h3>' + t + '</h3><p>' + d + '</p><div class="price">' + unitText(f) + '</div></div>'; };
     shell('', '<section class="hero"><h1>تبلیغ شما جلوی چشم هزاران بینندهٔ فیلم و سریال</h1><p>ویدئو، بنر یا لینک — خودتان کمپین بسازید، بودجه را تعیین کنید و آمار دقیق نمایش، بازدید کامل و کلیک را لحظه‌به‌لحظه ببینید. هزینهٔ تبلیغ ویدئویی فقط به ازای «بازدید کامل» است.</p>' +
-      '<div class="cta"><a class="btn pri lg" href="#/register">شروع رایگان</a><a class="btn lg" href="#/login">ورود به پنل</a></div></section>' +
+      '<div class="cta"><a class="btn pri lg" href="#/login">شروع رایگان</a><a class="btn lg" href="#/login">ورود به پنل</a></div></section>' +
       '<section class="feats">' + fmt('video', '🎬', 'تبلیغ ویدئویی', 'پیش از دانلود، شروع پخش آنلاین و هنگام تعویض کیفیت/دوبله. مثل یوتیوب: رد کردن پیش از بازدید کامل رایگان است.') +
       fmt('banner', '🖼', 'تبلیغ بنری', 'نوار روی پلیر حین تماشا، بنر هنگام توقف و تمام‌صفحه پیش از دانلود.') +
       fmt('link', '🔗', 'تبلیغ لینکی', 'دکمهٔ اختصاصی شما زیر هر فایلی که ربات برای کاربران می‌فرستد.') + '</section>' +
@@ -1357,28 +1437,33 @@ function ADS_APP(W) {
         slots.map(function (s) { return '<tr><td><b>' + esc(s.title) + '</b></td><td>' + num(Math.round(s.opps7 / 7)) + '</td><td class="mut">' + esc(s.desc) + '</td></tr>'; }).join('') + '</tbody></table></div></section>' : '') +
       '<section class="card steps"><h2>چطور کار می‌کند؟</h2><ol><li>ثبت‌نام و شارژ کیف پول با <b>استارز تلگرام</b> یا <b>کارت‌به‌کارت</b></li><li>ساخت کمپین: فایل یا متن، جایگاه، مخاطب و بودجه</li><li>بررسی و تأیید مدیر (معمولاً چند ساعت)</li><li>نمایش خودکار + آمار دقیق؛ باقی‌ماندهٔ بودجه هر زمان قابل برگشت است</li></ol></section>');
   }
-  function viewAuth(mode) {
-    var reg = mode === 'register';
-    shell('', '<section class="auth card"><h2>' + (reg ? 'ثبت‌نام تبلیغ‌دهنده' : 'ورود به پنل تبلیغات') + '</h2>' +
-      (reg ? '<label>نام یا نام برند<input id="a-name" autocomplete="organization"></label>' : '') +
-      '<label>ایمیل<input id="a-email" type="email" dir="ltr" autocomplete="email"></label>' +
-      '<label>رمز عبور' + (reg ? ' (حداقل ۸ نویسه)' : '') + '<input id="a-pass" type="password" dir="ltr" autocomplete="' + (reg ? 'new-password' : 'current-password') + '"></label>' +
-      (reg ? '<label>موبایل (اختیاری)<input id="a-phone" dir="ltr" inputmode="tel"></label><label class="chk"><input type="checkbox" id="a-acc"> <span><a href="#/rules" target="_blank">قوانین تبلیغات</a> را خوانده‌ام و می‌پذیرم</span></label>' : '') +
-      '<button class="btn pri block" id="a-go">' + (reg ? 'ساخت حساب' : 'ورود') + '</button>' +
-      '<p class="mut c">' + (reg ? 'حساب دارید؟ <a href="#/login">ورود</a>' : 'حساب ندارید؟ <a href="#/register">ثبت‌نام</a>') + '</p></section>');
-    $('#a-go').onclick = function () {
-      var b = { email: $('#a-email').value.trim(), password: $('#a-pass').value };
-      if (reg) { b.name = $('#a-name').value.trim(); b.phone = $('#a-phone').value.trim(); b.accept = $('#a-acc').checked; }
-      var btn = $('#a-go'); btn.disabled = true;
-      api('/auth/' + (reg ? 'register' : 'login'), { body: b }).then(function (r) {
-        setToken(r.token); S.user = r.user;
-        toast(reg ? 'خوش آمدید! حساب ساخته شد ✓' : 'خوش آمدید ✓', 'ok');
-        nav(r.user.role === 'admin' && reg ? '#/admin/settings' : '#/dash');
-      }).catch(function (e) { toast(e.message, 'err'); btn.disabled = false; });
+  function viewAuth() {
+    shell('', '<section class="auth card"><h2>ورود / ثبت‌نام با تلگرام</h2>' +
+      '<p class="mut">ورود و ثبت‌نام فقط با تلگرام انجام می‌شود — دقیقاً مثل ورود سایت اصلی. بعد از زدن دکمه، در ربات تلگرام، شمارهٔ موبایل خود را با دکمهٔ «ارسال شماره موبایل» به اشتراک بگذارید.</p>' +
+      '<button class="btn pri block" id="a-tg">ورود / ثبت‌نام با تلگرام</button>' +
+      '<p class="mut c" id="a-stat"></p></section>');
+    $('#a-tg').onclick = function () {
+      var btn = $('#a-tg'), stat = $('#a-stat');
+      btn.disabled = true; stat.textContent = 'در حال اتصال به ربات…';
+      api('/auth/start', { method: 'POST' }).then(function (r) {
+        W.open(r.botLink, '_blank');
+        stat.textContent = 'در ربات تلگرام، شمارهٔ موبایل را ارسال کنید…';
+        var t0 = Date.now(), ttl = (r.expireSec || 180) * 1000;
+        var iv = setInterval(function () {
+          if (Date.now() - t0 > ttl) { clearInterval(iv); stat.textContent = 'مهلت تمام شد؛ دوباره تلاش کنید.'; btn.disabled = false; return; }
+          api('/auth/ticket/' + r.ticket).then(function (t) {
+            if (t.status === 'ready') {
+              clearInterval(iv);
+              setToken(t.token); S.user = t.user;
+              toast('خوش آمدید ✓', 'ok');
+              nav(t.user.role === 'admin' ? '#/admin' : '#/dash');
+            }
+          }).catch(function () { });
+        }, 1500);
+      }).catch(function (e) { toast(e.message, 'err'); btn.disabled = false; stat.textContent = ''; });
     };
   }
 
-  /* ── داشبورد ── */
   function viewDash() {
     if (needLogin()) return;
     shell('dash', '<div class="spin"></div>');
@@ -1710,7 +1795,7 @@ function ADS_APP(W) {
   }
   function viewMarket(pub) {
     if (!pub && needLogin()) return;
-    if (pub) { shell('market-public', '<h1>تعرفه‌ها و جایگاه‌ها</h1><section class="card">' + tariffTable() + '</section><section class="card note">برای دیدن آمار کامل بازار <a href="#/register">ثبت‌نام</a> کنید یا <a href="#/login">وارد شوید</a>.</section>'); return; }
+    if (pub) { shell('market-public', '<h1>تعرفه‌ها و جایگاه‌ها</h1><section class="card">' + tariffTable() + '</section><section class="card note">برای دیدن آمار کامل بازار <a href="#/login">ثبت‌نام</a> کنید یا <a href="#/login">وارد شوید</a>.</section>'); return; }
     shell('market', '<div class="spin"></div>');
     api('/market').then(function (mk) {
       var rows = (mk.slots || []).map(function (s) { return '<tr><td><b>' + esc(s.title) + '</b><br><small class="mut">' + esc(s.desc) + '</small></td><td>' + num(Math.round(s.opps7 / 7)) + '</td><td>' + num(Math.round(s.imps7 / 7)) + '</td><td>' + pct(s.imps7, s.opps7) + '</td><td>' + (s.views7 ? pct(s.views7, s.imps7) : '—') + '</td><td>' + pct(s.clicks7, s.imps7) + '</td></tr>'; }).join('');
@@ -1728,13 +1813,11 @@ function ADS_APP(W) {
   function viewAccount() {
     if (needLogin()) return;
     var u = S.user;
-    shell('account', '<h1>حساب کاربری</h1><section class="card"><label>نام / برند<input id="p-name" value="' + esc(u.name) + '"></label><label>شرکت (اختیاری)<input id="p-co" value="' + esc(u.company) + '"></label><label>موبایل<input id="p-ph" dir="ltr" value="' + esc(u.phone) + '"></label><p class="mut">ایمیل: <span dir="ltr">' + esc(u.email) + '</span></p><button class="btn pri" id="p-save">ذخیره</button></section>' +
+    shell('account', '<h1>حساب کاربری</h1><section class="card"><label>نام / برند<input id="p-name" value="' + esc(u.name) + '"></label><label>شرکت (اختیاری)<input id="p-co" value="' + esc(u.company) + '"></label><label>موبایل<input id="p-ph" dir="ltr" value="' + esc(u.phone) + '"></label><button class="btn pri" id="p-save">ذخیره</button></section>' +
       '<section class="card"><h2>🔔 اتصال تلگرام</h2><p class="mut">' + (u.tg ? '✅ تلگرام شما متصل است.' : 'برای دریافت فوری نتیجهٔ بررسی، پرداخت و پایان بودجه، تلگرام را وصل کنید.') + '</p><button class="btn" id="p-tg">' + (u.tg ? 'اتصال دوباره' : 'اتصال تلگرام') + '</button></section>' +
-      '<section class="card"><h2>تغییر رمز</h2><label>رمز فعلی<input id="p-old" type="password" dir="ltr"></label><label>رمز جدید<input id="p-new" type="password" dir="ltr"></label><button class="btn" id="p-pass">تغییر رمز</button></section>' +
-      '<button class="btn bad" id="p-out">خروج از حساب</button>');
+            '<button class="btn bad" id="p-out">خروج از حساب</button>');
     $('#p-save').onclick = function () { api('/me', { body: { name: $('#p-name').value, company: $('#p-co').value, phone: $('#p-ph').value } }).then(function (r) { S.user = r.user; toast('ذخیره شد ✓', 'ok'); }).catch(function (e) { toast(e.message, 'err'); }); };
-    $('#p-pass').onclick = function () { api('/me', { body: { password: $('#p-old').value, newPassword: $('#p-new').value } }).then(function (r) { if (r.token) setToken(r.token); S.user = r.user; toast('رمز تغییر کرد ✓', 'ok'); }).catch(function (e) { toast(e.message, 'err'); }); };
-    $('#p-tg').onclick = function () { api('/me/tg-link', { method: 'POST' }).then(function (r) { W.open(r.link, '_blank'); }).catch(function (e) { toast(e.message, 'err'); }); };
+        $('#p-tg').onclick = function () { api('/me/tg-link', { method: 'POST' }).then(function (r) { W.open(r.link, '_blank'); }).catch(function (e) { toast(e.message, 'err'); }); };
     $('#p-out').onclick = function () { setToken(''); S.user = null; nav('#/'); };
   }
 
@@ -1757,7 +1840,7 @@ function ADS_APP(W) {
     if (tab === 'admin/review') return api('/admin/campaigns?status=pending').then(function (d) {
       var cs = d.campaigns || [];
       adminShell(tab, '<h1>صف بررسی (' + fa(cs.length) + ')</h1>' + (cs.length ? cs.map(function (c) {
-        return '<section class="card rev"><div class="h2row"><h2>' + esc(c.name) + ' <span class="bdg">' + fmtTitle(c.format) + '</span></h2><span class="mut">' + esc(c.owner.name) + ' · <span dir="ltr">' + esc(c.owner.email) + '</span></span></div>' +
+        return '<section class="card rev"><div class="h2row"><h2>' + esc(c.name) + ' <span class="bdg">' + fmtTitle(c.format) + '</span></h2><span class="mut">' + esc(c.owner.name) + ' · <span dir="ltr">' + esc(c.owner.phone || c.owner.email) + '</span></span></div>' +
           creativePreview(c) + '<p class="mut">جایگاه‌ها: ' + c.slots.map(slotTitle).join('، ') + ' · بودجه: ' + money(c.budget) + ' · ضریب ' + fa(c.bid) + '× · مخاطب: ' + ((c.target.types || []).join('/') || 'همه') + ((c.target.genres || []).length ? ' · ژانر: ' + esc(c.target.genres.join('، ')) : '') + ' · ارسال: ' + dtime(c.submittedAt) + '</p>' +
           '<textarea id="r-' + c.id + '" rows="2" placeholder="دلیل رد (برای تبلیغ‌دهنده نمایش داده می‌شود)"></textarea><div class="acts"><button class="btn pri" data-ok="' + c.id + '">✅ تأیید و شروع نمایش</button><button class="btn bad" data-no="' + c.id + '">❌ رد و بازگشت بودجه</button></div></section>';
       }).join('') : '<div class="card empty">صف بررسی خالی است ✓</div>'));

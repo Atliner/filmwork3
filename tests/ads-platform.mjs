@@ -1,5 +1,5 @@
 /* پلتفرم تبلیغ‌دهندگان (ads.js) با D1 واقعی (SQLite) + اتصال سرتاسری به سایت اصلی (worker.js):
-   ثبت‌نام/مدیر، آپلود و Range، کارت‌به‌کارت هوشمند و استارز، کمپین و قوانین، صف تأیید مدیر،
+   ورود/ثبت‌نام فقط با تلگرام (تیکت + اشتراک شماره)، اعلان مدیر/تبلیغ‌دهنده، آپلود و Range، کارت‌به‌کارت هوشمند و استارز، کمپین و قوانین، صف تأیید مدیر،
    فهرست امضاشده، رویدادهای دسته‌ای یکتا، صورت‌حساب CPV/CPM و سقف بودجه، آمار شخصی و کلی،
    انتخاب تبلیغ در سایت، شمارش بازدید/کلیک، دکمهٔ لینک زیر فایل ربات و ریدایرکت. */
 import assert from 'node:assert/strict';
@@ -8,7 +8,7 @@ import vm from 'node:vm';
 import { DatabaseSync } from 'node:sqlite';
 
 const adsSrc = fs.readFileSync(new URL('../ads.js', import.meta.url), 'utf8');
-const ADS = await import('data:text/javascript;base64,' + Buffer.from(adsSrc + '\nexport { ADS_HTML, tehranDay, SETTINGS_DEFAULTS };').toString('base64'));
+const ADS = await import('data:text/javascript;base64,' + Buffer.from(adsSrc + '\nexport { ADS_HTML, tehranDay, SETTINGS_DEFAULTS, saveSettings };').toString('base64'));
 const ads = ADS.default;
 const siteSrc = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 const SITE = await import('data:text/javascript;base64,' + Buffer.from(siteSrc + `
@@ -60,23 +60,61 @@ globalThis.fetch = async (url, init = {}) => {
 };
 
 try {
-  /* ── ۱. صفحه و ثبت‌نام: اولین حساب مدیر می‌شود ── */
+  /* ── ۱. ورود/ثبت‌نام فقط با تلگرام (تیکت + اشتراک شماره)؛ اولین حساب مدیر می‌شود ── */
   const page = await ads.fetch(new Request(ORIGIN + '/'), env, {});
   assert.equal(page.status, 200);
   const html = await page.text();
   for (const s of [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1])) new vm.Script(s);
-  assert.equal((await call('/api/auth/register', { body: { email: 'boss@example.com', name: 'Boss', password: 'short', accept: true } })).status, 400);
-  assert.equal((await call('/api/auth/register', { body: { email: 'boss@example.com', name: 'Boss', password: 'longpassword1' } })).status, 400, 'پذیرش قوانین لازم است');
-  const adminReg = await call('/api/auth/register', { body: { email: 'boss@example.com', name: 'Boss', password: 'longpassword1', accept: true } });
-  assert.equal(adminReg.status, 200); assert.equal(adminReg.body.user.role, 'admin');
-  const ADMIN = adminReg.body.token;
-  const advReg = await call('/api/auth/register', { body: { email: 'shop@example.com', name: 'فروشگاه نمونه', password: 'longpassword2', accept: true, phone: '۰۹۱۲۱۲۳۴۵۶۷' } });
-  assert.equal(advReg.body.user.role, 'adv'); assert.equal(advReg.body.user.phone, '09121234567');
-  assert.equal((await call('/api/auth/register', { body: { email: 'shop@example.com', name: 'تکراری', password: 'longpassword2', accept: true } })).status, 409);
-  assert.equal((await call('/api/auth/login', { body: { email: 'shop@example.com', password: 'wrong-pass' } })).status, 401);
-  tok = (await call('/api/auth/login', { body: { email: 'shop@example.com', password: 'longpassword2' } })).body.token;
+  assert.ok(html.includes('a-tg'), 'دکمهٔ ورود با تلگرام در صفحه است');
+  assert.equal((await call('/api/auth/register', { body: { email: 'boss@example.com', password: 'x', accept: true } })).status, 410, 'ایمیل حذف شد');
+  assert.equal((await call('/api/auth/login', { body: { email: 'boss@example.com', password: 'x' } })).status, 410, 'ایمیل حذف شد');
+  assert.equal((await call('/api/auth/start', { method: 'POST', body: {} })).status, 400, 'بدون ربات، لینک ورود ساخته نمی‌شود');
+  await ADS.saveSettings(env, { botUsername: 'AdsBot', siteName: 'سینماگرام' });
+  const wh = async (body) => {
+    const sv = JSON.parse(env.ADS_DB.sql.prepare("SELECT v FROM adv_kv WHERE k='settings'").get().v);
+    const sec = (await import('node:crypto')).createHmac('sha256', sv.secret).update('tg-webhook').digest('hex').slice(0, 48);
+    return call('/api/tg/webhook', { method: 'POST', body, headers: { 'x-telegram-bot-api-secret-token': sec } });
+  };
+  const start1 = await call('/api/auth/start', { method: 'POST', body: {} });
+  assert.equal(start1.status, 200);
+  assert.match(start1.body.botLink, /^https:\/\/t\.me\/AdsBot\?start=tglogin_[a-f0-9]+$/, 'لینک ورود از همان ربات پلتفرم است');
+  const T1 = start1.body.ticket;
+  assert.equal((await call('/api/tg/webhook', { method: 'POST', body: {} })).status, 403, 'وب‌هوک بدون رمز ربات رد می‌شود');
+  await wh({ message: { from: { id: 111, first_name: 'Boss' }, chat: { id: 111, type: 'private' }, text: '/start tglogin_' + T1 } });
+  assert.equal(tg.at(-1).method, 'sendMessage');
+  assert.ok(JSON.stringify(tg.at(-1).body.reply_markup || {}).includes('request_contact'), 'ربات دکمهٔ ارسال شماره می‌دهد');
+  await wh({ message: { from: { id: 999, first_name: 'X' }, chat: { id: 999, type: 'private' }, contact: { phone_number: '+989120000009', user_id: 111 } } });
+  assert.ok(JSON.stringify(tg.at(-1).body.reply_markup || {}).includes('request_contact'), 'شمارهٔ دیگران پذیرفته نمی‌شود');
+  assert.equal((await call('/api/auth/ticket/' + T1)).body.status, 'pending');
+  await wh({ message: { from: { id: 111, first_name: 'Boss' }, chat: { id: 111, type: 'private' }, contact: { phone_number: '+98 912 000 0001', user_id: 111 } } });
+  const t1r = await call('/api/auth/ticket/' + T1);
+  assert.equal(t1r.body.status, 'ready');
+  assert.equal(t1r.body.user.role, 'admin', 'اولین حساب ثبت‌نام‌شده مدیر می‌شود');
+  assert.equal(t1r.body.user.phone, '09120000001', 'شمارهٔ اشتراک‌گذاشته ذخیره می‌شود');
+  const ADMIN = t1r.body.token;
+  const start1b = await call('/api/auth/start', { method: 'POST', body: {} });
+  await wh({ message: { from: { id: 111, first_name: 'Boss' }, chat: { id: 111, type: 'private' }, text: '/start tglogin_' + start1b.body.ticket } });
+  assert.ok(tg.slice(-2).some(x => /ورود انجام شد/.test(x.body.text || '')), 'ورود دوباره بدون ارسال شماره');
+  assert.equal((await call('/api/auth/ticket/' + start1b.body.ticket)).body.status, 'ready');
+  const start2 = await call('/api/auth/start', { method: 'POST', body: {} });
+  await wh({ message: { from: { id: 222, first_name: 'فروشگاه', last_name: 'نمونه' }, chat: { id: 222, type: 'private' }, text: '/start tglogin_' + start2.body.ticket } });
+  await wh({ message: { from: { id: 222, first_name: 'فروشگاه', last_name: 'نمونه' }, chat: { id: 222, type: 'private' }, contact: { phone_number: '09121234567', user_id: 222 } } });
+  const advRes = await call('/api/auth/ticket/' + start2.body.ticket);
+  assert.equal(advRes.body.user.role, 'adv');
+  assert.equal(advRes.body.user.phone, '09121234567');
+  tok = advRes.body.token;
   assert.equal((await call('/api/admin/overview')).status, 403, 'تبلیغ‌دهنده به پنل مدیر دسترسی ندارد');
   assert.equal((await call('/api/me', { token: 'garbage.token' })).status, 401);
+  assert.equal((await call('/api/auth/ticket/nope99x')).status, 404, 'تیکت نامعتبر');
+  const start3 = await call('/api/auth/start', { method: 'POST', body: {} });
+  await wh({ message: { from: { id: 223, first_name: 'دوم' }, chat: { id: 223, type: 'private' }, text: '/start tglogin_' + start3.body.ticket } });
+  await wh({ message: { from: { id: 223, first_name: 'دوم' }, chat: { id: 223, type: 'private' }, contact: { phone_number: '+989121234567', user_id: 223 } } });
+  const same = await call('/api/auth/ticket/' + start3.body.ticket);
+  assert.equal(same.body.user.id, advRes.body.user.id, 'شمارهٔ یکسان = همان حساب');
+  const start4 = await call('/api/auth/start', { method: 'POST', body: {} });
+  await wh({ message: { from: { id: 222, first_name: 'فروشگاه', last_name: 'نمونه' }, chat: { id: 222, type: 'private' }, text: '/start tglogin_' + start4.body.ticket } });
+  await wh({ message: { from: { id: 222, first_name: 'فروشگاه', last_name: 'نمونه' }, chat: { id: 222, type: 'private' }, contact: { phone_number: '09121234567', user_id: 222 } } });
+  assert.equal((await call('/api/auth/ticket/' + start4.body.ticket)).body.status, 'ready', 'بازگشت اتصال به تلگرام اصلی');
 
   /* ── ۲. تنظیمات مدیر: تعرفه، کارت، استارز، کلید اتصال از Secret ── */
   const st = await call('/api/admin/settings', { token: ADMIN });
@@ -142,6 +180,10 @@ try {
   const submitted = await call('/api/campaigns/' + CID + '/submit', { method: 'POST' });
   assert.equal(submitted.body.campaign.status, 'pending');
   assert.deepEqual(submitted.body.campaign.prices, { cpm: 0, cpv: 100, cpc: 0 }, 'تعرفه هنگام ارسال قفل شد');
+  const revMsgs = tg.filter(x => x.method === 'sendMessage' && /برای بررسی/.test(x.body.text || ''));
+  assert.ok(revMsgs.length >= 1, 'اعلان کمپین تازه در صف بررسی برای مدیر برود');
+  assert.equal(String(revMsgs.at(-1).body.chat_id), '111', 'اعلان صف بررسی به مدیر (اولین ثبت‌نام‌شده) می‌رود');
+  assert.ok(!tg.some(x => x.method === 'sendMessage' && String(x.body.chat_id) === '222' && /برای بررسی/.test(x.body.text || '')), 'تبلیغ‌دهنده اعلان صف بررسی نمی‌گیرد');
   me = (await call('/api/me')).body.user;
   const balAfterHold = me.balance;
   assert.equal(balAfterHold, 200000 + inv2.extra + 150000 - 60000);
@@ -165,6 +207,7 @@ try {
   assert.equal(bad, 401);
   assert.equal((await call('/api/admin/review/' + CID, { token: ADMIN, body: { approve: false, reason: '' } })).status, 400, 'دلیل رد لازم است');
   assert.equal((await call('/api/admin/review/' + CID, { token: ADMIN, body: { approve: true } })).status, 200);
+  assert.ok(tg.some(x => x.method === 'sendMessage' && String(x.body.chat_id) === '222' && /تأیید شد/.test(x.body.text || '')), 'نتیجهٔ بررسی به تبلیغ‌دهنده اعلام می‌شود');
   SITE.AD_NET.invAt = 0;
   inventory = await SITE.adNetInventory(store, set);
   assert.equal(inventory.campaigns.length, 1);
@@ -317,7 +360,8 @@ try {
 
   /* ── ۱۱. مدیر: مسدودسازی تبلیغ‌دهنده کمپین‌ها را متوقف و نشست را باطل می‌کند ── */
   const users = (await call('/api/admin/users', { token: ADMIN })).body.users;
-  const shop = users.find(u => u.email === 'shop@example.com');
+  const shop = users.find(u => u.phone === '09121234567');
+  assert.ok(shop, 'تبلیغ‌دهنده با شماره پیدا می‌شود');
   assert.equal((await call('/api/admin/users/' + shop.id, { token: ADMIN, body: { action: 'adjust', amount: 10000, note: 'هدیه' } })).status, 200);
   assert.equal((await call('/api/admin/users/' + shop.id, { token: ADMIN, body: { action: 'block' } })).status, 200);
   assert.equal((await call('/api/me')).status, 401, 'نشست حساب مسدود باطل شد');
