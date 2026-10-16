@@ -2912,7 +2912,7 @@ function adNetNormalize(data) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.campaigns)) return out;
   out.rev = String(data.rev || '').slice(0, 40);
   const cfg = data.cfg || {};
-  out.cfg = { viewSec: Math.round(adNum(cfg.viewSec, 10, 1, 60)), skipAfter: Math.round(adNum(cfg.skipAfter, 5, 0, 30)), maxSec: Math.round(adNum(cfg.maxSec, 30, 5, 120)), trackTgClicks: !!cfg.trackTgClicks };
+  out.cfg = { viewSec: Math.round(adNum(cfg.viewSec, 10, 1, 60)), skipAfter: Math.round(adNum(cfg.skipAfter, 5, 0, 30)), maxSec: Math.round(adNum(cfg.maxSec, 30, 5, 120)), linkViaSite: cfg.linkViaSite !== false };
   function arr(v) { return Array.isArray(v) ? v : []; }
   for (const c of data.campaigns.slice(0, 300)) {
     if (!c || !/^c_[a-z0-9]{4,32}$/.test(String(c.id || ''))) continue;
@@ -3177,45 +3177,14 @@ async function apiAdTokenClick(store, body, request, ctx) {
   }
   return json({ ok: true, url: url });
 }
-/* لینک‌های تلگرامی (t.me و دامنه‌های هم‌خانواده) نباید از سایت رد شوند: دکمه همان لینک
-   تلگرام را مستقیم می‌گیرد تا کاربر داخل تلگرام بماند (تگرام آن را بومی باز می‌کند و
-   کاربر از اپ خارج/برنمی‌گردد). کلیک این دکمه‌ها شمرده نمی‌شود چون تگرام روی لینک
-   مستقیم بازخورد نمی‌دهد؛ نمایش (Impression) همچنان ثبت می‌شود.
-   بقیهٔ لینک‌ها از /r/ سایت عبور می‌کنند تا کلیک دقیق شمرده شود. */
-function isTgLink (u) {
-  try {
-    const h = new URL(String(u || '')).hostname.toLowerCase().replace(/^www\./, '');
-    return h === 't.me' || h === 'telegram.me' || h === 'telegram.dog';
-  } catch (e) { return false; }
-}
+/* لینک دکمهٔ تبلیغ زیر فایل: در حالت پیش‌فرض «از مسیر سایت» (تنظیم پلتفرم در پنل ads.js)
+   همهٔ لینک‌ها — تلگرامی و غیرتلگرامی — از /r/ سایت عبور می‌کنند تا کلیک دقیق شمرده شود.
+   در حالت «مستقیم»، deliveryKeyboard اصلاً از این مسیر استفاده نمی‌کند: لینک خام روی
+   دکمه می‌نشیند، آدرس سایت در کار نیست و کلیکی شمرده نمی‌شود (نمایش ثبت می‌شود). */
 async function adRedirectUrl(set, c) {
-  const dest = c.link.url;
-  if (isTgLink(dest)) return dest;
   const origin = String(set.publicUrl || '').replace(/\/+$/, '');
-  if (!/^https:\/\//.test(origin)) return dest;
-  return origin + '/r/' + (await signToken({ r: 1, c: c.id, l: dest }, set.secret));
-}
-/* دکمهٔ ردیاب تبلیغ لینکی (وقتی «شمارش کلیک لینک‌های تلگرامی» در پنل پلتفرم روشن است):
-   دکمه به‌جای callback (که تلگرام هنگام فورواد کل کیبورد را حذف می‌کند) یک لینک عمیق
-   t.me به ربات است (start=adk_…) — مثل لینک معمولی هنگام فورواد می‌ماند، کاربر از
-   تلگرام خارج نمی‌شود و با رسیدن /start کلیک ثبت می‌شود و مقصد واقعی با یک
-   دکمهٔ مستقیم (همان لینک تبلیغ‌دهنده) نشان داده می‌شود. */
-async function handleAdDeepClick(store, set, ctx, from, chatId, cid, token) {
-  const inv = await adNetInventory(store, set);
-  const c = inv && inv.campaigns.find(function (x) { return x.id === cid && x.link; });
-  const url = c ? (c.link.url || c.landing || '') : '';
-  if (!url) {
-    await tgSend(token, chatId, 'این تبلیغ دیگر فعال نیست.');
-    return;
-  }
-  if (memRate('rcb:' + cid + ':' + String((from && from.id) || ''), 1, 3600000)) {
-    adNetRecord(ctx, store, set, { c: cid, s: 'bot', e: 'click', d: 'm', t: '' });
-  }
-  await botApi(token, 'sendMessage', {
-    chat_id: chatId,
-    text: '🎁 ' + (c.link.text || c.title || 'تبلیغ'),
-    reply_markup: { inline_keyboard: [[{ text: (c.cta || 'مشاهده') + ' ↗', url: url }]] },
-  });
+  if (!/^https:\/\//.test(origin)) return c.link.url;
+  return origin + '/r/' + (await signToken({ r: 1, c: c.id, l: c.link.url }, set.secret));
 }
 async function handleAdRedirect(request, url, store, ctx) {
   const set = await getSettings(store);
@@ -3252,11 +3221,11 @@ async function deliveryKeyboard(store, set, dl, item, ctx) {
           const c = adWeightedPick(pool, used);
           if (!c) break;
           used.push(c.id);
-          /* «شمارش کلیک لینک‌های تلگرامی» (تنظیم پلتفرم): دکمه به لینک عمیق ربات تبدیل
-             می‌شود (URL معمولی — هنگام فورواد می‌ماند)؛ کلیک با /start ثبت و مقصد نشان داده می‌شود. */
-          const dest = (c.link && c.link.url) || '';
-          const deep = inv.cfg && inv.cfg.trackTgClicks && isTgLink(dest) ? (fileBotLink(set, 'adk_' + c.id) || botLink(set, 'adk_' + c.id)) : '';
-          rows.push([{ text: c.link.text, url: deep || await adRedirectUrl(set, c) }]);
+          /* تنظیم پلتفرم «لینک از مسیر سایت»: روشن (پیش‌فرض) = همهٔ لینک‌ها (تلگرامی و
+             غیرتلگرامی) از /r/ می‌گذرند و کلیک دقیق ثبت می‌شود؛ خاموش = همهٔ لینک‌ها
+             مستقیم روی دکمه می‌نشینند (بدون آدرس سایت) و کلیکی شمرده نمی‌شود. */
+          const viaSite = !inv.cfg || inv.cfg.linkViaSite !== false;
+          rows.push([{ text: c.link.text, url: viaSite ? await adRedirectUrl(set, c) : ((c.link && c.link.url) || '') }]);
           adNetRecord(ctx, store, set, { c: c.id, s: 'bot', e: 'imp', d: 'm', t: ictx.ctype });
         }
       }
@@ -5307,10 +5276,6 @@ async function handleStartPayload(store, ctx, set, from, chatId, payload, token)
   const tgId = String(from.id);
   let user = await findUserByTg(store, tgId);
 
-  if (payload.indexOf('adk_') === 0) {
-    await handleAdDeepClick(store, set, ctx, from, chatId, payload.slice(4), token);
-    return;
-  }
   let loginTicket = null;
   if (payload.indexOf('tglogin_') === 0) loginTicket = payload.slice(8);
   else if (payload.indexOf('login_') === 0) loginTicket = payload.slice(6);

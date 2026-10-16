@@ -13,7 +13,7 @@ const ads = ADS.default;
 const siteSrc = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 const SITE = await import('data:text/javascript;base64,' + Buffer.from(siteSrc + `
 export { Store, createTgUser, saveUser, saveItemRecord, makeToken, bustSettings, apiDlRequest, apiDlGate, apiAdTokenClick, pickAdForSlot, adNetInventory, adNetFlush, adNetConfig,
-  deliveryKeyboard, handleAdRedirect, adRedirectUrl, handleAdDeepClick, AD_NET, apiStreamOpen, apiStreamSrc, bustAds };`).toString('base64'));
+  deliveryKeyboard, handleAdRedirect, AD_NET, apiStreamOpen, apiStreamSrc, bustAds };`).toString('base64'));
 
 function d1() {
   const sql = new DatabaseSync(':memory:');
@@ -234,37 +234,30 @@ try {
   assert.equal(link.status, 200, JSON.stringify(link.body));
   await call('/api/admin/review/' + link.body.id, { token: ADMIN, body: { approve: true } });
   SITE.AD_NET.invAt = 0;
+  /* حالت پیش‌فرض «همه از مسیر سایت»: تلگرامی و غیرتلگرامی هر دو از /r/ می‌گذرند */
   const kb = await SITE.deliveryKeyboard(store, set, { username: viewer.username }, item, null);
   assert.equal(kb.inline_keyboard[0][0].text, '🎁 تخفیف ویژهٔ امروز');
-  assert.equal(kb.inline_keyboard[0][0].url, 'https://t.me/shopdeals', 'لینک تلگرامی مستقیم روی دکمه می‌نشیند — بدون سایت');
-  assert.ok(!/\/r\/|site\.test/.test(kb.inline_keyboard[0][0].url), 'آدرس سایت نباید در لینک تلگرامی باشد');
-  assert.equal(await SITE.adRedirectUrl(set, { id: 'c_x', link: { url: 'https://telegram.me/shopdeals' } }), 'https://telegram.me/shopdeals', 'دامنه‌های هم‌خانوادهٔ تلگرام هم مستقیم');
-  const webUrl = await SITE.adRedirectUrl(set, { id: link.body.id, link: { url: 'https://shop.example.com/deal' } });
-  assert.match(webUrl, /^https:\/\/site\.test\/r\//, 'لینک غیرتلگرامی برای شمارش دقیق کلیک از /r/ می‌گذرد');
-  const redir = await SITE.handleAdRedirect(new Request(webUrl, { headers: { 'cf-connecting-ip': '8.8.8.8' } }), new URL(webUrl), store, null);
-  assert.equal(redir.status, 302); assert.equal(redir.headers.get('location'), 'https://shop.example.com/deal');
+  assert.match(kb.inline_keyboard[0][0].url, /^https:\/\/site\.test\/r\//, 'پیش‌فرض: لینک تلگرامی هم از /r/ سایت می‌گذرد');
+  const redir = await SITE.handleAdRedirect(new Request(kb.inline_keyboard[0][0].url, { headers: { 'cf-connecting-ip': '8.8.8.8' } }), new URL(kb.inline_keyboard[0][0].url), store, null);
+  assert.equal(redir.status, 302); assert.equal(redir.headers.get('location'), 'https://t.me/shopdeals', 'کلیک ثبت و به مقصد واقعی تبلیغ هدایت می‌شود');
   const forged = await SITE.handleAdRedirect(new Request('https://site.test/r/abc.def'), new URL('https://site.test/r/abc.def'), store, null);
   assert.equal(forged.headers.get('location'), 'https://site.test/', 'توکن جعلی به مقصد دلخواه نمی‌برد');
   const subscriber = await SITE.createTgUser(store, { tgId: '6006', tgName: 'S' }); subscriber.subUntil = Date.now() + 86400000; subscriber.role = 'free'; await SITE.saveUser(store, subscriber);
   const kbSub = await SITE.deliveryKeyboard(store, set, { username: subscriber.username }, item, null);
   assert.ok(!kbSub || !kbSub.inline_keyboard.some(r => /t\.me\/shopdeals|\/r\//.test(r[0].url)), 'مشترک تبلیغ لینکی نمی‌بیند');
-  /* «شمارش کلیک لینک‌های تلگرامی» (تنظیم پنل ads.js): دکمه به لینک عمیق ربات تبدیل می‌شود
-     (URL معمولی — هنگام فورواد می‌ماند)؛ با /start کلیک ثبت و مقصد نشان داده می‌شود */
-  await call('/api/admin/settings', { token: ADMIN, body: { trackTgClicks: true } });
+  /* حالت «مستقیم» (تنظیم پنل ads.js): هیچ لینکی از سایت نمی‌گذرد و کلیک شمرده نمی‌شود */
+  await call('/api/admin/settings', { token: ADMIN, body: { linkViaSite: false } });
   SITE.AD_NET.invAt = 0;
-  const invT = await SITE.adNetInventory(store, set);
-  assert.equal(invT.cfg.trackTgClicks, true, 'تنظیم از پنل ads.js به سایت می‌رسد');
-  const kbT = await SITE.deliveryKeyboard(store, set, { username: viewer.username }, item, null);
-  assert.match(kbT.inline_keyboard[0][0].url, /^https:\/\/t\.me\/FileBot\?start=adk_/, 'دکمهٔ ردیاب: لینک عمیق ربات (نه callback — که فورواد کیبورد را می‌پراند)');
-  assert.ok(!kbT.inline_keyboard[0][0].callback_data, 'دکمهٔ callback نباید باشد');
-  assert.ok(!/site\.test|\/r\//.test(kbT.inline_keyboard[0][0].url), 'آدرس سایت در دکمه نیست');
-  const nTg = tg.length;
-  await SITE.handleAdDeepClick(store, set, null, { id: 5005 }, 5005, link.body.id, '1:F');
-  const sent = tg.slice(nTg).find(x => x.method === 'sendMessage');
-  assert.ok(sent && JSON.stringify(sent.body.reply_markup).includes('https://t.me/shopdeals'), 'کلیک ثبت و مقصد با دکمهٔ مستقیم نشان داده می‌شود');
+  const invD = await SITE.adNetInventory(store, set);
+  assert.equal(invD.cfg.linkViaSite, false, 'تنظیم از پنل ads.js به سایت می‌رسد');
+  const kbD = await SITE.deliveryKeyboard(store, set, { username: viewer.username }, item, null);
+  assert.equal(kbD.inline_keyboard[0][0].url, 'https://t.me/shopdeals', 'حالت مستقیم: بدون عبور از سایت');
+  assert.ok(!/site\.test|\/r\//.test(kbD.inline_keyboard[0][0].url), 'آدرس سایت در لینک نیست');
+  await call('/api/admin/settings', { token: ADMIN, body: { linkViaSite: true } });
+  SITE.AD_NET.invAt = 0;
   await drain();
   const lstats = (await call('/api/campaigns/' + link.body.id + '/stats?days=1')).body.total;
-  assert.equal(lstats.imps, 2, '۲ نمایش: دکمهٔ مستقیم + دکمهٔ callback'); assert.equal(lstats.clicks, 2, '۱ کلیک از /r/ + ۱ کلیک از دکمهٔ callback');
+  assert.equal(lstats.imps, 2, '۲ نمایش: یکی حالت سایت + یکی حالت مستقیم'); assert.equal(lstats.clicks, 1, 'کلیک فقط از مسیر /r/ شمرده می‌شود');
 
   /* ── ۱۰. ویرایش کمپین فعال → دوباره صف بررسی؛ توقف → بازگشت باقی‌مانده؛ رد → بازگشت ── */
   const before = (await call('/api/me')).body.user.balance;
@@ -318,7 +311,7 @@ try {
   SITE.AD_NET.invAt = 0;
   const kb4 = await SITE.deliveryKeyboard(store, set, { username: viewer.username }, item, null);
   assert.equal(kb4.inline_keyboard.length, 3, 'زیر هر فایل روی‌هم حداکثر ۳ لینک — حتی با ۴ کمپین فعال (۲ تبلیغ + دکمهٔ خود سایت)');
-  const adRows4 = kb4.inline_keyboard.filter(r => /start=adk_/.test(r[0].url || ''));
+  const adRows4 = kb4.inline_keyboard.filter(r => /\/r\//.test(r[0].url || ''));
   assert.equal(adRows4.length, 2, 'با دکمهٔ خودِ سایت، ۲ لینک تبلیغی می‌ماند');
   assert.equal(new Set(adRows4.map(r => r[0].text)).size, 2, 'دو کمپین متفاوت انتخاب می‌شوند');
 
