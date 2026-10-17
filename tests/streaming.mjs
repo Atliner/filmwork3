@@ -79,6 +79,65 @@ const series = { id: 'i_ser1', type: 'series', title: 'سیلو | Silo', access:
 }
 console.log('PASS: stream entries merge/dedupe/remove, auto episode creation, premium inheritance and URL-free public map.');
 
+/* ── ۲.الف. «لینک پخش آنلاین» هر نسخه (زیر لینک فایل) — بدون عنوان، ادغام با bag.streams ── */
+{
+  const series2 = { id: 'i_ser2', type: 'series', title: 'اثر تست', access: 'free', seasons: [{ n: 1, episodes: [{ id: 'e_pl1', n: 1, variants: {
+    sub: { '720': { files: [{ id: 'f_a', title: 'نسخه ۱', source: { chatId: '-1001', msgId: '10' }, pl: 'https://cdn.example.com/play/720.mp4' }] } },
+    dub: { '480': { label: 'دوبلاژ', files: [{ id: 'f_b', title: 'Filimo | 480p', source: { chatId: '-1001', msgId: '11' }, pl: 'https://cdn.example.com/play/480.m3u8' }] } }
+  } }] }], episodes: [] };
+  const ep = series2.seasons[0].episodes[0];
+  const map = W.publicStreamMap(ep, series2);
+  assert.deepEqual(Object.keys(map.sub), ['720']);
+  assert.deepEqual(Object.keys(map.dub), ['480']);
+  assert.ok(!JSON.stringify(map).includes('cdn.example.com'), 'نقشهٔ عمومی بدون لینک بماند');
+  const pick = W.pickStream(series2, { epId: ep.id, track: 'dub' });
+  assert.equal(pick.quality, '480');
+  assert.equal(pick.stream.label, '', 'لینک پخش نسخه عنوان ندارد');
+  assert.equal(pick.stream.url, 'https://cdn.example.com/play/480.m3u8');
+  assert.equal(pick.stream.fmt, 'hls');
+  const pick2 = W.pickStream(series2, { epId: ep.id, track: 'sub', quality: '720' });
+  assert.equal(pick2.stream.id, 'vf_f_a', 'شناسهٔ پخش از شناسهٔ فایل پایدار می‌ماند');
+  assert.match(W.streamLinesOf(series2), /https:\/\/cdn\.example\.com\/play\/720\.mp4/);
+  // ادغام با فهرست دستی: همان لینک دوبار شمرده نشود؛ نسخهٔ دارای عنوان مقدم است
+  ep.streams = [{ id: 'v_1', track: 'sub', quality: '720', url: 'https://cdn.example.com/play/720.mp4', fmt: 'mp4', label: 'دستی' }];
+  const map2 = W.publicStreamMap(ep, series2);
+  assert.equal(map2.sub['720'].n, 1, 'همان لینک از فایل و فهرست دستی دوبار نمایش داده نشود');
+  assert.equal(W.pickStream(series2, { epId: ep.id, track: 'sub', quality: '720' }).stream.label, 'دستی');
+  delete ep.variants.sub['720'].files[0].pl;
+  assert.deepEqual(Object.keys(W.publicStreamMap(ep, series2).sub), ['720'], 'فهرست دستی همچنان هست');
+  delete ep.streams;
+  assert.deepEqual(Object.keys(W.publicStreamMap(ep, series2).sub), [], 'بدون لینک پخش، آن کیفیت از نقشهٔ پخش می‌رود');
+}
+console.log('PASS: per-version online-play link (title-less) merges into streams and drives playback.');
+
+/* ── ۲.ب. ذخیرهٔ لینک پخش نسخه از همان مسیر عنوان/لینک فایل (endpoint نسخه) ── */
+{
+  const store = new W.Store(null, {});
+  W.bustSettings(store);
+  const admin = await W.createTgUser(store, { tgId: '7770009' });
+  admin.role = 'admin';
+  await W.saveUser(store, admin);
+  const item = { id: 'i_pltest', type: 'movie', title: 'فیلم تست', access: 'free', variants: { sub: {}, dub: {} }, episodes: [] };
+  await W.saveItemRecord(store, item);
+  const u = (p) => new URL('http://localhost/api/admin' + p);
+  const post = (p, body) => new Request(u(p), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let r = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', title: 'Filimo | 480p', url: 'https://t.me/c/1234567890/89', pl: 'https://cdn.example.com/play/480.mp4', addFile: true }), admin);
+  assert.equal(r.status, 200);
+  let saved = (await r.json()).item;
+  let f = saved.variants.dub['480'].files[0];
+  assert.equal(f.pl, 'https://cdn.example.com/play/480.mp4', 'لینک پخش کنار عنوان و لینک فایل ذخیره شود');
+  assert.equal(f.title, 'Filimo | 480p');
+  assert.equal(W.pickStream(saved, { track: 'dub' }).stream.url, 'https://cdn.example.com/play/480.mp4');
+  r = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', fileId: f.id, title: f.title, url: 'https://t.me/c/1234567890/89', pl: '' }), admin);
+  saved = (await r.json()).item;
+  assert.ok(!saved.variants.dub['480'].files[0].pl, 'خالی‌کردن فیلد = حذف لینک پخش');
+  assert.ok(W.pickStream(saved, { track: 'dub' }).error, 'بدون لینک پخش، پخشی در کار نیست');
+  r = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', fileId: f.id, url: 'https://t.me/c/1234567890/89', pl: 'ftp://x' }), admin);
+  assert.equal(r.status, 400, 'لینک پخش نامعتبر رد شود');
+}
+console.log('PASS: per-version play link saves through the same variant endpoint as title/file-link.');
+
+
 /* ── ۳. توکن پخش و لبه (همان کد در worker.js و scripts/stream-edge-worker.js) ── */
 execFileSync(process.execPath, [new URL('../scripts/build-stream-edge.mjs', import.meta.url).pathname, '--check'], { stdio: 'pipe' });
 const SECRET = 'edge-secret-0123456789abcdef';
@@ -199,7 +258,7 @@ const setSet = async patch => { const s = await store.get('set'); await store.se
   assert.match(r.body.src, /^https:\/\/site\.test\/sv\/v\/[A-Za-z0-9_-]+$/);
   assert.equal(r.body.cur.quality, '720'); assert.equal(r.body.subs.length, 1);
   assert.equal(r.body.subDefault, '', 'نسخهٔ دوبله: زیرنویس پیش‌فرض خاموش');
-  assert.match(r.body.wm, /viewer/);
+  assert.equal(r.body.wm, '2002', 'اولویت واترمارک با شناسهٔ عددی تلگرام است، نه یوزرنیم (@viewer)');
   assert.ok(!JSON.stringify(r.body).includes('cdn.example.com'), 'API پخش لینک مبدأ را نشان نمی‌دهد');
   assert.ok(r.body.options.dub.length === 2 && r.body.options.sub.length === 0);
   /* لبهٔ داخلی Worker (/sv) همان توکن را با رمز ذخیره‌شده باز می‌کند */
@@ -331,6 +390,13 @@ console.log('PASS: content-bot streams action (server-side revalidation, role ch
   const cues = fakeWin.MvxPlayer._parseVtt('WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<i>سلام</i>\nدنیا\n\n00:01:00,500 --> 00:01:02,000 align:start\nخط دوم\n');
   assert.equal(cues.length, 2); assert.equal(cues[0].t, 'سلام\nدنیا'); assert.equal(cues[1].s, 60.5);
   for (const k of ['controlslist="nodownload', 'disablepictureinpicture', "addEventListener('contextmenu'", 'mvp-wm', '/stream/open', '/stream/src', "'/api/ad/evs'", 'رد کردن تبلیغ']) assert.ok(a.code.includes(k), k);
+  /* تمام‌صفحه در مینی‌اپ: اولویت با WebApp.requestFullscreen، همگامی آیکن با وضعیت واقعی، پیام برای کلاینت بدون پشتیبانی */
+  for (const k of ['tgInApp', 'fsWanted', 'requestFullscreen', 'web_app_request_fullscreen', 'web_app_exit_fullscreen', 'web_app_expand', 'fullscreenChanged', 'fullscreenFailed', 'تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود']) assert.ok(a.code.includes(k), k);
+  for (const k of ['web_app_request_fullscreen', 'web_app_exit_fullscreen', 'fullscreen_changed', 'receiveEvent', 'TelegramWebviewProxy']) assert.ok(W.APP_HTML.includes(k), k);
+  /* تبلیغ پیش از دانلود: بدون دکمه/متن اضافه زیر تبلیغ؛ ثانیه‌شمار فقط بعد از لود کامل رسانه */
+  assert.ok(!W.APP_HTML.includes('id="adx-go"'), 'دکمهٔ «ادامه» زیر تبلیغ پیش از دانلود حذف شده');
+  assert.ok(!W.APP_HTML.includes('adx-cta'), 'متن cta روی تبلیغ پیش از دانلود حذف شده');
+  for (const k of ['canplaythrough', 'startTick', 'mediaFail']) assert.ok(W.APP_HTML.includes(k), k);
   assert.ok(W.APP_HTML.includes("'/assets/player.js?v=' + PLAYER_V"));
   assert.ok(!W.APP_HTML.includes('${'));
   const scripts = [...W.APP_HTML.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).filter(Boolean);
@@ -356,5 +422,30 @@ console.log('PASS: player is a separate immutable asset with anti-download attri
   } finally { globalThis.fetch = realF; }
 }
 console.log('PASS: ad platform outage falls back to house ads with a 30s backoff (no per-request timeouts).');
+
+/* ── ۱۰. بنرهای پلیر: تبلیغ داخلی برای جایگاه‌های خالی، مدیر تبلیغ‌ها را می‌بیند، مشترک نه ── */
+{
+  await setSet({ plAdPre: false, plAdBanner: true, plAdPause: true, adNetEnabled: false, adNetUrl: '', adNetSecret: '' });
+  await store.set('ads', [{ id: 'adw', kind: 'banner', mediaUrl: 'https://ads.example.com/wide.jpg', w: 728, h: 90, linkUrl: 'https://shop.example.com/', sec: 8, active: true, weight: 1 }]); W.bustAds();
+  const r = await call(W.apiStreamOpen, userTok, { itemId: movie.id, track: 'dub' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const ov = (r.body.banners || []).filter(b => b.slot === 'ov');
+  const pz = (r.body.banners || []).filter(b => b.slot === 'pause');
+  assert.equal(ov.length, 1, 'بنر پهن داخلی برای «روی پلیر» انتخاب شد');
+  assert.equal(ov[0].mediaUrl, 'https://ads.example.com/wide.jpg');
+  assert.equal(ov[0].net, false);
+  assert.equal(pz.length, 1, 'بنر توقف داخلی انتخاب شد');
+  assert.ok(r.body.adCfg && r.body.adCfg.banner === true, 'زمان‌بندی بنر پلیر برای کاربر بدون اشتراک روشن است');
+  const adm = await call(W.apiStreamOpen, adminTok, { itemId: movie.id, track: 'dub' });
+  assert.ok(!adm.body.noAds, 'مدیر برای آزمایش، تبلیغ‌های پلیر را می‌بیند');
+  assert.ok((adm.body.banners || []).length > 0, 'مدیر هم بنرهای پلیر را می‌بیند');
+  assert.equal(adm.body.wm, '1001', 'واترمارک بدون یوزرنیم: فقط شناسهٔ عددی تلگرام');
+  const sub2 = await W.createTgUser(store, { tgId: '7007', tgName: 'S2', tgUsername: 's2user' }); sub2.role = 'free'; sub2.subUntil = Date.now() + 86400000; await W.saveUser(store, sub2);
+  const sub2Open = await call(W.apiStreamOpen, await W.makeToken(store, sub2), { itemId: movie.id, track: 'dub' });
+  assert.equal(sub2Open.body.noAds, true, 'مشترک واقعی بدون تبلیغ');
+  assert.equal(sub2Open.body.banners, undefined, 'مشترک واقعی بنر نمی‌بیند');
+  assert.equal(sub2Open.body.wm, '7007', 'با وجود یوزرنیم، واترمارک شناسهٔ عددی تلگرام است (اولویت با عددی)');
+}
+console.log('PASS: player banners fall back to house ads (wide overlay + pause), watermark is the numeric Telegram id (username only as fallback), admins see player ads for testing while real subscribers stay ad-free.');
 // تایمر ارسال دسته‌ای رویدادها (waitUntil ۲۰ ثانیه‌ای) را در Node منتظر نمی‌مانیم.
 process.exit(0);

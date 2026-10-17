@@ -1693,7 +1693,7 @@ function variantFilesOf(cell) {
     return cell.files.filter(function (f) { return f && f.source; });
   }
   if (cell.source) {
-    return [{ id: cell.fileId || '', title: cell.title || '', source: cell.source, sizeBytes: cell.sizeBytes || null }];
+    return [{ id: cell.fileId || '', title: cell.title || '', source: cell.source, sizeBytes: cell.sizeBytes || null, pl: cell.pl || '' }];
   }
   return [];
 }
@@ -1717,7 +1717,7 @@ function setVariantCell(bag, track, quality, source, sizeBytes) {
     return save(files);
   }
   if (files.length) {
-    files[0] = { id: files[0].id || ('f_' + randomHex(3)), title: files[0].title || '', source: source, sizeBytes: sizeBytes || null };
+    files[0] = { ...files[0], id: files[0].id || ('f_' + randomHex(3)), title: files[0].title || '', source: source, sizeBytes: sizeBytes || null };
   } else {
     files = [{ id: 'f_' + randomHex(3), title: '', source: source, sizeBytes: sizeBytes || null }];
   }
@@ -1760,6 +1760,25 @@ function setVariantPremium(bag, track, quality, on) {
   if (!q) return;
   if (!v[t][q]) v[t][q] = { source: null, sizeBytes: null };
   v[t][q].premium = !!on;
+}
+/* «لینک پخش آنلاین» هر نسخه (f.pl) — بدون عنوان؛ روی همان فایل نسخه ذخیره می‌شود
+   (فایل‌های قدیمی بدون شناسه، روی خود سلول: cell.pl). */
+function setVariantFilePl(bag, track, quality, fileId, plVal) {
+  const v = ensureVariants(bag);
+  const t = track === 'dub' ? 'dub' : 'sub';
+  const q = qualityKey(quality);
+  if (!q || !v[t][q]) return;
+  const cell = v[t][q];
+  const fid = String(fileId || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 20);
+  const fl = Array.isArray(cell.files) && cell.files.length ? cell.files : null;
+  if (fl) {
+    const targets = fid ? fl.filter(function (f) { return f && f.id === fid; }) : fl.slice(0, 1);
+    targets.forEach(function (f) {
+      if (plVal) f.pl = plVal; else delete f.pl;
+    });
+  } else {
+    if (plVal) cell.pl = plVal; else delete cell.pl;
+  }
 }
 function qualityLabel(q) {
   const k = qualityKey(q);
@@ -2343,7 +2362,7 @@ function streamLinesOf(item) {
   const lines = [];
   streamBagsOf(item).forEach(function (x) {
     const pre = item.type === 'series' ? ('S' + String(x.season).padStart(2, '0') + 'E' + String(x.episode).padStart(2, '0') + ' ') : '';
-    (x.bag.streams || []).forEach(function (s) {
+    streamsOf(x.bag).forEach(function (s) {
       lines.push(pre + displayQuality(s.quality) + ' ' + (s.track === 'dub' ? 'دوبله' : 'زیرنویس') + ' ' + s.url + (s.label ? ' | ' + s.label : ''));
     });
     (x.bag.streamSubs || []).forEach(function (t) { lines.push(pre + 'زیرنویس ' + t.url + (t.label ? ' | ' + t.label : '')); });
@@ -2357,10 +2376,36 @@ function streamPremium(item, bag, track, q) {
   const cell = v[q] || v[qualityKey(q)];
   return !!(cell && cell.premium);
 }
+/* لینک پخش هر نسخه (f.pl، فیلد «لینک پخش آنلاین» زیر لینک فایل) عنوان ندارد و
+   اینجا با فهرست bag.streams ادغام می‌شود تا همهٔ مسیرهای پخش و نمایش هر دو را ببینند. */
+function streamsOf(bag) {
+  const out = [];
+  const seen = new Set();
+  const push = function (s) {
+    if (!s || !s.url) return;
+    const key = (s.track === 'dub' ? 'dub' : 'sub') + '|' + qualityKey(s.quality) + '|' + s.url;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(s);
+  };
+  ((bag && bag.streams) || []).forEach(push);
+  const v = (bag && bag.variants) || {};
+  ['sub', 'dub'].forEach(function (t) {
+    Object.keys(v[t] || {}).forEach(function (q) {
+      variantFilesOf(v[t][q] || {}).forEach(function (f) {
+        if (!f || !f.pl) return;
+        const url = String(f.pl).trim();
+        if (!/^https?:\/\//i.test(url)) return;
+        push({ id: 'vf_' + (f.id || (t + '_' + q)), track: t, quality: q, url: url, fmt: streamFmtOf(url), label: '', at: 0 });
+      });
+    });
+  });
+  return out;
+}
 /* نقشهٔ عمومی بدون لینک: {sub:{'720':{label,n,premium}}, dub:{…}, subs:n} */
 function publicStreamMap(bag, item) {
   const out = { sub: {}, dub: {}, subs: 0 };
-  (bag && bag.streams || []).forEach(function (s) {
+  streamsOf(bag).forEach(function (s) {
     if (!s || !s.url) return;
     const t = s.track === 'dub' ? 'dub' : 'sub';
     const q = qualityKey(s.quality) || String(s.quality || '');
@@ -2375,7 +2420,7 @@ function streamMapHas(map) {
   return !!map && (Object.keys(map.sub || {}).length + Object.keys(map.dub || {}).length) > 0;
 }
 function itemHasStreams(item) {
-  return streamBagsOf(item).some(function (x) { return (x.bag.streams || []).length > 0; });
+  return streamBagsOf(item).some(function (x) { return streamsOf(x.bag).length > 0; });
 }
 const STREAM_Q_PREF = ['720', '1080', '480', '4k'];
 function streamQRank(q) {
@@ -2389,7 +2434,7 @@ function pickStream(item, opts) {
     bag = opts.epId ? findEpisode(item, String(opts.epId)) : null;
     if (!bag) return { error: 'قسمت پیدا نشد', status: 404 };
   }
-  const list = (bag.streams || []).filter(function (s) { return s && s.url; });
+  const list = streamsOf(bag).filter(function (s) { return s && s.url; });
   if (!list.length) return { error: 'برای این ' + (bag === item ? 'اثر' : 'قسمت') + ' لینک پخش آنلاین ثبت نشده است', status: 404 };
   const track = opts.track === 'dub' ? 'dub' : (opts.track === 'sub' ? 'sub' : '');
   const want = qualityKey(opts.quality);
@@ -2406,7 +2451,7 @@ function pickStream(item, opts) {
 function streamOptionsOf(item, bag, user) {
   const sub = hasActiveSub(user);
   const out = { sub: [], dub: [] };
-  (bag.streams || []).slice().sort(function (a, b) { return streamQRank(a.quality) - streamQRank(b.quality); }).forEach(function (s) {
+  streamsOf(bag).slice().sort(function (a, b) { return streamQRank(a.quality) - streamQRank(b.quality); }).forEach(function (s) {
     const t = s.track === 'dub' ? 'dub' : 'sub';
     const q = qualityKey(s.quality) || s.quality;
     const prem = streamPremium(item, bag, t, q);
@@ -2740,18 +2785,22 @@ function streamEpisodeInfo(item, bag) {
   const flat = [];
   seasons.forEach(function (s) { (s.episodes || []).forEach(function (e) { flat.push({ s: Number(s.n || 1), e: e }); }); });
   const i = flat.findIndex(function (x) { return x.e.id === bag.id; });
-  function brief(x) { return x ? { id: x.e.id, n: x.e.n, season: x.s, title: x.e.title || ('قسمت ' + x.e.n), has: (x.e.streams || []).length > 0 } : null; }
+  function brief(x) { return x ? { id: x.e.id, n: x.e.n, season: x.s, title: x.e.title || ('قسمت ' + x.e.n), has: streamsOf(x.e).length > 0 } : null; }
   let next = null, prev = null;
-  for (let j = i + 1; j < flat.length; j++) if ((flat[j].e.streams || []).length) { next = flat[j]; break; }
-  for (let j = i - 1; j >= 0; j--) if ((flat[j].e.streams || []).length) { prev = flat[j]; break; }
+  for (let j = i + 1; j < flat.length; j++) if (streamsOf(flat[j].e).length) { next = flat[j]; break; }
+  for (let j = i - 1; j >= 0; j--) if (streamsOf(flat[j].e).length) { prev = flat[j]; break; }
   return {
     cur: brief(flat[i]), next: brief(next), prev: brief(prev),
-    list: seasons.map(function (s) { return { n: Number(s.n || 1), title: s.title || ('فصل ' + (s.n || 1)), eps: (s.episodes || []).map(function (e) { return { id: e.id, n: e.n, title: e.title || ('قسمت ' + e.n), has: (e.streams || []).length > 0 }; }) }; }),
+    list: seasons.map(function (s) { return { n: Number(s.n || 1), title: s.title || ('فصل ' + (s.n || 1)), eps: (s.episodes || []).map(function (e) { return { id: e.id, n: e.n, title: e.title || ('قسمت ' + e.n), has: streamsOf(e).length > 0 }; }) }; }),
   };
 }
 function streamWatermarkOf(user) {
-  const id = user.tgId ? String(user.tgId) : String(user.username || '');
-  return (user.tgUsername ? '@' + user.tgUsername + ' · ' : '') + id;
+  /* واترمارک فقط یک شناسه نشان می‌دهد: اولویت با شناسهٔ عددی تلگرام است
+     و اگر شناسهٔ عددی نبود، آیدی تلگرام (@یوزرنیم) و بعد نام کاربری قدیمی.
+     شناسهٔ عددی ثابت است و با تغییر یوزرنیم عوض نمی‌شود. */
+  if (user && user.tgId) return String(user.tgId);
+  if (user && user.tgUsername) return '@' + user.tgUsername;
+  return String((user && user.username) || '');
 }
 async function streamBuild(store, set, user, item, picked, sid, request, avoid) {
   const edge = await streamPickEdge(store, set, user, request, avoid);
@@ -2821,8 +2870,10 @@ async function apiStreamOpen(store, body, request, ctx) {
   const sess = await streamSessionTouch(store, set, user, /^[a-f0-9]{24}$/.test(String(body.sid || '')) ? String(body.sid) : '', reason === 'next' ? 'start' : (reason === 'mid' ? 'switch' : reason));
   if (sess.error) return json({ error: sess.error, code: sess.code }, 409);
   const adCfg = streamAdConfig(set);
-  const meta = { noAds: sub, adCfg: sub ? null : adCfg };
-  if (!sub && reason !== 'renew') {
+  /* تبلیغ‌های پلیر فقط برای مشترک واقعی خاموش است (نه مدیر) تا مدیر هم بتواند نمایش بنر/پیش‌پخش را آزمایش کند */
+  const adFree = adFreeUser(user);
+  const meta = { noAds: adFree, adCfg: adFree ? null : adCfg };
+  if (!adFree && reason !== 'renew') {
     const slot = reason === 'switch' ? 'sw' : (reason === 'mid' ? 'mid' : 'pre');
     const want = slot === 'sw' ? set.plAdSwitch !== false : (slot === 'mid' ? adCfg.midroll > 0 : set.plAdPre !== false);
     const lastAd = Number(body.lastAdAt) || 0;
@@ -2839,7 +2890,7 @@ async function apiStreamOpen(store, body, request, ctx) {
   }
   if (reason === 'mid') return json({ ok: true, noAd: true, sid: sess.sid }); // میان‌پخش بدون تبلیغ: پخش فعلی ادامه دارد
   const info = await streamBuild(store, set, user, item, picked, sess.sid, request, String(body.avoidEdge || ''));
-  if (!sub) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
+  if (!adFree) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
   return json(Object.assign(info, meta));
 }
 async function apiStreamSrc(store, body, request, ctx) {
@@ -2857,9 +2908,9 @@ async function apiStreamSrc(store, body, request, ctx) {
   if (picked.error) return json({ error: picked.error }, picked.status || 400);
   if (picked.premium && !hasActiveSub(user)) return json({ error: 'این کیفیت/قسمت فقط برای مشترکین قابل پخش است.', needSub: true }, 403);
   const info = await streamBuild(store, set, user, item, picked, g.sid, request, '');
-  const sub = hasActiveSub(user);
-  if (!sub) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
-  return json(Object.assign(info, { noAds: sub, adCfg: sub ? null : streamAdConfig(set) }));
+  const adFree = adFreeUser(user);
+  if (!adFree) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
+  return json(Object.assign(info, { noAds: adFree, adCfg: adFree ? null : streamAdConfig(set) }));
 }
 
 /* ═══════════════════════ شبکهٔ تبلیغات خودکار (اتصال به ads.js) ═══════════════════════
@@ -2906,7 +2957,7 @@ function adNetNormalize(data) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.campaigns)) return out;
   out.rev = String(data.rev || '').slice(0, 40);
   const cfg = data.cfg || {};
-  out.cfg = { viewSec: Math.round(adNum(cfg.viewSec, 10, 1, 60)), skipAfter: Math.round(adNum(cfg.skipAfter, 5, 0, 30)), maxSec: Math.round(adNum(cfg.maxSec, 30, 5, 120)) };
+  out.cfg = { viewSec: Math.round(adNum(cfg.viewSec, 10, 1, 60)), skipAfter: Math.round(adNum(cfg.skipAfter, 5, 0, 30)), maxSec: Math.round(adNum(cfg.maxSec, 30, 5, 120)), linkViaSite: cfg.linkViaSite !== false };
   function arr(v) { return Array.isArray(v) ? v : []; }
   for (const c of data.campaigns.slice(0, 300)) {
     if (!c || !/^c_[a-z0-9]{4,32}$/.test(String(c.id || ''))) continue;
@@ -2926,7 +2977,7 @@ function adNetNormalize(data) {
       if (!n.video.src && !n.video.srcP) continue;
     } else if (f === 'banner') {
       const b = cr.banner || {};
-      n.banner = { wide: adHttps(b.wide), rect: adHttps(b.rect), tall: adHttps(b.tall) };
+      n.banner = { wide: adHttps(b.wide), rect: adHttps(b.rect), tall: adHttps(b.tall), sec: adNum(b.sec, 0, 0, 60) };
       if (!n.banner.wide && !n.banner.rect && !n.banner.tall) continue;
     } else {
       const l = cr.link || {};
@@ -3024,11 +3075,12 @@ function adPayloadNet(c, slot, tok, cfg) {
   if (slot === 'ov') { img = b.wide; size = 'wide'; }
   else if (slot === 'pause') { img = b.rect || b.wide; size = b.rect ? 'rect' : 'wide'; }
   else { img = b.tall || b.rect || b.wide; size = b.tall ? 'tall' : (b.rect ? 'rect' : 'wide'); }
-  return Object.assign(base, { kind: 'banner', mediaUrl: img, size: size, sec: slot === 'dl' ? 8 : 6, skipAfter: 0 });
+  /* مدت نمایش بنر: اول مدت اختصاصی کمپین (تبلیغ‌دهنده)، بعد پیش‌فرض پلتفرم؛ سقف سایت ۲۰ ثانیه */
+  return Object.assign(base, { kind: 'banner', mediaUrl: img, size: size, sec: Math.max(3, Math.round(Math.min(CONFIG.AD_MAX_SEC, (c.banner && c.banner.sec) || (slot === 'dl' ? 8 : 6)))), skipAfter: 0 });
 }
 /* انتخاب یک تبلیغ برای یک جایگاه: اول شبکهٔ خودکار، اگر نبود تبلیغ داخلی (دستی) */
 async function pickAdForSlot(store, set, user, item, slot, ctx, request, seen) {
-  if (!user || hasActiveSub(user)) return null;
+  if (!user || adFreeUser(user)) return null;
   const dev = adDeviceOf(request);
   const ictx = { ctype: item && item.type === 'series' ? 'series' : 'movie', genres: (item && item.genres) || [], dev: dev, seen: adSeenParse(seen) };
   const cfg = adNetConfig(set, store.env);
@@ -3052,28 +3104,57 @@ async function pickAdForSlot(store, set, user, item, slot, ctx, request, seen) {
   const tok = await adTokenMake(set, { c: a.id, k: 'h', s: slot, u: user.username, m: a.kind, d: a.sec });
   return Object.assign(publicAd(a), { at: tok, net: false, skipAfter: slot === 'dl' ? 0 : Math.min(a.sec, streamAdConfig(set).skipAfter) });
 }
-/* بنرهای پلیر: تا ۲ بنر پهن (روی تصویر) + ۱ بنر توقف؛ نمایش واقعی را پلیر گزارش می‌دهد */
+/* بنرهای پلیر: تا ۲ بنر پهن (روی تصویر) + ۱ بنر توقف؛ نمایش واقعی را پلیر گزارش می‌دهد.
+   اول شبکهٔ تبلیغات؛ هر جایگاهی که از شبکه پر نشد با تبلیغ داخلی (دستی) پر می‌شود تا
+   «بنر روی پلیر» همیشه قابل‌نمایش باشد (قبلاً بدون شبکه، هیچ بنری روی پلیر نمی‌آمد). */
 async function pickPlayerBanners(store, set, user, item, ctx, request, seen) {
-  if (!user || hasActiveSub(user)) return [];
-  const cfg = adNetConfig(set, store.env);
-  if (!cfg.on) return [];
-  const inv = await adNetInventory(store, set);
-  if (!inv || !inv.campaigns.length) return [];
-  const dev = adDeviceOf(request);
-  const ictx = { ctype: item && item.type === 'series' ? 'series' : 'movie', genres: (item && item.genres) || [], dev: dev, seen: adSeenParse(seen) };
-  const out = [];
+  if (!user || adFreeUser(user)) return [];
   const plan = [];
   if (set.plAdBanner !== false) plan.push('ov', 'ov');
   if (set.plAdPause !== false) plan.push('pause');
+  if (!plan.length) return [];
+  const out = [];
   const used = [];
-  for (const slot of plan) {
-    adNetRecord(ctx, store, set, { c: '*', s: slot, e: 'opp', d: dev, t: ictx.ctype });
-    const pool = inv.campaigns.filter(function (x) { return adNetEligible(x, slot, ictx); });
-    const c = adWeightedPick(pool, used) || adWeightedPick(pool);
-    if (!c) continue;
-    used.push(c.id);
-    const tok = await adTokenMake(set, { c: c.id, k: 'n', s: slot, u: user.username, m: 'banner', d: 6, v: 1, ct: ictx.ctype, dv: dev });
-    out.push(Object.assign(adPayloadNet(c, slot, tok, inv.cfg), { slot: slot }));
+  const dev = adDeviceOf(request);
+  const ictx = { ctype: item && item.type === 'series' ? 'series' : 'movie', genres: (item && item.genres) || [], dev: dev, seen: adSeenParse(seen) };
+  const cfg = adNetConfig(set, store.env);
+  const inv = cfg.on ? await adNetInventory(store, set) : null;
+  if (inv && inv.campaigns.length) {
+    for (const slot of plan) {
+      adNetRecord(ctx, store, set, { c: '*', s: slot, e: 'opp', d: dev, t: ictx.ctype });
+      const pool = inv.campaigns.filter(function (x) { return adNetEligible(x, slot, ictx); });
+      const c = adWeightedPick(pool, used) || adWeightedPick(pool);
+      if (!c) continue;
+      used.push(c.id);
+      const tok = await adTokenMake(set, { c: c.id, k: 'n', s: slot, u: user.username, m: 'banner', d: 6, v: 1, ct: ictx.ctype, dv: dev });
+      out.push(Object.assign(adPayloadNet(c, slot, tok, inv.cfg), { slot: slot }));
+    }
+  }
+  /* تبلیغ داخلی برای جایگاه‌های خالی (یک بار برای هر جایگاه) */
+  const needSlots = [];
+  plan.forEach(function (slot) {
+    if (needSlots.indexOf(slot) >= 0) return;
+    if (!out.some(function (b) { return b.slot === slot; })) needSlots.push(slot);
+  });
+  if (needSlots.length) {
+    const house = (await getAds(store)).filter(adIsPlayable);
+    for (const slot of needSlots) {
+      let pool = house.filter(function (a) { return a.kind === 'banner'; });
+      if (slot === 'ov') {
+        /* برای بنر پهنِ روی تصویر، اول تصویرهای عرضی (پهن)؛ اگر نبود هر بنری */
+        const wide = pool.filter(function (a) { return a.w && a.h && a.w / a.h >= 1.6; });
+        pool = wide.length ? wide : pool;
+      }
+      const a = pickAdForUser(pool, user);
+      if (!a) continue;
+      if (a.once) { markAdSeen(user, a.id); try { await saveUser(store, user); } catch (e) { } }
+      const tok = await adTokenMake(set, { c: a.id, k: 'h', s: slot, u: user.username, m: 'banner', d: 6 });
+      out.push({
+        at: tok, net: false, title: a.title || '', cta: a.cta || 'مشاهده', clickable: !!a.linkUrl,
+        kind: 'banner', mediaUrl: a.mediaUrl, size: slot === 'ov' ? 'wide' : 'rect',
+        sec: a.sec || 8, skipAfter: 0, slot: slot,
+      });
+    }
   }
   return out;
 }
@@ -3107,7 +3188,15 @@ async function apiAdEvents(store, body, request, ctx) {
   for (const e of evs) {
     if (!e || e.ev !== 'imp') continue;
     const p = await verifyToken(String(e.at || ''), set.secret);
-    if (!p || p.a !== 1 || p.k !== 'n' || (p.s !== 'ov' && p.s !== 'pause')) continue;
+    if (!p || p.a !== 1 || (p.s !== 'ov' && p.s !== 'pause')) continue;
+    if (p.k === 'h') {
+      /* بنر داخلی: نمایش در آمار همان تبلیغ ثبت می‌شود */
+      if (!adSeenOnce('bimp:h:' + p.c + ':' + p.t + ':' + p.n, 24)) continue;
+      try { await bumpAdStat(store, p.c, 'views', 1); } catch (er) { }
+      n++;
+      continue;
+    }
+    if (p.k !== 'n') continue;
     if (!adSeenOnce('bimp:' + p.c + ':' + p.t + ':' + p.n, 24)) continue;
     adNetRecord(ctx, store, set, { c: p.c, s: p.s, e: 'imp', d: p.dv, t: p.ct });
     n++;
@@ -3133,7 +3222,10 @@ async function apiAdTokenClick(store, body, request, ctx) {
   }
   return json({ ok: true, url: url });
 }
-/* لینک دکمهٔ تبلیغ زیر فایل: از /r/ سایت عبور می‌کند تا کلیک دقیق شمرده شود */
+/* لینک دکمهٔ تبلیغ زیر فایل: در حالت پیش‌فرض «از مسیر سایت» (تنظیم پلتفرم در پنل ads.js)
+   همهٔ لینک‌ها — تلگرامی و غیرتلگرامی — از /r/ سایت عبور می‌کنند تا کلیک دقیق شمرده شود.
+   در حالت «مستقیم»، deliveryKeyboard اصلاً از این مسیر استفاده نمی‌کند: لینک خام روی
+   دکمه می‌نشیند، آدرس سایت در کار نیست و کلیکی شمرده نمی‌شود (نمایش ثبت می‌شود). */
 async function adRedirectUrl(set, c) {
   const origin = String(set.publicUrl || '').replace(/\/+$/, '');
   if (!/^https:\/\//.test(origin)) return c.link.url;
@@ -3154,6 +3246,10 @@ async function handleAdRedirect(request, url, store, ctx) {
 /* دکمه‌های زیر فایل ارسالی ربات: تبلیغ لینکی خودکار (برای کاربران بدون اشتراک) + دکمهٔ خود سایت */
 async function deliveryKeyboard(store, set, dl, item, ctx) {
   const rows = [];
+  /* سقف کلی: زیر هر فایل روی‌هم حداکثر ۳ لینک (دکمه) — دکمهٔ خودِ سایت هم جزو همین
+     سقف است؛ با وجود آن ۲ لینک تبلیغی و بدون آن ۳ لینک تبلیغی می‌آید. */
+  const LINKS_MAX = 3;
+  const own = adKeyboard(set);
   try {
     const cfg = adNetConfig(set, store.env);
     if (cfg.on && set.adNetBotLinks !== false && item) {
@@ -3162,15 +3258,24 @@ async function deliveryKeyboard(store, set, dl, item, ctx) {
         const ictx = { ctype: item.type === 'series' ? 'series' : 'movie', genres: item.genres || [], dev: 'm', seen: null };
         adNetRecord(ctx, store, set, { c: '*', s: 'bot', e: 'opp', d: 'm', t: ictx.ctype });
         const inv = await adNetInventory(store, set);
-        const c = inv ? adWeightedPick(inv.campaigns.filter(function (x) { return adNetEligible(x, 'bot', ictx); })) : null;
-        if (c) {
-          rows.push([{ text: c.link.text, url: await adRedirectUrl(set, c) }]);
+        const pool = (inv && inv.campaigns) ? inv.campaigns.filter(function (x) { return adNetEligible(x, 'bot', ictx); }) : [];
+        /* لینک‌های تبلیغ: کمپین‌های متفاوت با وزن انتخاب می‌شوند؛ با ۱۰ تبلیغ‌دهنده هم
+           بیش از سقف ۳ لینک زیر فایل نمی‌آید و بقیه در نمایش‌های بعدی می‌چرخند. */
+        const used = [];
+        for (let n = 0, adMax = LINKS_MAX - (own ? 1 : 0); n < adMax; n++) {
+          const c = adWeightedPick(pool, used);
+          if (!c) break;
+          used.push(c.id);
+          /* تنظیم پلتفرم «لینک از مسیر سایت»: روشن (پیش‌فرض) = همهٔ لینک‌ها (تلگرامی و
+             غیرتلگرامی) از /r/ می‌گذرند و کلیک دقیق ثبت می‌شود؛ خاموش = همهٔ لینک‌ها
+             مستقیم روی دکمه می‌نشینند (بدون آدرس سایت) و کلیکی شمرده نمی‌شود. */
+          const viaSite = !inv.cfg || inv.cfg.linkViaSite !== false;
+          rows.push([{ text: c.link.text, url: viaSite ? await adRedirectUrl(set, c) : ((c.link && c.link.url) || '') }]);
           adNetRecord(ctx, store, set, { c: c.id, s: 'bot', e: 'imp', d: 'm', t: ictx.ctype });
         }
       }
     }
   } catch (e) { /* تبلیغ نباید تحویل فایل را خراب کند */ }
-  const own = adKeyboard(set);
   if (own) rows.push(own.inline_keyboard[0]);
   return rows.length ? { inline_keyboard: rows } : null;
 }
@@ -3321,6 +3426,14 @@ function hasActiveSub(user) {
   if (user.role === 'admin' || user.role === 'premium') return true;
   const until = Number(user.subUntil) || 0;
   return until > Date.now();
+}
+/* «بدون تبلیغ» فقط با اشتراک واقعی (premium یا subUntil) است؛ نقش مدیر اینجا محسوب
+   نمی‌شود تا مدیر بتواند نمایش تبلیغ‌های پلیر (بنر پهن، پیش‌پخش و ...) را آزمایش کند.
+   (دانلود و دکمه‌های ربات همچنان از hasActiveSub استفاده می‌کنند.) */
+function adFreeUser(user) {
+  if (!user) return true;
+  if (user.role === 'premium') return true;
+  return (Number(user.subUntil) || 0) > Date.now();
 }
 function downloadPrice(user, set) {
   /* مدل جدید: دانلود و پخش آنلاین برای همه رایگان است؛ درآمد از تبلیغات و اشتراک
@@ -7509,6 +7622,11 @@ async function handleAdmin(store, url, request, adminUser) {
         }
       }
     }
+    if (Object.prototype.hasOwnProperty.call(body, 'pl')) {
+      const plVal = String(body.pl || '').trim().slice(0, 500);
+      if (plVal && !/^https?:\/\//i.test(plVal)) return json({ error: 'لینک پخش آنلاین معتبر نیست (باید با http:// یا https:// شروع شود)' }, 400);
+      setVariantFilePl(bag, track, qk, fileId, plVal);
+    }
     if (body.premium !== undefined) {
       setVariantPremium(bag, track, qk, !!body.premium);
     }
@@ -9125,7 +9243,7 @@ function MVX_PLAYER_MODULE(W) {
     '.mvp-eps{padding:6px 10px 12px}.mvp-ep{display:flex;align-items:center;gap:10px;width:100%;appearance:none;border:0;background:transparent;color:#fff;font:inherit;text-align:right;padding:9px 10px;border-radius:10px;cursor:pointer}' +
     '.mvp-ep:hover{background:rgba(255,255,255,.07)}.mvp-ep.on{background:rgba(255,122,26,.2)}.mvp-ep:disabled{opacity:.35;cursor:default}.mvp-ep i{font-style:normal;width:30px;height:30px;border-radius:9px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;flex:none}' +
     '.mvp-banner{position:absolute;z-index:9;left:50%;bottom:96px;transform:translateX(-50%);width:min(728px,92%);display:none;border-radius:10px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.5);background:#000}' +
-    '.mvp:not(.ui) .mvp-banner{bottom:18px}.mvp-banner.on{display:block;animation:mvpin .25s ease}.mvp-banner img{display:block;width:100%;height:auto;cursor:pointer}' +
+    '.mvp:not(.ui) .mvp-banner{bottom:18px}.mvp-banner.on{display:block;animation:mvpin .25s ease}.mvp-banner img{display:block;width:100%;height:auto;max-height:118px;object-fit:contain;background:#000;cursor:pointer}' +
     '.mvp-adtag{position:absolute;top:6px;left:6px;padding:2px 7px;border-radius:5px;background:rgba(0,0,0,.6);font-size:10.5px;font-weight:800;pointer-events:none}' +
     '.mvp-bx{position:absolute;top:6px;right:6px;width:26px;height:26px;border-radius:50%;border:0;background:rgba(0,0,0,.65);color:#fff;font-size:14px;cursor:pointer;display:none}.mvp-bx.on{display:block}' +
     '.mvp-pad{position:absolute;z-index:10;left:50%;top:50%;transform:translate(-50%,-50%);width:min(360px,86%);display:none;direction:rtl;text-align:center}' +
@@ -9206,9 +9324,10 @@ function MVX_PLAYER_MODULE(W) {
     if (!P) return;
     P.root.classList.add('ui');
     clearTimeout(P.uiT);
+    /* کنترل‌ها باید مدت بیشتری بمانند (قبلاً ۳.۲ ثانیه و خیلی زود مخفی می‌شدند) */
     if (!keep) P.uiT = setTimeout(function () {
       if (P && !P.video.paused && !P.panel && !P.drag) P.root.classList.remove('ui');
-    }, 3200);
+    }, 6500);
   }
 
   function build() {
@@ -9424,7 +9543,7 @@ function MVX_PLAYER_MODULE(W) {
     seenBump(ad.at);
     var media = q(isVid ? 'video' : 'img', box);
     var cd = q('.cd', box), bar = q('.bar i', box), skip = q('.skip', box);
-    var watched = 0, real = 0, last = Date.now(), finished = false, failed = false;
+    var watched = 0, real = 0, last = Date.now(), finished = false, failed = false, adLoaded = false;
     var t0 = Date.now();
     function finish(skipped) {
       if (finished) return;
@@ -9454,7 +9573,8 @@ function MVX_PLAYER_MODULE(W) {
       last = now;
       var playing = isVid && !failed && media && !media.paused && !media.ended && media.readyState >= 2;
       if (playing) real += dt;
-      if (!isVid || failed || playing) watched += dt;
+      /* ثانیه‌شمار فقط بعد از لود/پخش واقعی رسانه جلو می‌رود (نه از لحظهٔ باز شدن) */
+      if (failed || playing || (!isVid && adLoaded)) watched += dt;
       if (isVid && !failed && media.ended) { real = Math.max(real, Math.min(total, media.duration || total)); watched = Math.max(watched, total); }
       paint();
       if (watched >= total) finish(false);
@@ -9477,6 +9597,7 @@ function MVX_PLAYER_MODULE(W) {
       if (pr && pr.catch) pr.catch(function () { media.muted = true; setSnd(); media.play().catch(function () { failed = true; }); });
       setSnd();
     } else {
+      media.onload = function () { adLoaded = true; };
       media.onerror = function () { failed = true; };
       media.src = ad.mediaUrl;
     }
@@ -9706,27 +9827,83 @@ function MVX_PLAYER_MODULE(W) {
   }
   function hideMsg() { if (P) q('.mvp-msg', P.root).classList.remove('on'); }
 
-  /* ── تمام‌صفحه ── */
-  function isFs() { return !!(D.fullscreenElement || D.webkitFullscreenElement); }
+  /* ── تمام‌صفحه ──
+     در مینی‌اپ تلگرام Fullscreen API مرورگر (به‌خصوص iOS) کار نمی‌کند؛ باید از
+     WebApp.requestFullscreen تلگرام استفاده شود تا پلیر تمام صفحهٔ گوشی را بگیرد. */
+  function tgApp() {
+    try { return (W.Telegram && W.Telegram.WebApp) || (P && P.host && P.host.tg) || null; } catch (e) { return null; }
+  }
+  function isFs() { return !!(D.fullscreenElement || D.webkitFullscreenElement) || !!(P && P.tgFsOn); }
+  /* آیا سایت داخل مینی‌اپ تلگرام باز شده؟ وجود اسکرپت SDK کافی نیست
+     (همان اسکرپت روی مرورگر معمولی هم لود می‌شود). */
+  function tgInApp() {
+    var tg = tgApp();
+    try { if (tg && tg.initData) return true; } catch (e) { }
+    try { if (W.TelegramWebviewProxy && typeof W.TelegramWebviewProxy.postEvent === 'function') return true; } catch (e) { }
+    try { if (W.webkit && W.webkit.messageHandlers && W.webkit.messageHandlers.TelegramWebviewProxy) return true; } catch (e) { }
+    try { if (W.external && 'notify' in W.external) return true; } catch (e) { }
+    return false;
+  }
   function toggleFs() {
     var r = P.root;
-    if (isFs()) {
-      try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { }
+    /* جهت دکمه با فشار کاربر تعیین می‌شود (P.fsWanted)؛ وضعیت رویدادها نباید جهت را
+       بچرخانند — وگرنه فشار دوم دوباره «ورود» می‌زد، کلاینت ارور می‌داد و مینی‌اپ
+       همان‌طور تمام‌صفحه می‌ماند. */
+    var wantOff = (P && P.fsWanted) || isFs();
+    if (wantOff) {
+      if (P) P.fsWanted = false;
+      if (D.fullscreenElement || D.webkitFullscreenElement) {
+        try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { }
+      }
+      tgFs(false); /* خروج از تمام‌صفحه + بازگشت مینی‌اپ به حالت فول‌سایز */
+      try { if (W.screen.orientation && W.screen.orientation.unlock) W.screen.orientation.unlock(); } catch (e) { }
+      P.tgFsOn = false;
+      syncFs();
       return;
     }
-    var req = r.requestFullscreen || r.webkitRequestFullscreen;
-    var ok = false;
-    if (req) { try { var pr = req.call(r); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(); }); } catch (e) { ok = false; } }
-    if (!ok) tgFs();
+    if (P) P.fsWanted = true;
+    if (tgInApp()) {
+      /* داخل مینی‌اپ تلگرام: اول خود مینی‌اپ با WebApp.requestFullscreen تمام‌صفحه می‌شود
+         (هدر تلگرام می‌رود) و بعد پلیر که کل صفحهٔ وب‌ویو را می‌گیرد، تمام‌صفحهٔ گوشی است. */
+      tgFs(true);
+    } else {
+      /* مرورگر معمولی: اول Fullscreen مرورگر؛ فقط اگر نبود یا ناموفق بود، تلگرام. */
+      var req = r.requestFullscreen || r.webkitRequestFullscreen;
+      var ok = false;
+      if (req) { try { var pr = req.call(r, { navigationUI: 'hide' }); ok = true; if (pr && pr.catch) pr.catch(function () { tgFs(true); }); } catch (e) { ok = false; } }
+      if (!ok) tgFs(true);
+    }
     try { if (W.screen.orientation && W.screen.orientation.lock) W.screen.orientation.lock('landscape').catch(function () { }); } catch (e) { }
   }
-  function tgFs() {
-    var tg = P.host.tg;
-    try { if (tg && tg.requestFullscreen) tg.requestFullscreen(); } catch (e) { }
+  function tgFs(on) {
+    var tg = tgApp();
+    var did = false;
+    try {
+      if (on && tg && typeof tg.requestFullscreen === 'function') { tg.requestFullscreen(); did = true; }
+      else if (!on && tg && typeof tg.exitFullscreen === 'function') { tg.exitFullscreen(); did = true; }
+    } catch (e) { }
+    /* رویداد خام تلگرام را همیشه می‌فرستیم (تکرار آن بی‌خطر است) تا تحویل هرگز گم نشود؛
+       متد SDK ممکن است بی‌صدا کاری نکند. */
+    try { if (W.__mvxPostEvent && W.__mvxPostEvent(on ? 'web_app_request_fullscreen' : 'web_app_exit_fullscreen', {})) did = true; } catch (e) { }
+    if (!on) {
+      /* بعد از خروج از تمام‌صفحه، مینی‌اپ باید به حالت «فول‌سایز» (expand) قبلی برگردد،
+         نه حالت نیمه‌باز — وگرنه کاربر فکر می‌کند خروج انجام نشده است. */
+      try {
+        if (tg && typeof tg.expand === 'function') tg.expand();
+        else if (W.__mvxPostEvent) W.__mvxPostEvent('web_app_expand', {});
+      } catch (e) { }
+    }
+    if (!did && on) {
+      /* نه مرورگر و نه تلگرام — پیام مناسب */
+      try { if (tg && tg.expand) tg.expand(); } catch (e) { }
+      toast('تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود');
+    }
+    if (P) { P.tgFsOn = !!on && did; syncFs(); }
   }
   function syncFs() {
     if (!P) return;
-    q('[data-a="fs"]', P.root).innerHTML = isFs() ? I.fsx : I.fs;
+    var b = q('[data-a="fs"]', P.root);
+    if (b) b.innerHTML = isFs() ? I.fsx : I.fs;
   }
 
   /* ── رویدادها ── */
@@ -9799,8 +9976,12 @@ function MVX_PLAYER_MODULE(W) {
       if (b.hasAttribute('data-ep')) return gotoEp(b.getAttribute('data-ep'));
     });
     q('.mvp-big', r).addEventListener('click', function (e) { e.stopPropagation(); togglePlay(); });
-    /* لایهٔ لمس: یک ضربه = نمایش کنترل‌ها، دوبار ضربه چپ/راست = ±۱۰ ثانیه، دوبار وسط = تمام‌صفحه */
-    var tap = q('.mvp-tap', r), lastTap = 0, tapT = 0;
+    /* لایهٔ لمس: یک ضربه = نمایش/مخفی کنترل‌ها، دوبار ضربه چپ/راست = ±۱۰ ثانیه، دوبار وسط = تمام‌صفحه */
+    var tap = q('.mvp-tap', r), lastTap = 0, tapT = 0, tapUi = false;
+    /* وضعیت کنترل‌ها را همان ابتدای لمس ثبت می‌کنیم؛ مرورگر موبایل با هر لمس یک
+       mousemove مصنوعی می‌فرستد و showUi را اجرا می‌کند — اگر به آن تکی کنیم،
+       تشخیص تک‌ضربه کنترل‌های تازه‌نمایش‌داده‌شده را بلافاصله مخفی می‌کرد. */
+    tap.addEventListener('touchstart', function () { tapUi = r.classList.contains('ui'); }, { passive: true });
     tap.addEventListener('click', function (e) {
       if (P.panel) { closePanels(); return; }
       var now = Date.now();
@@ -9815,7 +9996,12 @@ function MVX_PLAYER_MODULE(W) {
       tapT = setTimeout(function () {
         if (!P) return;
         var touch = W.matchMedia && W.matchMedia('(hover:none)').matches;
-        if (touch) { if (r.classList.contains('ui')) r.classList.remove('ui'); else showUi(); }
+        if (touch) {
+          /* تک‌ضربه: اگر کنترل‌ها موقع لمس پیدا بودند مخفی شوند؛
+             اگر پنهان بودند با تایمر کامل ۶٫۵ ثانیه بمانند (مثل کلیک روی عنوان) */
+          if (tapUi) r.classList.remove('ui');
+          else showUi();
+        }
         else togglePlay();
       }, 280);
     });
@@ -9975,6 +10161,31 @@ function MVX_PLAYER_MODULE(W) {
     try { D.documentElement.style.overflow = 'hidden'; } catch (e) { }
     P.wmT = setInterval(moveWm, 20000);
     moveWm();
+    /* وضعیت تمام‌صفحهٔ مینی‌اپ تلگرام (درخواست/خروج از سمت کلاینت) با آیکن دکمه همگام می‌شود */
+    (function bindTgFs() {
+      var tg = tgApp();
+      if (!tg || !tg.onEvent) return;
+      function onFs(data) {
+        if (!P) return;
+        if (data && typeof data === 'object' && 'is_fullscreen' in data) {
+          var v = data.is_fullscreen;
+          P.tgFsOn = !!v && v !== 'false' && v !== '0';
+          P.fsWanted = P.tgFsOn;
+        }
+        syncFs();
+      }
+      function onFsFail() {
+        /* فقط وضعیت را اصلاح می‌کنیم؛ ارور ندهیم چون شکستِ تکراریِ خروج/ورود طبیعی است */
+        if (!P) return;
+        P.tgFsOn = false;
+        P.fsWanted = false;
+        syncFs();
+      }
+      try { tg.onEvent('fullscreenChanged', onFs); tg.onEvent('fullscreenFailed', onFsFail); } catch (e) { }
+      P.offFsEvt = function () {
+        try { tg.offEvent('fullscreenChanged', onFs); tg.offEvent('fullscreenFailed', onFsFail); } catch (e) { }
+      };
+    })();
     if (P.host.tgBack) { try { P.host.tgBack(true, function () { close(); }); } catch (e) { } }
     requestOpen('start');
     return W.MvxPlayer;
@@ -9988,7 +10199,9 @@ function MVX_PLAYER_MODULE(W) {
     clearInterval(p.wmT); clearInterval(p.nxT); clearTimeout(p.uiT); clearTimeout(p.resT); clearTimeout(p.bhT); clearTimeout(p.padT);
     destroyHls();
     try { p.video.pause(); p.video.removeAttribute('src'); p.video.load(); } catch (e) { }
-    if (isFs()) { try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { } }
+    if (D.fullscreenElement || D.webkitFullscreenElement) { try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { } }
+    if (p.tgFsOn) { try { tgFs(false); } catch (e) { } }
+    if (p.offFsEvt) { try { p.offFsEvt(); } catch (e) { } }
     D.removeEventListener('keydown', onKey, true);
     D.removeEventListener('fullscreenchange', syncFs);
     D.removeEventListener('webkitfullscreenchange', syncFs);
@@ -10095,8 +10308,13 @@ const APP_HTML = `<!doctype html>
     var payload = data === undefined ? '' : data;
     try {
       var proxy = W.TelegramWebviewProxy;
-      if (proxy !== undefined && proxy !== null) { proxy.postEvent(type, JSON.stringify(payload)); return 'native'; }
+      /* شیء باید واقعاً postEvent داشته باشد؛ یک شیء خالی (مثلاً از پل رویدادها) نباید پل بومی را بپوشاند */
+      if (proxy !== undefined && proxy !== null && typeof proxy.postEvent === 'function') { proxy.postEvent(type, JSON.stringify(payload)); return 'native'; }
     } catch (e3) { }
+    try {
+      var hm = W.webkit && W.webkit.messageHandlers && W.webkit.messageHandlers.TelegramWebviewProxy;
+      if (hm && hm.postMessage) { hm.postMessage(JSON.stringify({ eventType: type, eventData: payload })); return 'webkit'; }
+    } catch (e3b) { }
     try {
       if (W.external && 'notify' in W.external) { W.external.notify(JSON.stringify({ eventType: type, eventData: payload })); return 'external'; }
     } catch (e4) { }
@@ -10587,10 +10805,6 @@ button.dp-slide{cursor:zoom-in}
 .adx-stage img,.adx-stage video{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block}
 .adx-stage.no-link{cursor:default}
 .adx-fail{color:var(--tx3);font-size:13.5px;text-align:center;padding:24px}
-.adx-cta{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);z-index:5;background:var(--grad);color:#fff;font-weight:900;font-size:14px;padding:11px 26px;border-radius:999px;box-shadow:0 10px 30px rgba(0,0,0,.6);pointer-events:none;max-width:88%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.adx-foot{position:relative;z-index:5;padding:12px 14px calc(14px + env(safe-area-inset-bottom));background:linear-gradient(0deg,rgba(5,7,10,.96),rgba(5,7,10,0))}
-.adx-go{width:100%;border-radius:var(--rad-s);padding:14px;font-size:15px;font-weight:900;background:var(--bg2);border:1px solid var(--line);color:var(--tx3);display:flex;align-items:center;justify-content:center;gap:8px;cursor:not-allowed}
-.adx-go.on{background:var(--grad);color:#fff;border-color:transparent;cursor:pointer;box-shadow:0 8px 26px rgba(255,122,26,.4);animation:pop .2s}
 .adx-mute{position:absolute;top:calc(56px + env(safe-area-inset-top,0px));inset-inline-end:14px;z-index:6;width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.6);border:1px solid var(--line);color:#fff;font-size:15px;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)}
 #toasts{position:fixed;bottom:24px;right:50%;transform:translateX(50%);z-index:500;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
 .toast{background:rgba(26,32,44,.8);border:1px solid var(--glass-line-2);border-radius:999px;padding:10px 20px;font-size:13.5px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.5);animation:toastIn .2s;max-width:90vw;backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur)}
@@ -10633,7 +10847,7 @@ button.dp-slide{cursor:zoom-in}
 .var-row-lab{grid-template-columns:1fr auto auto}
 .var-q{margin-bottom:10px;padding-bottom:8px;border-bottom:1px dashed var(--line)}
 .var-q:last-child{border-bottom:0}
-.var-extra{display:grid;grid-template-columns:minmax(100px,160px) 1fr auto auto;gap:8px;align-items:center;margin:6px 0}
+.var-extra{display:grid;grid-template-columns:minmax(100px,160px) 1fr 1fr auto;gap:8px;align-items:center;margin:6px 0}
 .var-add{margin:4px 0 8px}
 .var-newq{grid-template-columns:minmax(120px,1fr) auto}
 .q-alts{display:flex;flex-direction:column;gap:6px;margin:8px 0 12px;max-width:560px}
@@ -10643,6 +10857,17 @@ button.dp-slide{cursor:zoom-in}
 .q-act .btn{flex:1;min-width:140px;justify-content:center}
 .q-btn .q-st{color:var(--acc2);font-weight:800}
 .q-head{font-size:12.5px;color:var(--tx2);font-weight:700;margin-top:4px}
+/* بخش هر کیفیت: عنوان کیفیت نوشته می‌شود و زیر آن لینک‌های دانلود و پخش آنلاین همان کیفیت */
+.q-secs{display:flex;flex-direction:column;gap:12px;max-width:560px;margin:8px 0 12px}
+.q-sec{display:flex;flex-direction:column;gap:10px;border:1px solid var(--glass-line);border-radius:14px;padding:12px 12px 11px;background:rgba(255,255,255,.045)}
+.q-sec.lock{border-color:rgba(255,176,31,.45);box-shadow:inset 0 0 0 1px rgba(255,176,31,.18)}
+.q-sec .q-head{font-size:15px;color:var(--tx);font-weight:900;margin:0}
+.q-sec .q-meta{font-size:11.5px;color:var(--tx3);font-weight:700;margin:0;display:flex;flex-wrap:wrap;gap:2px 10px}
+.q-sec .q-meta .st{color:var(--acc2)}
+.q-sec .q-alts{margin:0;max-width:none;gap:8px}
+.q-sec .q-act{margin:0;max-width:none}
+.q-sec .q-act .btn{flex:1 1 150px}
+.q-sec .q-alt{width:100%}
 .ep .ep-st{display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:30px;padding:0 8px;border-radius:999px;background:var(--grad);color:#111;font-size:12px;font-weight:900;flex:none}
 .card-st{position:absolute;bottom:8px;right:8px;z-index:3;font-size:10px;font-weight:900;padding:3px 8px;border-radius:999px;background:linear-gradient(135deg,#ff5f2e,#ffb01f);color:#111;box-shadow:0 4px 12px rgba(255,122,26,.35)}
 .st-test{font-size:11px;font-weight:800;color:var(--warn);margin-inline-start:6px}
@@ -10727,8 +10952,10 @@ button.dp-slide{cursor:zoom-in}
   .d-title-en{text-align:center;margin-top:-4px}
   .d-meta-row{justify-content:center;font-size:12.5px;gap:6px 10px}
   .d-genres{justify-content:center}
-  .d-cta{justify-content:center;width:100%}
-  .d-cta .btn-lg{min-width:0;flex:1;max-width:320px}
+  .d-cta{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:100%}
+  .d-cta .btn-lg{flex:1 1 calc(50% - 4px);min-width:calc(50% - 4px);max-width:100%;padding:12px 8px;font-size:13px;line-height:1.7;text-align:center;white-space:normal}
+  .d-cta .btn-ico{width:42px;height:42px;font-size:16px;flex:none}
+  .d-cta .st-test{display:block;margin:2px 0 0}
   .d-desc{text-align:center;font-size:13.5px}
   .d-more{align-self:center}
   .d-body{padding:4px 14px 100px}
@@ -10976,24 +11203,82 @@ function buildTgFallback () {
      نباید کاربری را که الان در صفحهٔ دیگری است دوباره به فیلمِ لانچ اول بپراند. */
   if (LAUNCH && LAUNCH.restored) delete un.start_param;
   var noop = function () { };
-  return {
+  var evs = {};
+  function emit (type, data) {
+    var l = evs[type] || [];
+    for (var i = 0; i < l.length; i++) { try { l[i](data); } catch (e) { } }
+  }
+  var shim = {
     initData: raw,
     initDataUnsafe: un,
     colorScheme: 'dark',
+    isFullscreen: false,
     ready: function () { tgPost('web_app_ready'); },
     expand: function () { tgPost('web_app_expand'); },
+    /* تمام‌صفحهٔ مینی‌اپ (مثل SDK رسمی) — بدون آن پلیر در iOS/مینی‌اپ تمام‌صفحه نمی‌شود */
+    requestFullscreen: function () { shim.isFullscreen = true; tgPost('web_app_request_fullscreen'); },
+    exitFullscreen: function () { shim.isFullscreen = false; tgPost('web_app_exit_fullscreen'); },
     close: noop,
     setHeaderColor: noop,
     setBackgroundColor: noop,
     disableVerticalSwipes: noop,
-    onEvent: noop,
-    offEvent: noop,
+    onEvent: function (type, cb) { if (cb) { (evs[type] = evs[type] || []).push(cb); } },
+    offEvent: function (type, cb) {
+      var l = evs[type] || [];
+      for (var i = l.length - 1; i >= 0; i--) if (l[i] === cb) l.splice(i, 1);
+    },
     openTelegramLink: function (url) { try { location.assign(String(url)); } catch (e) { } },
     HapticFeedback: { impactOccurred: noop, notificationOccurred: noop, selectionChanged: noop },
     BackButton: { show: noop, hide: noop, onClick: noop, offClick: noop },
     MainButton: { show: noop, hide: noop, setText: noop, onClick: noop, offClick: noop },
     __fallback: true
   };
+  /* رویدادهای کلاینت تلگرام (مثلاً تغییر وضعیت تمام‌صفحه) در تلگرام وب با postMessage
+     می‌آیند؛ اینجا به همان handlerهای onEvent می‌رسند. */
+  try {
+    window.addEventListener('message', function (e) {
+      var d = null;
+      try { d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch (er) { d = null; }
+      if (!d || !d.eventType) return;
+      var t = String(d.eventType);
+      var ev = d.eventData || {};
+      if (t === 'fullscreen_changed') {
+        shim.isFullscreen = !!(ev && (ev.is_fullscreen === true || ev.is_fullscreen === 'true'));
+        emit('fullscreenChanged', ev);
+      } else if (t === 'fullscreen_failed') { shim.isFullscreen = false; emit('fullscreenFailed', ev); }
+      else if (t === 'activated') emit('activated', ev);
+      else if (t === 'viewport_changed') emit('viewportChanged', ev);
+    });
+  } catch (e) { }
+  /* پل بومی کلاینت ← صفحه: کلاینت تلگرام روی موبایل TelegramWebviewProxy.receiveEvent
+     را صدا می‌زند؛ بدون آن رویدادهایی مثل fullscreen_changed گم می‌شوند و آیکن دکمهٔ
+     تمام‌صفحه از وضعیت واقعی عقب می‌ماند (بعد از یک‌بار تغییر، دکمه خراب به نظر می‌رسید). */
+  try {
+    var proxy = window.TelegramWebviewProxy = window.TelegramWebviewProxy || {};
+    var prevRecv = proxy.receiveEvent;
+    proxy.receiveEvent = function (type, data) {
+      try { if (prevRecv) prevRecv(type, data); } catch (e) { }
+      try {
+        /* اگر SDK رسمی بعداً لود شده، رویداد باید به آن هم برسد تا وضعیت داخلی‌اش
+           (مثل WebApp.isFullscreen) به‌روز شود و exitFullscreen کار کند. */
+        var wv = window.Telegram && window.Telegram.WebView;
+        if (wv && typeof wv.receiveEvent === 'function' && wv.receiveEvent !== prevRecv && wv.receiveEvent !== proxy.receiveEvent) wv.receiveEvent(type, data);
+      } catch (e) { }
+      try {
+        var t = String(type || '');
+        var ev = data;
+        if (typeof ev === 'string') { try { ev = JSON.parse(ev || '{}'); } catch (er) { ev = {}; } }
+        if (!ev || typeof ev !== 'object') ev = {};
+        if (t === 'fullscreen_changed') {
+          shim.isFullscreen = !!(ev.is_fullscreen === true || ev.is_fullscreen === 'true');
+          emit('fullscreenChanged', ev);
+        } else if (t === 'fullscreen_failed') { shim.isFullscreen = false; emit('fullscreenFailed', ev); }
+        else if (t === 'activated') emit('activated', ev);
+        else if (t === 'viewport_changed') emit('viewportChanged', ev);
+      } catch (e) { }
+    };
+  } catch (e) { }
+  return shim;
 }
 var __bootErr = null;
 function captureErr (msg) { if (!__bootErr && msg) __bootErr = String(msg); }
@@ -11491,7 +11776,7 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
   var st = (stm && streamReady() && stm[track]) || {};
   var price = currentDlPrice();
   var sub = hasSub();
-  var classic = ['480', '720', '1080', '4k'];
+  var classic = ['4k', '1080', '720', '480']; /* بهترین کیفیت بالاتر — مثل چیدمان قبلی */
   var keys = Object.keys(v).filter(function (k) {
     var cell = v[k];
     return cell && (cell.has || cell.source || (cell.files && cell.files.length));
@@ -11504,24 +11789,50 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
     if (ib >= 0) return 1;
     return String((v[a] && v[a].label) || a).localeCompare(String((v[b] && v[b].label) || b), 'fa');
   });
+  keys = keys.filter(function (k) { return cellFilesOf(v[k]).length || st[k]; });
   if (!keys.length) {
     return '<p class="note">برای «' + (track === 'dub' ? 'دوبله' : 'زیرنویس') + '» هنوز کیفیتی ثبت نشده.</p>';
   }
-  return '<div class="q-row">' + keys.map(function (k) {
+  var tLab = track === 'dub' ? 'دوبله' : 'زیرنویس';
+  /* مثل قدیم: برای هر کیفیت یک عنوان نوشته می‌شود و زیر همان عنوان،
+     لینک‌های دانلود و پخش آنلاینِ همان کیفیت قرار می‌گیرد (بدون کلیک روی کارت). */
+  return '<div class="q-secs">' + keys.map(function (k) {
     var cell = v[k];
     var files = cellFilesOf(cell);
     var hasSt = !!st[k];
-    var on = files.length > 0 || hasSt;
     var prem = !!(bagLock || (cell && cell.premium) || (st[k] && st[k].premium));
     var lab = (cell && cell.label) || (st[k] && st[k].label) || Q_LABEL[k] || k;
-    var extra = '';
-    if (files.length > 1) extra += '<span>' + faNum(files.length) + ' نسخه</span>';
-    else if (files.length && cell.sizeBytes) extra += '<span>' + fmtBytes(cell.sizeBytes) + '</span>';
-    if (hasSt) extra += '<span class="q-st">▶ پخش آنلاین</span>';
-    if (on && prem && !sub) extra += '<span>⭐ اشتراک</span>';
-    else if (files.length && price > 0) extra += '<span>' + faMoney(price) + ' ' + unitName() + '</span>';
-    return '<button type="button" class="q-btn' + (on ? '' : ' off') + (on && prem && !sub ? ' lock' : '') + '" data-q="' + esc(k) + '" data-nf="' + files.length + '" data-st="' + (hasSt ? 1 : 0) + '"' + (on ? '' : ' disabled') + '>' + esc(lab) + extra + '</button>';
-  }).join('') + '</div><div class="q-alts" id="q-alts"></div>';
+    /* عنوان بخش دقیقاً همان چیزی است که در پنل ادمین ثبت شده (مثل
+       «Mymovies | 480p.WEB-DL.Doble | 357.9 MB»)؛ برچسب «480p — دوبله» فقط
+       جایزین است وقتی برای فایل عنوانی ثبت نشده باشد. */
+    var vTitle = (files.length === 1 && files[0].title && String(files[0].title).trim())
+      ? String(files[0].title).trim() : '';
+    var meta = [];
+    if (!vTitle) {
+      if (files.length > 1) meta.push(esc(faNum(files.length) + ' نسخه'));
+      else if (files.length && cell && cell.sizeBytes) meta.push(esc(fmtBytes(cell.sizeBytes)));
+    }
+    if (hasSt) meta.push('<span class="st">▶ پخش آنلاین</span>');
+    if (prem && !sub) meta.push('⭐ ویژهٔ مشترکین');
+    else if (files.length && price > 0) meta.push(esc(faMoney(price) + ' ' + unitName()));
+    var html = '<div class="q-sec' + (prem && !sub ? ' lock' : '') + '">' +
+      '<div class="q-sec-h"><div class="q-head">' + esc(vTitle || (lab + ' — ' + tLab)) + '</div>' +
+      (meta.length ? '<div class="q-meta">' + meta.join(' · ') + '</div>' : '') + '</div>';
+    if (files.length > 1) {
+      html += '<div class="q-alts">' + files.map(function (f, i) {
+        var flab = (f.title && f.title.trim()) ? f.title : (lab + (i ? (' — نسخه ' + faNum(i + 1)) : ''));
+        return '<button type="button" class="q-alt" data-q="' + esc(k) + '" data-fid="' + esc(f.id || '') + '"><span>' + esc(flab) + '</span><span class="go">📥 دانلود</span></button>';
+      }).join('') + '</div>';
+      if (hasSt) html += '<div class="q-act"><button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '">▶ پخش آنلاین</button></div>';
+    } else {
+      html += '<div class="q-act">' +
+        (files.length ? '<button type="button" class="btn btn-primary q-dl" data-q="' + esc(k) + '" data-fid="' + esc((files[0] && files[0].id) || '') + '">📥 دانلود</button>' : '') +
+        (hasSt ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '">▶ پخش آنلاین</button>' : '') +
+        '</div>';
+      if (!files.length) html += '<p class="note" style="margin:0">این کیفیت فقط پخش آنلاین دارد.</p>';
+    }
+    return html + '</div>';
+  }).join('') + '</div>';
 }
 function trackTabsHtml (id, onTrack) {
   return '<div class="seg" id="' + id + '">' +
@@ -12597,17 +12908,16 @@ function showAdThen (res, done) {
     mediaHtml = '<img id="adx-i" alt="' + esc(ad.title || 'تبلیغ') + '" src="' + esc(ad.mediaUrl) + '">';
   }
 
+  /* متن/دکمه‌های زیر تبلیغ (cta و دکمهٔ «ادامه») برداشته شدند؛
+     بعد از پایان ثانیه‌شمار، دریافت فایل خودکار ادامه می‌یابد. */
   el.innerHTML =
     '<div class="adx-bar"><i id="adx-fill"></i></div>' +
     '<div class="adx-top">' +
       '<span class="adx-sec">⏳ <b id="adx-n">' + faNum(total) + '</b> ثانیه</span>' +
       '<button type="button" class="adx-nosub" id="adx-nosub">' + esc(gate.btnText || '🚫 حذف تبلیغ‌ها') + '</button>' +
     '</div>' +
-    '<div class="adx-stage' + (ad.clickable ? '' : ' no-link') + '" id="adx-stage">' + mediaHtml +
-      (ad.clickable ? '<span class="adx-cta">' + esc(ad.cta || 'برای مشاهده کلیک کنید') + ' ↗</span>' : '') +
-    '</div>' +
-    (ad.kind === 'video' ? '<button type="button" class="adx-mute" id="adx-mute">' + (ad.muted === false ? '🔊' : '🔇') + '</button>' : '') +
-    '<div class="adx-foot"><button type="button" class="adx-go" id="adx-go" disabled>⏳ لطفاً تا پایان تبلیغ صبر کنید</button></div>';
+    '<div class="adx-stage' + (ad.clickable ? '' : ' no-link') + '" id="adx-stage">' + mediaHtml + '</div>' +
+    (ad.kind === 'video' ? '<button type="button" class="adx-mute" id="adx-mute">' + (ad.muted === false ? '🔊' : '🔇') + '</button>' : '');
 
   document.body.appendChild(el);
   try { document.body.style.overflow = 'hidden'; } catch (e) { }
@@ -12616,15 +12926,41 @@ function showAdThen (res, done) {
 
   var fill = $('#adx-fill', el);
   var num = $('#adx-n', el);
-  var go = $('#adx-go', el);
   var stage = $('#adx-stage', el);
   var finished = false;
 
+  /* ثانیه‌شمار فقط بعد از لود کامل رسانه شروع می‌شود؛ اگر رسانه خطا داد یا
+     بیش از حد معطل شد، پیام خطا می‌آید و تایمر (برای آزاد شدن دانلود) شروع می‌شود. */
+  var started = false;
+  function startTick () {
+    if (started || finished) return;
+    if (!AD_LAYER || AD_LAYER.el !== el) return;
+    started = true;
+    try { clearTimeout(loadT); } catch (e) { }
+    AD_LAYER.tick = setInterval(function () {
+      remain -= 1;
+      paint();
+      if (remain <= 0) unlock();
+    }, 1000);
+  }
+  function mediaFail () {
+    if (!finished && stage && !$('.adx-fail', stage)) {
+      stage.innerHTML = '<div class="adx-fail">نمایش این تبلیغ ممکن نشد.' + NL + 'تایمر ادامه دارد و بعد از پایان، دانلود شما آزاد می‌شود.</div>';
+    }
+    startTick();
+  }
+  var loadT = setTimeout(function () { if (!started) mediaFail(); }, 15000);
+
   var media = $('#adx-v', el) || $('#adx-i', el);
   if (media) {
-    media.addEventListener('error', function () {
-      stage.innerHTML = '<div class="adx-fail">نمایش این تبلیغ ممکن نشد.' + NL + 'تایمر ادامه دارد و بعد از پایان، دانلود شما آزاد می‌شود.</div>';
-    });
+    media.addEventListener('error', mediaFail);
+    if (ad.kind === 'video') {
+      media.addEventListener('canplaythrough', startTick);
+      if (media.readyState >= 4) startTick();
+    } else {
+      media.addEventListener('load', startTick);
+      if (media.complete && media.naturalWidth) startTick();
+    }
   }
   var vid = $('#adx-v', el);
   if (vid) {
@@ -12664,34 +13000,23 @@ function showAdThen (res, done) {
     if (fill) fill.style.width = '100%';
     var sec = $('.adx-sec', el);
     if (sec) sec.innerHTML = '✅ تبلیغ تمام شد';
-    go.className = 'adx-go on';
-    go.disabled = false;
-    go.innerHTML = '🚀 ادامه و دریافت فایل';
     haptic('light');
-    go.addEventListener('click', function () {
-      go.disabled = true;
-      go.innerHTML = 'در حال آماده‌سازی…';
-      api('/dl/gate/' + res.gate, { method: 'POST' }).then(function (g) {
-        adCloseLayer();
-        done(g);
-      }).catch(function (e) {
-        if (e.data && e.data.remain) {
-          go.disabled = false;
-          go.innerHTML = '🚀 ادامه و دریافت فایل';
-          toast('هنوز ' + faNum(e.data.remain) + ' ثانیه مانده', 'err');
-          return;
-        }
-        adCloseLayer();
-        toast(e.message, 'err');
-      });
+    /* دکمهٔ «ادامه» حذف شده؛ دریافت فایل خودکار ادامه می‌یابد */
+    proceed();
+  }
+  function proceed () {
+    api('/dl/gate/' + res.gate, { method: 'POST' }).then(function (g) {
+      adCloseLayer();
+      done(g);
+    }).catch(function (e) {
+      if (e.data && e.data.remain) {
+        setTimeout(proceed, Math.max(1, Number(e.data.remain) || 1) * 1000);
+        return;
+      }
+      adCloseLayer();
+      toast(e.message, 'err');
     });
   }
-
-  AD_LAYER.tick = setInterval(function () {
-    remain -= 1;
-    paint();
-    if (remain <= 0) unlock();
-  }, 1000);
 }
 
 /* پس از ثبت درخواست دانلود: کاربر را به چتِ ربات دریافت می‌بریم و
@@ -12777,54 +13102,32 @@ function requestDownload (itemId, opts, btn) {
 }
 
 function bindQualityClicks (root, it, track, ep, bagLock) {
-  var bag = ep || it;
-  var variants = variantsOf(bag, it);
-  var stm = stmOf(bag);
-  $all('.q-btn', root).forEach(function (b) {
+  /* لینک‌های هر کیفیت زیر عنوان همان کیفیت آماده است؛ فقط کلیک‌ها را می‌بندیم */
+  function lockGuard (btn) {
+    var sec = btn.closest ? btn.closest('.q-sec') : null;
+    if (sec && sec.classList.contains('lock')) {
+      toast('این کیفیت فقط با اشتراک فعال در دسترس است', 'err');
+      nav('#/subscribe');
+      return true;
+    }
+    return false;
+  }
+  $all('.q-dl', root).forEach(function (b) {
     b.addEventListener('click', function () {
-      if (b.classList.contains('lock')) {
-        toast('این کیفیت فقط با اشتراک فعال در دسترس است', 'err');
-        nav('#/subscribe');
-        return;
-      }
-      /* رنگ دکمهٔ کیفیتِ انتخاب‌شده مثل حالت هاور می‌شود تا دکمه‌های زیر
-         مشخص باشد برای کدام کیفیت است */
-      $all('.q-btn', root).forEach(function (x) { x.classList.remove('on'); });
-      b.classList.add('on');
-      var q = b.getAttribute('data-q');
-      var cell = (variants[track] || {})[q] || {};
-      var files = cellFilesOf(cell);
-      var canStream = b.getAttribute('data-st') === '1' && streamReady();
-      var alts = $('#q-alts', root) || $('#q-alts');
-      if (!alts) {
-        if (files.length) requestDownload(it.id, { epId: ep && ep.id, track: track, quality: q, fileId: (files[0] && files[0].id) || '' }, b);
-        else if (canStream) openPlayer(it, { epId: ep && ep.id, track: track, quality: q });
-        return;
-      }
-      var qlab = cell.label || ((stm[track] || {})[q] || {}).label || Q_LABEL[q] || q;
-      /* کنار کیفیت انتخاب‌شده دو دکمه: «دانلود» و «پخش آنلاین» */
-      var html = '<div class="q-head">' + esc(qlab) + ' — ' + (track === 'dub' ? 'دوبله' : 'زیرنویس') + '</div><div class="q-act">' +
-        (files.length === 1 ? '<button type="button" class="btn btn-primary q-dl">📥 دانلود</button>' : '') +
-        (canStream ? '<button type="button" class="btn btn-white q-play">▶ پخش آنلاین</button>' : '') + '</div>';
-      /* نسخه‌ها را همیشه نشان بده وقتی بیش از یکی است (هر نسخه دکمهٔ دانلود خودش را دارد) */
-      if (files.length > 1) {
-        html += files.map(function (f, i) {
-          var lab = (f.title && f.title.trim()) ? f.title : (qlab + (i ? (' — نسخه ' + faNum(i + 1)) : ''));
-          return '<button type="button" class="q-alt" data-q="' + q + '" data-fid="' + esc(f.id || '') + '"><span>' + esc(lab) + '</span><span class="go">📥 دانلود</span></button>';
-        }).join('');
-      } else if (!files.length) html += '<p class="note" style="margin:4px 0 0">این کیفیت فقط پخش آنلاین دارد.</p>';
-      alts.innerHTML = html;
-      var dlb = $('.q-dl', alts);
-      if (dlb) dlb.addEventListener('click', function () {
-        requestDownload(it.id, { epId: ep && ep.id, track: track, quality: q, fileId: (files[0] && files[0].id) || '' }, dlb);
-      });
-      var pb = $('.q-play', alts);
-      if (pb) pb.addEventListener('click', function () { openPlayer(it, { epId: ep && ep.id, track: track, quality: q }); });
-      $all('.q-alt', alts).forEach(function (a) {
-        a.addEventListener('click', function () {
-          requestDownload(it.id, { epId: ep && ep.id, track: track, quality: a.getAttribute('data-q'), fileId: a.getAttribute('data-fid') }, a);
-        });
-      });
+      if (lockGuard(b)) return;
+      requestDownload(it.id, { epId: ep && ep.id, track: track, quality: b.getAttribute('data-q'), fileId: b.getAttribute('data-fid') || '' }, b);
+    });
+  });
+  $all('.q-play', root).forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (lockGuard(b)) return;
+      openPlayer(it, { epId: ep && ep.id, track: track, quality: b.getAttribute('data-q') });
+    });
+  });
+  $all('.q-alt', root).forEach(function (a) {
+    a.addEventListener('click', function () {
+      if (lockGuard(a)) return;
+      requestDownload(it.id, { epId: ep && ep.id, track: track, quality: a.getAttribute('data-q'), fileId: a.getAttribute('data-fid') || '' }, a);
     });
   });
 }
@@ -12952,8 +13255,6 @@ function bindItem (it, data) {
   if (main) main.addEventListener('click', function () {
     var box = $('#dl-box');
     if (box) { try { box.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { box.scrollIntoView(); } }
-    var first = $('#dl-box .q-btn:not(.off)') || $('#dl-box .ep');
-    if (first && it.type !== 'series' && $all('#dl-box .q-btn:not(.off)').length === 1) first.click();
   });
   if (it.type === 'series') bindSeriesDl(it);
   else bindMovieDl(it);
@@ -12961,14 +13262,20 @@ function bindItem (it, data) {
 function shareOrCopy (it) {
   var siteUrl = location.origin + '/#/item/' + it.id;
   var miniUrl = miniAppItemUrl(it.id);
-  var html = '<p class="note">لینک مینی‌اپ، تلگرام را روی صفحه همین فیلم یا سریال باز می‌کند. لینک سایت در مرورگر باز می‌شود.</p>' +
+  /* لینک سایت فقط برای مدیر؛ بقیهٔ کاربران فقط لینک مینی‌اپ را می‌بینند و کپی می‌کنند */
+  var isAdmin = !!(APP.user && APP.user.role === 'admin');
+  var html = '<p class="note">لینک مینی‌اپ، تلگرام را روی صفحه همین فیلم یا سریال باز می‌کند.' +
+    (isAdmin ? ' لینک سایت فقط برای مدیران نمایش داده می‌شود.' : '') + '</p>' +
     '<div class="field"><label for="share-mini-url">لینک مینی‌اپ تلگرام</label><input id="share-mini-url" dir="ltr" readonly value="' + esc(miniUrl) + '"></div>' +
     '<div class="adm-row"><button type="button" class="btn btn-primary" id="share-mini-copy">کپی لینک مینی‌اپ</button><button type="button" class="btn btn-ghost" id="share-mini-send">اشتراک در تلگرام</button></div>' +
-    '<div class="field" style="margin-top:20px"><label for="share-site-url">لینک سایت</label><input id="share-site-url" dir="ltr" readonly value="' + esc(siteUrl) + '"></div>' +
-    '<button type="button" class="btn btn-ghost" id="share-site-copy">کپی لینک سایت</button>';
+    (isAdmin
+      ? '<div class="field" style="margin-top:20px"><label for="share-site-url">لینک سایت (فقط مدیر)</label><input id="share-site-url" dir="ltr" readonly value="' + esc(siteUrl) + '"></div>' +
+        '<button type="button" class="btn btn-ghost" id="share-site-copy">کپی لینک سایت</button>'
+      : '');
   openModal('اشتراک‌گذاری ' + (it.title || ''), html, function (wrap) {
     $('#share-mini-copy', wrap).addEventListener('click', function () { copyText(miniUrl, function () { toast('لینک مینی‌اپ کپی شد', 'ok'); }); });
-    $('#share-site-copy', wrap).addEventListener('click', function () { copyText(siteUrl, function () { toast('لینک سایت کپی شد', 'ok'); }); });
+    var siteCopy = $('#share-site-copy', wrap);
+    if (siteCopy) siteCopy.addEventListener('click', function () { copyText(siteUrl, function () { toast('لینک سایت کپی شد', 'ok'); }); });
     $('#share-mini-send', wrap).addEventListener('click', function () {
       openBot('https://t.me/share/url?url=' + encodeURIComponent(miniUrl) + '&text=' + encodeURIComponent(it.title || ''));
     });
@@ -14935,6 +15242,7 @@ function openItemEditor (it, prefillUrl) {
           return '<div class="var-extra">' +
             '<input data-vt="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="عنوان نسخه" value="' + esc(f.title || '') + '">' +
             '<input data-vu2="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی" value="' + esc(sourceHref(f.source) || '') + '" dir="ltr">' +
+            '<input data-vpl="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="لینک پخش آنلاین (اختیاری)" title="برای دکمهٔ تماشای آنلاین همین نسخه؛ خالی = بدون پخش آنلاین" value="' + esc(f.pl || '') + '" dir="ltr">' +
             '<button type="button" class="btn btn-danger btn-sm" data-vd="' + t.k + ':' + q + ':' + (epId || '') + ':' + esc(f.id) + '">حذف</button></div>';
         }).join('');
         return '<div class="var-q">' +
@@ -14993,7 +15301,7 @@ function openItemEditor (it, prefillUrl) {
     galleryEditorHtml(it) +
     '<div class="field"><label>توضیحات</label><textarea id="e-desc">' + esc(it.description || '') + '</textarea></div>' +
     '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-bottom:12px"><input type="checkbox" id="e-featured" style="width:auto"' + (it.featured ? ' checked' : '') + '> ⭐ نمایش در هیرو صفحهٔ اصلی</label>' +
-    (isSeries ? '' : ('<div class="d-sec-h">کیفیت‌ها و نوع صدا</div><p style="font-size:12px;color:var(--tx3);margin-bottom:8px">کیفیت اصلی فقط عنوان است (بدون لینک). زیر هر کیفیت با «نسخه دیگر» فایل را با عنوان و لینک اضافه کنید. ستاره یعنی فقط اشتراک.</p><div id="e-var">' + variantGridHtml(it, '') + '</div>')) +
+    (isSeries ? '' : ('<div class="d-sec-h">کیفیت‌ها و نوع صدا</div><p style="font-size:12px;color:var(--tx3);margin-bottom:8px">کیفیت اصلی فقط عنوان است (بدون لینک). زیر هر کیفیت با «نسخه دیگر» فایل را با عنوان و لینک اضافه کنید. ستاره یعنی فقط اشتراک. هر نسخه می‌تواند زیر لینک فایل، «لینک پخش آنلاین» هم داشته باشد (بدون عنوان؛ خالی = بدون پخش آنلاین).</p><div id="e-var">' + variantGridHtml(it, '') + '</div>')) +
     (isSeries ? (
       '<div class="d-sec-h">فصل‌ها و قسمت‌ها</div>' +
       '<p style="font-size:12px;color:var(--tx3);margin-bottom:8px">ستاره روی قسمت کل قسمت را قفل اشتراک می‌کند؛ ستاره کنار کیفیت همان فایل را.</p>' +
@@ -15182,6 +15490,7 @@ function openItemEditor (it, prefillUrl) {
           row.className = 'var-extra';
           row.innerHTML = '<input class="vf-new-t" placeholder="عنوان نسخه مثلاً دوبله دوم">' +
             '<input class="vf-new-u" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی؛ برای ذخیره از فیلد خارج شوید" dir="ltr">' +
+            '<span></span>' +
             '<button type="button" class="btn btn-ghost btn-sm vf-new-x">انصراف</button>';
           b.parentNode.insertBefore(row, b);
           $('.vf-new-x', row).addEventListener('click', function () { row.remove(); });
@@ -15206,15 +15515,18 @@ function openItemEditor (it, prefillUrl) {
         if (!row) return;
         var titleEl = $('[data-vt]', row);
         var urlEl = $('[data-vu2]', row);
-        var ident = ((urlEl && urlEl.getAttribute('data-vu2')) || (titleEl && titleEl.getAttribute('data-vt')) || '');
+        var plEl = $('[data-vpl]', row);
+        var ident = ((urlEl && urlEl.getAttribute('data-vu2')) || (titleEl && titleEl.getAttribute('data-vt')) || (plEl && plEl.getAttribute('data-vpl')) || '');
         var parts = ident.split('-');
         var track = parts[0], q = parts[1], epid = parts[2] || epId || '', fid = parts[3] || '';
         var url = urlEl ? urlEl.value.trim() : '';
-        api('/admin/item/' + it.id + '/variant', { method: 'POST', body: {
+        var body = {
           track: track, quality: q, epId: epid, fileId: fid,
           title: titleEl ? titleEl.value.trim() : '',
           url: url
-        } }).then(function (r) {
+        };
+        if (plEl) body.pl = plEl.value.trim();
+        api('/admin/item/' + it.id + '/variant', { method: 'POST', body: body }).then(function (r) {
           it = r.item;
           toast(url ? 'نسخه ذخیره شد ✓' : 'نسخه حذف شد', 'ok');
           if (!url) rebindVar(root, epid); // ردیف خالی حذف شد → بازچینش
@@ -15224,6 +15536,9 @@ function openItemEditor (it, prefillUrl) {
         el.addEventListener('change', function () { saveVarRow(el); });
       });
       $all('[data-vu2]', root).forEach(function (el) {
+        el.addEventListener('change', function () { saveVarRow(el); });
+      });
+      $all('[data-vpl]', root).forEach(function (el) {
         el.addEventListener('change', function () { saveVarRow(el); });
       });
       $all('[data-vd]', root).forEach(function (b) {
