@@ -75,7 +75,7 @@ const DEFAULT_RULES = [
   '• هزینه به ازای هر هزار ارسال فایل (CPM)؛ هر کاربر روزانه حداکثر به اندازهٔ «سقف تکرار» یک تبلیغ را می‌بیند.',
 ].join('\n');
 const SETTINGS_DEFAULTS = {
-  siteName: 'سینماگرام', siteUrl: '', brand: 'تبلیغات سینماگرام', support: '',
+  siteName: 'سینماگرام', siteUrl: '', publicUrl: '', brand: 'تبلیغات سینماگرام', support: '',
   netSecret: '', secret: '',
   tariffs: { video: { cpm: 0, cpv: 60, cpc: 0 }, banner: { cpm: 12000, cpv: 0, cpc: 0 }, link: { cpm: 8000, cpv: 0, cpc: 0 } },
   minBudget: 100000, minDaily: 20000, maxBid: 5,
@@ -1176,11 +1176,16 @@ async function adminNetSecret(env, set) {
   await saveSettings(env, s);
   return json({ ok: true, netSecret: s.netSecret });
 }
+async function registerTgWebhook(env, set, origin) {
+  const r = await tgApi(env, 'setWebhook', { url: origin + '/api/tg/webhook', secret_token: await tgWebhookSecret(env, set), allowed_updates: ['message', 'callback_query', 'pre_checkout_query'], drop_pending_updates: false });
+  if (r && r.ok) set.webhookUrl = origin + '/api/tg/webhook';
+  return r;
+}
 async function adminBotWebhook(env, set, origin) {
   if (!botToken(env)) return err('ابتدا Secret با نام ADS_BOT_TOKEN را در Worker تنظیم کنید');
   const me = await tgApi(env, 'getMe', {});
   if (!me.ok) return err('توکن ربات معتبر نیست: ' + (me.description || ''));
-  const r = await tgApi(env, 'setWebhook', { url: origin + '/api/tg/webhook', secret_token: await tgWebhookSecret(env, set), allowed_updates: ['message', 'callback_query', 'pre_checkout_query'], drop_pending_updates: false });
+  const r = await registerTgWebhook(env, set, origin);
   if (!r.ok) return err('ثبت وبهوک ناموفق بود: ' + (r.description || ''));
   const s = JSON.parse(JSON.stringify(set)); delete s._origin;
   s.botUsername = me.result.username || s.botUsername;
@@ -1209,6 +1214,18 @@ async function route(request, env, ctx) {
   await ensureSchema(env);
   const set = await getSettings(env);
   set._origin = url.origin;
+  /* مهاجرت خودکار آدرس پلتفرم (فیلتر/تغییر نام ورکر): با اولین درخواست از آدرس جدید،
+     آدرس ذخیره‌شده و وبهوک ربات خودکار دنبال می‌روند. (ADS_PUBLIC_ORIGIN آدرس را قفل می‌کند.) */
+  try {
+    const pin = String(env.ADS_PUBLIC_ORIGIN || '').trim().replace(/\/+$/, '');
+    const cur = String(set.publicUrl || '').replace(/\/+$/, '');
+    if (!pin && url.origin !== cur) {
+      set.publicUrl = url.origin;
+      const s = JSON.parse(JSON.stringify(set)); delete s._origin;
+      await saveSettings(env, s);
+      if (botToken(env)) { try { await registerTgWebhook(env, set, url.origin); const s2 = JSON.parse(JSON.stringify(set)); delete s2._origin; await saveSettings(env, s2); } catch (eW) { } }
+    }
+  } catch (eO) { }
   const a = p.slice(5);
   /* اتصال سایت اصلی */
   if (a.indexOf('net/') === 0) {

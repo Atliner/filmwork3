@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-const mod = await import('data:text/javascript;base64,' + Buffer.from(source + '\nexport { miniAppUrl, webhookStale, maybeSetWebhook, htmlPage, sendDlNotice, getSettings, bustSettings, Store, CONFIG };').toString('base64'));
-const { miniAppUrl, webhookStale, maybeSetWebhook, htmlPage, sendDlNotice, getSettings, bustSettings, Store, CONFIG } = mod;
+const mod = await import('data:text/javascript;base64,' + Buffer.from(source + '\nexport { miniAppUrl, webhookStale, maybeSetWebhook, ensureCurrentOrigin, htmlPage, sendDlNotice, getSettings, bustSettings, Store, CONFIG };').toString('base64'));
+const { miniAppUrl, webhookStale, maybeSetWebhook, ensureCurrentOrigin, htmlPage, sendDlNotice, getSettings, bustSettings, Store, CONFIG } = mod;
 
 /* ── ۱) لینک مینی‌اپ از یوزرنیم فعلی ربات ساخته می‌شود، نه ربات قدیمیِ ثابت ── */
 assert.equal(miniAppUrl({ botUsername: 'new_login_bot' }), 'https://t.me/new_login_bot/directlink');
@@ -100,3 +100,42 @@ console.log('PASS: maybeSetWebhook registers both bots and records which bot the
 }
 
 console.log('PASS: bot swap via Runtime variables — mini-app links and webhook re-registration follow the new bots');
+
+/* ── ۵) جابه‌جایی دامنه (فیلتر/تغییر نام ورکر یا ساب‌دامنهٔ کلودفلر):
+      publicUrl و وبهوک ربات‌ها با اولین درخواست از آدرس جدید، خودکار دنبال می‌روند ── */
+{
+  const realFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    calls.push({ url: u, body: opts.body ? JSON.parse(opts.body) : null });
+    if (u.includes('/setWebhook')) return { ok: true, json: async () => ({ ok: true, result: true }) };
+    if (u.includes('/getMe')) return { ok: true, json: async () => ({ ok: true, result: { id: 111, username: 'new_login_bot' } }) };
+    return { ok: true, json: async () => ({ ok: true, result: {} }) };
+  };
+  try {
+    const m = new Map();
+    const kv = { put: async (k, v) => { m.set(k, v); }, get: async (k, o) => { const v = m.get(k); return v == null ? null : (o === 'json' || (o && o.type === 'json') ? JSON.parse(v) : v); }, delete: async k => { m.delete(k); }, list: async ({ prefix = '' } = {}) => ({ keys: [...m.keys()].filter(k => k.startsWith(prefix)).map(name => ({ name })), list_complete: true }) };
+    const env = { KV: kv };
+    const store = new Store(kv, env);
+    bustSettings();
+    await store.set('set', { secret: 'migration-secret-0123456789abcdef', publicUrl: 'https://film.filmbazha.workers.dev', botToken: '111:AAA', botId: 111, webhookOk: true, webhookBotId: 111 });
+    const req = new Request('https://film1.filmbazha.workers.dev/');
+    assert.equal(await ensureCurrentOrigin(store, await getSettings(store), req, null), true, 'مبدأ جدید باید مهاجرت کند');
+    assert.equal((await getSettings(store)).publicUrl, 'https://film1.filmbazha.workers.dev', 'آدرس عمومی دنبال آدرس جدید می‌رود');
+    assert.ok(calls.some(c => c.url.includes('/setWebhook') && c.body.url === 'https://film1.filmbazha.workers.dev/api/tg/webhook'), 'وبهوک باید به آدرس جدید ثبت شود');
+    calls.length = 0;
+    assert.equal(await ensureCurrentOrigin(store, await getSettings(store), new Request('https://film1.filmbazha.workers.dev/api/me'), null), false, 'همان مبدأ = بدون کار اضافه');
+    assert.equal(calls.length, 0, 'درخواست تکراری نباید دوباره وبهوک بزند');
+    const req2 = new Request('https://film.filmbazha2.workers.dev/');
+    assert.equal(await ensureCurrentOrigin(store, await getSettings(store), req2, null), true, 'جابه‌جایی دوباره (ساب‌دامنهٔ جدید) هم کار می‌کند');
+    assert.equal((await getSettings(store)).publicUrl, 'https://film.filmbazha2.workers.dev');
+    env.SITE_PUBLIC_ORIGIN = 'https://film.filmbazha2.workers.dev';
+    assert.equal(await ensureCurrentOrigin(store, await getSettings(store), new Request('https://other.example.dev/'), null), false, 'با SITE_PUBLIC_ORIGIN آدرس قفل است');
+    assert.equal((await getSettings(store)).publicUrl, 'https://film.filmbazha2.workers.dev', 'آدرس قفل‌شده تغییر نمی‌کند');
+  } finally {
+    globalThis.fetch = realFetch;
+    bustSettings();
+  }
+}
+console.log('PASS: moving the site to a new domain (worker rename / account prefix change) auto-migrates publicUrl and re-registers bot webhooks');

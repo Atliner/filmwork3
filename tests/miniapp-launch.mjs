@@ -269,7 +269,7 @@ function fakeKV() {
   const withCtx = await mod.default.fetch(new Request('https://test/api/item/i_viewfail1'), env, { waitUntil: p => waited.push(p) });
   assert.equal(withCtx.status, 200);
   assert.equal((await withCtx.json()).item.id, 'i_viewfail1');
-  assert.equal(waited.length, 1, 'view counter write is deferred via waitUntil');
+  assert.ok(waited.length >= 1, 'view counter write is deferred via waitUntil (شمارندهٔ بازدید نباید پاسخ را معطل کند)');
   await Promise.all(waited);
 
   // No waitUntil available: the write is awaited but a storage failure still cannot 500 the page.

@@ -6691,6 +6691,28 @@ async function adminUpsertItem(store, set, body, existing) {
   return { item: item };
 }
 
+/* مهاجرت خودکار آدرس سایت (فیلتر شدن دامنه / تغییر نام ورکر یا ساب‌دامنهٔ کلودفلر):
+   اگر سایت از مبدأ جدیدی باز شود، آدرس عمومی و وبهوک ربات‌ها خودکار دنبالِ آدرس تازه می‌روند
+   و آدرس قبلی دیگر هیچ اثری روی لینک‌ها/اعلان‌ها/وبهوک ندارد. اگر SITE_PUBLIC_ORIGIN ست
+   باشد، آدرس قفل است و تغییر نمی‌کند. */
+async function ensureCurrentOrigin(store, set, request, ctx) {
+  try {
+    const reqOrigin = originFromRequest(request);
+    if (!reqOrigin) return false;
+    const env = store.env || {};
+    const pinned = String(env.SITE_PUBLIC_ORIGIN || '').trim().replace(/\/+$/, '');
+    if (pinned) return false;
+    const cur = String(set.publicUrl || '').replace(/\/+$/, '');
+    if (cur && new URL(reqOrigin).host === new URL(cur).host) return false;
+    set.publicUrl = reqOrigin;
+    const job = maybeSetWebhook(store, set, reqOrigin)
+      .then(function () { return writeSettings(store, set); })
+      .catch(function () { });
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(job); else await job;
+    return true;
+  } catch (e) { return false; }
+}
+
 async function maybeSetWebhook(store, set, origin) {
   if (!set.botToken) return;
   if (origin) set.publicUrl = origin;
@@ -9111,6 +9133,8 @@ export default {
         return new Response(faviconSvg(), { headers: { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=86400' } });
       }
       if (url.pathname === '/img' && request.method === 'GET') return await imgResponse(request, url, store);
+      /* مهاجرت خودکار آدرس: با اولین درخواست از آدرس جدید، publicUrl و وبهوک ربات‌ها دنبال می‌روند */
+      try { await ensureCurrentOrigin(store, await getSettings(store), request, ctx); } catch (eM) { }
       /* لبهٔ داخلی پخش آنلاین (وقتی Worker لبهٔ جدایی تعریف نشده) */
       if (url.pathname.indexOf('/sv/') === 0) {
         const sset = await getSettings(store);

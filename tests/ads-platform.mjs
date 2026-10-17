@@ -382,4 +382,14 @@ async function realFetchSign(url, secret, body, json) {
   const r = await ads.fetch(new Request(url, { method, body: body || undefined, headers: { 'content-type': 'application/json', 'x-net-ts': ts, 'x-net-nonce': nonce, 'x-net-sign': sign } }), env, {});
   return json ? r.json() : r.status;
 }
+
+/* امضای اتصال سایت ← پلتفرم به میزبان وابسته نیست؛ جابه‌جایی دامنه نباید اتصال را بشکند */
+assert.equal(await realFetchSign(ORIGIN + '/api/net/summary', NET, null, false), 200);
+assert.equal(await realFetchSign('https://ads-moved.example.org/api/net/summary', NET, null, false), 200, 'همان امضا با میزبان جدید معتبر می‌ماند');
+/* مهاجرت خودکار آدرس پلتفرم: اولین درخواست از آدرس جدید، publicUrl را دنبال می‌کند */
+{
+  await ads.fetch(new Request('https://ads-moved.example.org/api/config'), env, {});
+  const sv = JSON.parse(env.ADS_DB.sql.prepare("SELECT v FROM adv_kv WHERE k='settings'").get().v);
+  assert.equal(sv.publicUrl, 'https://ads-moved.example.org', 'آدرس ذخیره‌شده دنبال مبدأ جدید می‌رود');
+}
 console.log('PASS: ads platform — first-admin signup, auth/blocking, smart card-to-card + Stars (idempotent), upload sniffing + Range, campaign rules, budget hold/refund, admin review gate, signed inventory, unique event batches, CPV×bid billing & budget cap, personal + market stats; end-to-end with the site (targeting, frequency cap, pre-roll, download gate, clicks, bot link button + redirect, subscribers ad-free).');
