@@ -10169,21 +10169,28 @@ function MVX_PLAYER_MODULE(W) {
         if (!P) return;
         if (data && typeof data === 'object' && 'is_fullscreen' in data) {
           var v = data.is_fullscreen;
+          /* فقط وضعیت واقعی را ثبت می‌کنیم؛ جهتِ دکمه (fsWanted) فقط با فشار کاربر
+             عوض می‌شود — رویدادها نباید جهت را بچرخانند (وگرنه فشار دومِ دکمه
+             به‌جای خروج، دوباره «ورود» می‌زد و مینی‌اپ تمام‌صفحه می‌ماند). */
           P.tgFsOn = !!v && v !== 'false' && v !== '0';
-          P.fsWanted = P.tgFsOn;
         }
         syncFs();
       }
       function onFsFail() {
-        /* فقط وضعیت را اصلاح می‌کنیم؛ ارور ندهیم چون شکستِ تکراریِ خروج/ورود طبیعی است */
+        /* «شکستِ درخواست» (مثلاً تکرارِ بی‌خطرِ رویداد خام هنگام ورود) نباید
+           وضعیت یا جهت را عوض کند؛ فقط آیکن با وضعیت فعلی همگام می‌شود. */
         if (!P) return;
-        P.tgFsOn = false;
-        P.fsWanted = false;
         syncFs();
       }
-      try { tg.onEvent('fullscreenChanged', onFs); tg.onEvent('fullscreenFailed', onFsFail); } catch (e) { }
+      try {
+        tg.onEvent('fullscreenChanged', onFs); tg.onEvent('fullscreenFailed', onFsFail);
+        tg.onEvent('fullscreen_changed', onFs); tg.onEvent('fullscreen_failed', onFsFail);
+      } catch (e) { }
       P.offFsEvt = function () {
-        try { tg.offEvent('fullscreenChanged', onFs); tg.offEvent('fullscreenFailed', onFsFail); } catch (e) { }
+        try {
+          tg.offEvent('fullscreenChanged', onFs); tg.offEvent('fullscreenFailed', onFsFail);
+          tg.offEvent('fullscreen_changed', onFs); tg.offEvent('fullscreen_failed', onFsFail);
+        } catch (e) { }
       };
     })();
     if (P.host.tgBack) { try { P.host.tgBack(true, function () { close(); }); } catch (e) { } }

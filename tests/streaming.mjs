@@ -393,6 +393,48 @@ console.log('PASS: content-bot streams action (server-side revalidation, role ch
   /* تمام‌صفحه در مینی‌اپ: اولویت با WebApp.requestFullscreen، همگامی آیکن با وضعیت واقعی، پیام برای کلاینت بدون پشتیبانی */
   for (const k of ['tgInApp', 'fsWanted', 'requestFullscreen', 'web_app_request_fullscreen', 'web_app_exit_fullscreen', 'web_app_expand', 'fullscreenChanged', 'fullscreenFailed', 'تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود']) assert.ok(a.code.includes(k), k);
   for (const k of ['web_app_request_fullscreen', 'web_app_exit_fullscreen', 'fullscreen_changed', 'receiveEvent', 'TelegramWebviewProxy']) assert.ok(W.APP_HTML.includes(k), k);
+  /* قفل رفتاری دکمهٔ تمام‌صفحه در مینی‌اپ (باگ موبایل): بعد از «شکستِ تکرارِ بی‌خطرِ درخواست»،
+     فشار دوم باید «خروج» باشد — نه ورود دوباره. (تابع‌های واقعی از کد پلیر استخراج و اجرا می‌شوند.) */
+  {
+    const code = a.code;
+    function grabFn(name) {
+      const start = code.indexOf('function ' + name + '(');
+      assert.ok(start >= 0, name);
+      const lineStart = code.lastIndexOf('\n', start) + 1;
+      const indent = code.slice(lineStart, start);
+      const end = code.indexOf('\n' + indent + '}', start);
+      return code.slice(start, end + 1 + indent.length + 1);
+    }
+    const body = [grabFn('toggleFs'), grabFn('tgFs'), grabFn('onFs'), grabFn('onFsFail'),
+      'return { toggleFs: toggleFs, tgFs: tgFs, onFs: onFs, onFsFail: onFsFail };'].join('\n');
+    const evs = [];
+    const P = { root: {}, fsWanted: false, tgFsOn: false };
+    const D = {};
+    const WW = { __mvxPostEvent: (t) => { evs.push(t); return 'native'; }, screen: {} };
+    const tg = { requestFullscreen: () => { evs.push('sdk:request'); }, exitFullscreen: () => { evs.push('sdk:exit'); }, expand: () => { evs.push('sdk:expand'); } };
+    const fn = new Function('P', 'D', 'W', 'tgApp', 'tgInApp', 'isFs', 'syncFs', 'toast', 'q', 'I', body);
+    const api = fn(P, D, WW, () => tg, () => true, () => !!P.tgFsOn || !!D.fullscreenElement, () => {}, () => {}, null, { fs: '', fsx: '' });
+    api.toggleFs();
+    assert.ok(evs.includes('web_app_request_fullscreen'), 'فشار اول = درخواست تمام‌صفحه');
+    assert.equal(P.fsWanted, true);
+    api.onFs({ is_fullscreen: true });
+    assert.equal(P.tgFsOn, true);
+    api.onFsFail(); /* شکستِ تکرارِ بی‌خطرِ رویداد خام هنگام ورود */
+    assert.equal(P.fsWanted, true, 'جهتِ دکمه نباید با رویدادها عوض شود');
+    assert.equal(P.tgFsOn, true, 'وضعیتِ واقعی نباید با «شکستِ تکرار» پاک شود');
+    evs.length = 0;
+    api.toggleFs();
+    assert.ok(evs.includes('web_app_exit_fullscreen'), 'فشار دوم = خروج از تمام‌صفحه');
+    assert.ok(evs.includes('web_app_expand') || evs.includes('sdk:expand'), 'بازگشت مینی‌اپ به حالت فول‌سایز');
+    assert.ok(!evs.includes('web_app_request_fullscreen'), 'فشار دوم نباید دوباره ورود بزند');
+    assert.equal(P.fsWanted, false);
+    api.onFs({ is_fullscreen: false });
+    assert.equal(P.tgFsOn, false);
+    evs.length = 0;
+    api.toggleFs();
+    assert.ok(evs.includes('web_app_request_fullscreen'), 'چرخهٔ بعدی دوباره سالم وارد می‌شود');
+  }
+
   /* تبلیغ پیش از دانلود: بدون دکمه/متن اضافه زیر تبلیغ؛ ثانیه‌شمار فقط بعد از لود کامل رسانه */
   assert.ok(!W.APP_HTML.includes('id="adx-go"'), 'دکمهٔ «ادامه» زیر تبلیغ پیش از دانلود حذف شده');
   assert.ok(!W.APP_HTML.includes('adx-cta'), 'متن cta روی تبلیغ پیش از دانلود حذف شده');
