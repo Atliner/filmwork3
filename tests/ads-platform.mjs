@@ -50,6 +50,9 @@ globalThis.fetch = async (url, init = {}) => {
   url = String(url);
   if (url.startsWith('https://api.telegram.org/')) {
     const method = url.split('/').at(-1), body = JSON.parse(init.body || '{}');
+    /* تأخیر عمدی: اگر ارسال‌ها await نشوند (در Cloudflare قبل از پاسخ کشته می‌شوند)،
+       پیام هنگام برگشتن پاسخ هنوز در tg نیست و این قفل تست خطا می‌دهد */
+    if (method === 'sendMessage') await new Promise(r => setTimeout(r, 25));
     tg.push({ method, body });
     if (method === 'createInvoiceLink') return Response.json({ ok: true, result: 'https://t.me/$invoice123' });
     if (method === 'getMe') return Response.json({ ok: true, result: { id: 1, username: 'AdsBot' } });
@@ -181,7 +184,7 @@ try {
   assert.equal(submitted.body.campaign.status, 'pending');
   assert.deepEqual(submitted.body.campaign.prices, { cpm: 0, cpv: 100, cpc: 0 }, 'تعرفه هنگام ارسال قفل شد');
   const revMsgs = tg.filter(x => x.method === 'sendMessage' && /برای بررسی/.test(x.body.text || ''));
-  assert.ok(revMsgs.length >= 1, 'اعلان کمپین تازه در صف بررسی برای مدیر برود');
+  assert.ok(revMsgs.length >= 1, 'اعلان کمپین تازه در صف بررسی برای مدیر برود (پیش از برگشتن پاسخ ارسال شده باشد)');
   assert.equal(String(revMsgs.at(-1).body.chat_id), '111', 'اعلان صف بررسی به مدیر (اولین ثبت‌نام‌شده) می‌رود');
   assert.ok(!tg.some(x => x.method === 'sendMessage' && String(x.body.chat_id) === '222' && /برای بررسی/.test(x.body.text || '')), 'تبلیغ‌دهنده اعلان صف بررسی نمی‌گیرد');
   me = (await call('/api/me')).body.user;

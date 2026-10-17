@@ -586,7 +586,7 @@ async function apiCampaignSave(request, env, set, user, id) {
   }
   await run(env, 'UPDATE adv_campaigns SET name = ?, format = ?, slots = ?, creative = ?, target = ?, bid = ?, budget = ?, daily_cap = ?, freq_cap = ?, start_at = ?, end_at = ?, status = ?, updated_at = ?, submitted_at = CASE WHEN ? = \'pending\' AND status != \'pending\' THEN ? ELSE submitted_at END, reason = CASE WHEN ? = \'pending\' THEN NULL ELSE reason END WHERE id = ?',
     c.name, c.format, JSON.stringify(c.slots), JSON.stringify(c.creative), JSON.stringify(c.target), c.bid, c.budget, c.daily_cap, c.freq_cap, c.start_at, c.end_at, status, now, status, now, status, prev.id);
-  if (status === 'pending' && prev.status !== 'pending') notifyAdminsReview(env, set, prev.id, c.name, user).catch(function () { });
+  if (status === 'pending' && prev.status !== 'pending') await notifyAdminsReview(env, set, prev.id, c.name, user).catch(function () { });
   INV_CACHE = null;
   if (b.submit && (status === 'draft')) return submitCampaign(env, set, user, prev.id);
   return json({ ok: true, id: prev.id, recheck: status === 'pending' && changedCreative && held, campaign: campaignPublic(await one(env, 'SELECT * FROM adv_campaigns WHERE id = ?', prev.id), originOf(set)) });
@@ -605,7 +605,7 @@ async function submitCampaign(env, set, user, id) {
   if (!d.ok) return err('موجودی کیف پول برای بودجهٔ این کمپین کافی نیست؛ ابتدا کیف پول را شارژ کنید.', 402, { needWallet: true, need: need });
   const now = Date.now();
   await run(env, "UPDATE adv_campaigns SET status = 'pending', prices = ?, submitted_at = ?, updated_at = ?, reason = NULL WHERE id = ?", JSON.stringify(lockedPrices(set, c.format)), now, now, id);
-  notifyAdminsReview(env, set, id, c.name, user).catch(function () { });
+  await notifyAdminsReview(env, set, id, c.name, user).catch(function () { });
   return json({ ok: true, id: id, submitted: true, campaign: campaignPublic(await one(env, 'SELECT * FROM adv_campaigns WHERE id = ?', id), originOf(set)) });
 }
 async function refundRemaining(env, c, note) {
@@ -674,14 +674,14 @@ async function apiReview(request, env, set, admin, id) {
   if (b.approve) {
     await run(env, "UPDATE adv_campaigns SET status = 'active', approved = 1, reason = NULL, reviewed_at = ?, reviewed_by = ?, updated_at = ? WHERE id = ?", now, admin.email, now, id);
     INV_CACHE = null;
-    notifyUser(env, c.uid, '✅ کمپین «' + c.name + '» تأیید شد و نمایش آن شروع شد.').catch(function () { });
+    await notifyUser(env, c.uid, '✅ کمپین «' + c.name + '» تأیید شد و نمایش آن شروع شد.').catch(function () { });
     return json({ ok: true, status: 'active' });
   }
   const reason = String(b.reason || '').trim().slice(0, 400);
   if (reason.length < 3) return err('دلیل رد را بنویسید تا تبلیغ‌دهنده بتواند اصلاح کند');
   await run(env, "UPDATE adv_campaigns SET status = 'rejected', reason = ?, reviewed_at = ?, reviewed_by = ?, updated_at = ? WHERE id = ?", reason, now, admin.email, now, id);
   const left = await refundRemaining(env, Object.assign({}, c, { updated_at: now }), 'بازگشت بودجهٔ کمپین ردشده');
-  notifyUser(env, c.uid, '❌ کمپین «' + c.name + '» تأیید نشد.\nدلیل: ' + reason + (left > 0 ? '\n' + left.toLocaleString('fa-IR') + ' تومان به کیف پول برگشت.' : '')).catch(function () { });
+  await notifyUser(env, c.uid, '❌ کمپین «' + c.name + '» تأیید نشد.\nدلیل: ' + reason + (left > 0 ? '\n' + left.toLocaleString('fa-IR') + ' تومان به کیف پول برگشت.' : '')).catch(function () { });
   return json({ ok: true, status: 'rejected', refunded: left });
 }
 
@@ -719,7 +719,7 @@ async function buildInventory(env, set) {
   const campaigns = [];
   for (const c of rows) {
     if (c.start_at && c.start_at > now) continue;
-    if (c.end_at && c.end_at <= now) { endCampaign(env, c, 'پایان زمان کمپین').catch(function () { }); continue; }
+    if (c.end_at && c.end_at <= now) { await endCampaign(env, c, 'پایان زمان کمپین').catch(function () { }); continue; }
     if (Number(c.spent) >= Number(c.budget) - 1) continue;
     if (c.daily_cap && (spentToday[c.id] || 0) >= c.daily_cap) continue;
     const cr = safeParse(c.creative, {});
@@ -805,7 +805,7 @@ async function netEvents(env, set, body) {
   if (stmts.length) await db(env).batch(stmts);
   for (const cid of ended) {
     await run(env, "UPDATE adv_campaigns SET status = 'completed', updated_at = ? WHERE id = ? AND status = 'active'", Date.now(), cid);
-    notifyUser(env, camps[cid].uid, '🏁 بودجهٔ کمپین «' + camps[cid].name + '» کامل مصرف شد. برای ادامه، کمپین تازه بسازید.').catch(function () { });
+    await notifyUser(env, camps[cid].uid, '🏁 بودجهٔ کمپین «' + camps[cid].name + '» کامل مصرف شد. برای ادامه، کمپین تازه بسازید.').catch(function () { });
     INV_CACHE = null;
   }
   if (Math.random() < 0.02) await run(env, 'DELETE FROM adv_batches WHERE at < ?', Date.now() - 3 * DAY);
@@ -895,7 +895,8 @@ async function adminChats(env, set) {
 }
 async function notifyAdmins(env, set, text, markup) {
   if (!botToken(env)) return;
-  for (const chat of await adminChats(env, set)) await tgApi(env, 'sendMessage', { chat_id: chat, text: text, reply_markup: markup || undefined, disable_web_page_preview: true }, 4000);
+  const chats = await adminChats(env, set);
+  await Promise.all(chats.map(function (chat) { return tgApi(env, 'sendMessage', { chat_id: chat, text: text, reply_markup: markup || undefined, disable_web_page_preview: true }, 4000); }));
 }
 async function notifyAdminsReview(env, set, cid, name, user) {
   await notifyAdmins(env, set, '🆕 کمپین برای بررسی: «' + name + '»\nتبلیغ‌دهنده: ' + (user.name || '') + ' (' + (user.phone || user.email || '') + ')\nپنل مدیریت ← صف بررسی' + (originOf(set) ? '\n' + originOf(set) + '/#/admin/review' : ''));
@@ -958,7 +959,7 @@ async function apiK2kAction(request, env, set, user, id, action) {
     d.transferAt = new Date(now + 12600000).toISOString().slice(0, 16).replace('T', ' ');
     await run(env, "UPDATE adv_invoices SET status = 'submitted', data = ?, updated_at = ? WHERE id = ?", JSON.stringify(d), now, id);
     inv.status = 'submitted'; inv.data = JSON.stringify(d);
-    notifyAdmins(env, set, '💳 کارت‌به‌کارت تبلیغات — اعلام واریز\nتبلیغ‌دهنده: ' + user.name + ' (' + user.email + ')\nمبلغ دقیق (یکتا): ' + (inv.amount + inv.extra).toLocaleString('fa-IR') + ' تومان\nزمان اعلام: ' + d.transferAt + '\nفاکتور: ' + id + '\nفقط با مبلغ یکتا تطبیق دهید.',
+    await notifyAdmins(env, set, '💳 کارت‌به‌کارت تبلیغات — اعلام واریز\nتبلیغ‌دهنده: ' + user.name + ' (' + (user.phone || user.email) + ')\nمبلغ دقیق (یکتا): ' + (inv.amount + inv.extra).toLocaleString('fa-IR') + ' تومان\nزمان اعلام: ' + d.transferAt + '\nفاکتور: ' + id + '\nفقط با مبلغ یکتا تطبیق دهید.',
       { inline_keyboard: [[{ text: '✅ تأیید', callback_data: 'k2k:ok:' + id }, { text: '❌ رد', callback_data: 'k2k:no:' + id }]] }).catch(function () { });
   }
   return json({ ok: true, invoice: invPublic(inv, set) });
@@ -974,12 +975,12 @@ async function decideK2k(env, set, id, approve, by, reason) {
     const r = await run(env, "UPDATE adv_invoices SET status = 'paid', data = ?, updated_at = ? WHERE id = ? AND status IN ('submitted','pending')", JSON.stringify(d), now, id);
     if (!r.meta || !r.meta.changes) return { error: 'وضعیت فاکتور تغییر کرده است' };
     await credit(env, inv.uid, inv.amount + inv.extra, 'k2k', 'کارت‌به‌کارت ' + (inv.amount + inv.extra).toLocaleString('fa-IR') + ' تومان', 'k2k:' + id);
-    notifyUser(env, inv.uid, '✅ واریز کارت‌به‌کارت تأیید شد و ' + (inv.amount + inv.extra).toLocaleString('fa-IR') + ' تومان به کیف پول تبلیغات اضافه شد.').catch(function () { });
+    await notifyUser(env, inv.uid, '✅ واریز کارت‌به‌کارت تأیید شد و ' + (inv.amount + inv.extra).toLocaleString('fa-IR') + ' تومان به کیف پول تبلیغات اضافه شد.').catch(function () { });
     return { ok: true, status: 'paid' };
   }
   d.reason = String(reason || 'مبلغ واریزی با فاکتور مطابقت نداشت').slice(0, 200);
   await run(env, "UPDATE adv_invoices SET status = 'rejected', data = ?, updated_at = ? WHERE id = ?", JSON.stringify(d), now, id);
-  notifyUser(env, inv.uid, '❌ واریز کارت‌به‌کارت تأیید نشد: ' + d.reason).catch(function () { });
+  await notifyUser(env, inv.uid, '❌ واریز کارت‌به‌کارت تأیید نشد: ' + d.reason).catch(function () { });
   return { ok: true, status: 'rejected' };
 }
 async function tgWebhookSecret(env, set) { return (await hmacHexStr(appSecret(env, set), 'tg-webhook')).slice(0, 48); }
