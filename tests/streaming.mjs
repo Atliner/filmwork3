@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 
 const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 const W = await import('data:text/javascript;base64,' + Buffer.from(source + `
-export { parseStreamLines, applyStreamEntries, streamLinesOf, streamsOf, publicStreamMap, publicVariantMap, pickStream, streamOptionsOf, streamTokenMake, streamTokenOpen, streamIpPrefix, setVariantFilePl, upsertVariantFile,
+export { parseStreamLines, applyStreamEntries, streamLinesOf, streamBagLinesOf, streamPlayUrl, streamsOf, publicStreamMap, publicVariantMap, pickStream, streamOptionsOf, streamTokenMake, streamTokenOpen, streamIpPrefix, setVariantFilePl, upsertVariantFile,
   streamBindHash, streamEdgeHandle, decodeSubtitleBytes, apiStreamOpen, apiStreamSrc, apiItem, Store, saveUser, saveItemRecord, createTgUser, makeToken,
   bustSettings, getSettings, contentBotAction, buildPlayerJs, handleAssets, APP_HTML, MVX_PLAYER_MODULE, handleAdmin, bustItem, decorateItemStreams, bustAds };`).toString('base64'));
 const edgeMod = await import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(new URL('../scripts/stream-edge-worker.js', import.meta.url), 'utf8')).toString('base64'));
@@ -155,6 +155,8 @@ console.log('PASS: per-version online-play link (title-less) merges into streams
   assert.ok(!saved.variants.dub['480'].files[0].pl, 'خالی‌کردن فیلد = حذف لینک پخش');
   assert.ok(W.pickStream(saved, { track: 'dub' }).error, 'بدون لینک پخش، پخشی در کار نیست');
   r = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', fileId: f.id, url: 'https://t.me/c/1234567890/89', pl: 'ftp://x' }), admin);
+  const rel = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', fileId: f.id, url: 'https://t.me/c/1234567890/89', pl: './The.Pitt.S02E05.480p.WEB-DL.Doble.mp4' }), admin);
+  assert.equal(rel.status, 400, 'نام فایل/مسیر نسبی در لینک پخش رد می‌شود');
   assert.equal(r.status, 400, 'لینک پخش نامعتبر رد شود');
 }
 console.log('PASS: per-version play link saves through the same variant endpoint as title/file-link.');
@@ -207,6 +209,23 @@ console.log('PASS: per-version play link saves through the same variant endpoint
   assert.equal(hmap.sub['720'].hand, 1, 'جریانِ دستی پرچم hand می‌گیرد');
   const pmap = W.publicStreamMap(saved2, saved2);
   assert.ok(!pmap.sub['720'].hand, 'لینکِ پخشِ فایل‌ها hand نیست');
+}
+/* ── ۲.ه. لینک پخش نامعتبر (نام فایل/مسیر نسبی) نه جریان می‌سازد، نه دکمه ── */
+{
+  assert.equal(W.streamPlayUrl('https://cdn.example.com/a.mp4'), 'https://cdn.example.com/a.mp4');
+  assert.equal(W.streamPlayUrl('./The.Pitt.S02E05.480p.WEB-DL.Doble.mp4'), '', 'مسیر نسبی پذیرفته نمی‌شود');
+  assert.equal(W.streamPlayUrl('The.Pitt.S02E05.480p.mp4'), '');
+  assert.equal(W.streamPlayUrl('ftp://x/y.mp4'), '');
+  const bad = { id: 'i_badpl', type: 'movie', title: 'bad', access: 'free',
+    variants: { sub: { '720': { files: [
+      { id: 'f_bad', title: 'v1', source: { chatId: '-1', msgId: '9' }, pl: './The.Pitt.S02E05.480p.WEB-DL.Doble.mp4' },
+      { id: 'f_ok', title: 'v2', source: { chatId: '-1', msgId: '10' }, pl: 'https://cdn.example.com/ok.mp4' }
+    ] } } }, episodes: [] };
+  const stB = W.streamsOf(bad);
+  assert.equal(stB.length, 1, 'فایل با لینک نسبی جریان پخش نمی‌سازد');
+  assert.equal(stB[0].id, 'vf_f_ok');
+  const pmB = W.publicVariantMap(bad, bad);
+  assert.deepEqual(pmB.sub['720'].files.map(f => !!f.pl), [false, true], 'پرچم پخش فقط برای لینک معتبر');
 }
 console.log('PASS: play link binds to the exact version (no first-file clobber); hand streams flagged for the item page.');
 
@@ -416,6 +435,15 @@ console.log('PASS: item API exposes only URL-free stream availability to users; 
   assert.equal((await store.get('it:' + movie.id)).streams.length, 2, 'با خطا هیچ تغییری ذخیره نمی‌شود');
   const ok = await adm('item/' + movie.id + '/streams', { text: '480 زیرنویس https://cdn.example.com/m-480.mp4 | سبک' });
   assert.equal(ok.status, 200); assert.equal(ok.body.item.streams.length, 1); assert.equal(ok.body.lines, '480p زیرنویس https://cdn.example.com/m-480.mp4 | سبک');
+  /* echo only returns the box's own list; per-version play links (f.pl) are neither echoed nor clobbered */
+  const vadd = await adm('item/' + movie.id + '/variant', { track: 'sub', quality: '720', title: 'v', url: 'https://t.me/c/1234567890/99', pl: 'https://cdn.example.com/ver-play.mp4', addFile: true });
+  assert.equal(vadd.status, 200, JSON.stringify(vadd.body));
+  const ok2 = await adm('item/' + movie.id + '/streams', { text: '480 زیرنویس https://cdn.example.com/m-480.mp4 | سبک' });
+  assert.equal(ok2.status, 200);
+  assert.ok(!String(ok2.body.lines).includes('ver-play.mp4'), 'play link of a version is not echoed into the bulk box');
+  assert.ok(String(ok2.body.lines).includes('m-480.mp4'));
+  const kept = (await store.get('it:' + movie.id)).variants.sub['720'].files.some(f => f.pl === 'https://cdn.example.com/ver-play.mp4');
+  assert.equal(kept, true, 'saving the bulk box never touches per-version play links');
   assert.equal((await store.get('idx')).find(x => x.id === movie.id).hasStream, true);
   const save = await adm('settings', { streamTokenMin: 5 });
   assert.equal(save.status, 400, 'اعتبار توکن کمتر از ۱۰ دقیقه رد شود');

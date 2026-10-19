@@ -1878,7 +1878,7 @@ function publicVariantMap(bag, fallbackQuality) {
           sizeBytes: cell.sizeBytes || (files[0] && files[0].sizeBytes) || null,
           premium: !!cell.premium,
           files: files.map(function (f) {
-            return { id: f.id || '', title: f.title || '', sizeBytes: f.sizeBytes || null, has: true, pl: !!(f.pl) };
+            return { id: f.id || '', title: f.title || '', sizeBytes: f.sizeBytes || null, has: true, pl: !!streamPlayUrl(f.pl) };
           }),
         };
       }
@@ -2185,6 +2185,11 @@ function streamSafeUrl(raw) {
   if (!/^https?:\/\//i.test(s) || !isPublicHttpUrl(s)) return '';
   try { return new URL(s).href; } catch (e) { return ''; }
 }
+/* لینک پخش (f.pl) فقط با http(s) کامل پذیرفته می‌شود؛ نام فایل یا مسیر نسبی
+   (مثل ./file.mp4) نیست — پراکسیِ لبه باید بتواند فایل رسانهٔ بیرونی را بگیرد. */
+function streamPlayUrl(raw) {
+  return streamSafeUrl(raw);
+}
 function streamLabelClean(v) {
   return String(v || '').replace(/[\r\n\t]+/g, ' ').replace(/[<>]/g, '').trim().slice(0, 64);
 }
@@ -2377,6 +2382,21 @@ function streamLinesOf(item) {
   });
   return lines.join('\n');
 }
+/* فقط جریان‌های ثبت‌شدهٔ خود اثر (ربات/فرم/فیلد گروهی) — برخلاف streamLinesOf،
+   لینک پخشِ نسخه‌ها (f.pl) نمی‌آید تا «جایگزینی کل فهرستِ» فیلد گروهی، لینک‌های
+   نسخه‌ها را بازنویسی یا بازتاب ندهد (بازخوانی فیلد باید همان چیزی را نشان دهد
+   که ذخیره می‌کند). */
+function streamBagLinesOf(item) {
+  const lines = [];
+  streamBagsOf(item).forEach(function (x) {
+    const pre = item.type === 'series' ? ('S' + String(x.season).padStart(2, '0') + 'E' + String(x.episode).padStart(2, '0') + ' ') : '';
+    (x.bag.streams || []).forEach(function (s) {
+      lines.push(pre + displayQuality(s.quality) + ' ' + (s.track === 'dub' ? 'دوبله' : 'زیرنویس') + ' ' + s.url + (s.label ? ' | ' + s.label : ''));
+    });
+    (x.bag.streamSubs || []).forEach(function (t) { lines.push(pre + 'زیرنویس ' + t.url + (t.label ? ' | ' + t.label : '')); });
+  });
+  return lines.join('\n');
+}
 function streamPremium(item, bag, track, q) {
   if (item && item.access === 'premium') return true;
   if (bag && bag !== item && bag.premium) return true;
@@ -2402,7 +2422,8 @@ function streamsOf(bag) {
     Object.keys(v[t] || {}).forEach(function (q) {
       variantFilesOf(v[t][q] || {}).forEach(function (f) {
         if (!f || !f.pl) return;
-        const url = String(f.pl).trim();
+        const url = streamPlayUrl(f.pl);
+        if (!url) return;
         if (!/^https?:\/\//i.test(url)) return;
         push({ id: 'vf_' + (f.id || (t + '_' + q)), track: t, quality: q, url: url, fmt: streamFmtOf(url), label: String(f.title || '').trim(), at: 0 });
       });
@@ -7660,8 +7681,11 @@ async function handleAdmin(store, url, request, adminUser) {
       }
     }
     if (Object.prototype.hasOwnProperty.call(body, 'pl')) {
-      const plVal = String(body.pl || '').trim().slice(0, 500);
-      if (plVal && !/^https?:\/\//i.test(plVal)) return json({ error: 'لینک پخش آنلاین معتبر نیست (باید با http:// یا https:// شروع شود)' }, 400);
+      let plVal = String(body.pl || '').trim().slice(0, 500);
+      if (plVal) {
+        plVal = streamPlayUrl(plVal);
+        if (!plVal) return json({ error: 'لینک پخش آنلاین معتبر نیست؛ باید لینک کامل فایل رسانه با http:// یا https:// باشد (مثلاً https://cdn.example.com/file.mp4) — نام فایل یا مسیر نسبی کافی نیست' }, 400);
+      }
       setVariantFilePl(bag, track, qk, plTargetId, plVal);
     }
     if (body.premium !== undefined) {
@@ -7697,7 +7721,7 @@ async function handleAdmin(store, url, request, adminUser) {
     await saveItemRecord(store, copy);
     bustItem(copy.id);
     await idxUpsert(store, copy);
-    return json({ ok: true, item: copy, result: res, warnings: parsed.warnings.slice(0, 20), lines: streamLinesOf(copy) });
+    return json({ ok: true, item: copy, result: res, warnings: parsed.warnings.slice(0, 20), lines: streamBagLinesOf(copy) });
   }
   mm = p.match(/^item\/(i_[a-z0-9]+)\/episodes\/order$/);
   if (mm && m === 'POST') {
@@ -11822,6 +11846,13 @@ function cellFilesOf (cell) {
   return [];
 }
 function qualityButtonsHtml (variants, track, bagLock, stm) {
+  /* play link must be a full http(s) URL; a bare file name/relative path gets no play button */
+  function plOk (f) {
+    if (!f || !f.pl) return false;
+    if (f.pl === true) return true;
+    var s = String(f.pl).toLowerCase();
+    return s.indexOf('http://') === 0 || s.indexOf('https://') === 0;
+  }
   var v = (variants && variants[track]) || {};
   var st = (stm && streamReady() && stm[track]) || {};
   var price = currentDlPrice();
@@ -11855,7 +11886,7 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
     var prem = !!(bagLock || (cell && cell.premium) || (st[k] && st[k].premium));
     var lab = (cell && cell.label) || (st[k] && st[k].label) || Q_LABEL[k] || k;
     var anyPl = false;
-    for (var pi = 0; pi < files.length; pi++) if (files[pi] && files[pi].pl) { anyPl = true; break; }
+    for (var pi = 0; pi < files.length; pi++) if (plOk(files[pi])) { anyPl = true; break; }
     /* لینک پخشِ ثبت‌شده از ربات سوم/فرم (جریان «دستی») مالِ کل کیفیت است، نه یک نسخه.
        اگر هیچ نسخه‌ای لینک پخشِ خودش را ندارد اما کیفیت لینک پخشِ مستقل دارد،
        دکمهٔ پخش همان کیفیت روی هر نسخه می‌ماند (مثل قبل از دکمه‌های جداگانهٔ هر نسخه). */
@@ -11864,7 +11895,7 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
       var meta = [];
       if (f && f.sizeBytes) meta.push(esc(fmtBytes(f.sizeBytes)));
       else if (!f && cell && cell.sizeBytes) meta.push(esc(fmtBytes(cell.sizeBytes)));
-      if (f && f.pl) meta.push('<span class="st">▶ پخش آنلاین</span>');
+      if (plOk(f)) meta.push('<span class="st">▶ پخش آنلاین</span>');
       else if (f && handPlay) meta.push('<span class="st">▶ پخش آنلاین</span>');
       else if (!f && hasSt) meta.push('<span class="st">▶ پخش آنلاین</span>');
       if (prem && !sub) meta.push('⭐ ویژهٔ مشترکین');
@@ -11874,7 +11905,7 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
     function acts (f) {
       return '<div class="q-act">' +
         (f ? '<button type="button" class="btn btn-primary q-dl" data-q="' + esc(k) + '" data-fid="' + esc(f.id || '') + '">📥 دانلود</button>' : '') +
-        (f && f.pl ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '" data-fid="' + esc(f.id || '') + '">▶ پخش آنلاین</button>' : '') +
+        (plOk(f) ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '" data-fid="' + esc(f.id || '') + '">▶ پخش آنلاین</button>' : '') +
         ((!f && hasSt) || (f && handPlay) ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '" data-fid="">▶ پخش آنلاین</button>' : '') +
         '</div>';
     }
@@ -15371,10 +15402,10 @@ function openItemEditor (it, prefillUrl) {
       '<button class="btn btn-ghost btn-sm" id="e-ep-add">افزودن</button></div>' +
       '<div id="e-eps" style="margin-top:10px"></div>'
     ) : '') +
-    '<div class="d-sec-h" style="margin-top:18px">🎬 لینک‌های پخش آنلاین (اختیاری)</div>' +
-    '<p style="font-size:12px;color:var(--tx3);margin-bottom:8px">هر خط یک لینک: <span dir="ltr">' + (isSeries ? 'S01E05 ' : '') + '720 دوبله https://… | عنوان</span> — برای زیرنویس جدا، لینک فایل srt/vtt را با «زیرنویس» بنویسید. همین قالب در ربات مدیریت (دکمهٔ «🎬 لینک پخش آنلاین») هم کار می‌کند. با ذخیره، کل فهرست جایگزین می‌شود؛ لینک‌ها هرگز به کاربر نمایش داده نمی‌شوند.</p>' +
-    '<textarea id="e-streams" rows="6" dir="ltr" style="font-size:12px" placeholder="' + (isSeries ? 'S01E01 720 دوبله https://cdn.example.com/s01e01-720.mp4' : '1080 زیرنویس https://cdn.example.com/movie-1080.mp4') + '">' + esc(streamLinesText(it)) + '</textarea>' +
-    '<div class="adm-row" style="margin-top:6px"><button type="button" class="btn btn-ghost btn-sm" id="e-streams-save">💾 ذخیرهٔ لینک‌های پخش</button><span class="badge" id="e-streams-out" style="display:none"></span></div>' +
+    '<details style="margin-top:18px;border:1px solid var(--ln);border-radius:10px;padding:10px 12px"><summary style="cursor:pointer;font-size:13px;font-weight:600;list-style:none">🎬 ثبت گروهی لینک‌های پخش (پیشرفته)</summary>' +
+    '<p style="font-size:12px;color:var(--tx3);margin:8px 0">لینک پخش هر نسخه را در همان نسخه وارد کنید (بخش «کیفیت‌ها» ← فیلد «لینک پخش آنلاین»)؛ دکمهٔ پخش همان نسخه با همان لینک ساخته می‌شود. این فهرست فقط برای ثبت گروهیِ لینک‌های پخش (همان قالبِ ربات مدیریت، دکمهٔ «🎬 لینک پخش آنلاین») و لینک فایل‌های زیرنویسِ جدا (srt/vtt) است. با ذخیره، فقط همین فهرست جایگزین می‌شود و لینک‌های پخشِ نسخه‌ها دست نمی‌خورند. هر خط: <span dir="ltr">' + (isSeries ? 'S01E05 ' : '') + '720 دوبله https://… | عنوان</span> — لینک باید کامل و با http(s) باشد.</p>' +
+    '<textarea id="e-streams" rows="6" dir="ltr" style="font-size:12px;width:100%" placeholder="' + (isSeries ? 'S01E01 720 دوبله https://cdn.example.com/s01e01-720.mp4' : '1080 زیرنویس https://cdn.example.com/movie-1080.mp4') + '">' + esc(streamLinesText(it)) + '</textarea>' +
+    '<div class="adm-row" style="margin-top:6px"><button type="button" class="btn btn-ghost btn-sm" id="e-streams-save">💾 ذخیرهٔ لینک‌های پخش</button><span class="badge" id="e-streams-out" style="display:none"></span></div></details>' +
     '<div class="adm-row" style="justify-content:flex-end;gap:8px;margin-top:16px"><button class="btn btn-ghost" id="e-cancel">انصراف</button><button class="btn btn-primary" id="e-save">💾 ذخیره</button></div>';
   openModal('ویرایش محتوا', html, function (wrap, close) {
     var stSave = $('#e-streams-save', wrap);
@@ -15386,7 +15417,7 @@ function openItemEditor (it, prefillUrl) {
         $('#e-streams', wrap).value = r.lines || '';
         var rs = r.result || {};
         out.className = 'badge acc';
-        out.textContent = 'ذخیره شد ✓ — ' + faNum((rs.added || 0) + (rs.updated || 0)) + ' لینک' + ((r.warnings || []).length ? (' — ' + r.warnings[0].warning) : '');
+        out.textContent = 'ذخیره شد ✓ — ' + faNum((rs.added || 0) + (rs.updated || 0)) + ' لینک' + ((rs.removed || 0) ? (' (' + faNum(rs.removed) + ' حذف شد)') : '') + ((r.warnings || []).length ? (' — ' + r.warnings[0].warning) : '');
       }).catch(function (e) {
         var errs = (e.data && e.data.errors) || [];
         out.className = 'badge red';
