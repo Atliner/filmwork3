@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 
 const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 const W = await import('data:text/javascript;base64,' + Buffer.from(source + `
-export { parseStreamLines, applyStreamEntries, streamLinesOf, publicStreamMap, publicVariantMap, pickStream, streamOptionsOf, streamTokenMake, streamTokenOpen, streamIpPrefix,
+export { parseStreamLines, applyStreamEntries, streamLinesOf, streamsOf, publicStreamMap, publicVariantMap, pickStream, streamOptionsOf, streamTokenMake, streamTokenOpen, streamIpPrefix, setVariantFilePl, upsertVariantFile,
   streamBindHash, streamEdgeHandle, decodeSubtitleBytes, apiStreamOpen, apiStreamSrc, apiItem, Store, saveUser, saveItemRecord, createTgUser, makeToken,
   bustSettings, getSettings, contentBotAction, buildPlayerJs, handleAssets, APP_HTML, MVX_PLAYER_MODULE, handleAdmin, bustItem, decorateItemStreams, bustAds };`).toString('base64'));
 const edgeMod = await import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(new URL('../scripts/stream-edge-worker.js', import.meta.url), 'utf8')).toString('base64'));
@@ -159,6 +159,57 @@ console.log('PASS: per-version online-play link (title-less) merges into streams
 }
 console.log('PASS: per-version play link saves through the same variant endpoint as title/file-link.');
 
+/* ── ۲.د. لینک پخش دقیقاً روی همان نسخه می‌نشیند (نه اولین فایل سلول) + پرچمِ جریان دستی ── */
+{
+  const store2 = new W.Store(null, {});
+  W.bustSettings(store2);
+  const admin2 = await W.createTgUser(store2, { tgId: '77700010' });
+  admin2.role = 'admin'; await W.saveUser(store2, admin2);
+  const item2 = { id: 'i_plclob', type: 'movie', title: 'فیلم', access: 'free', variants: { sub: {}, dub: {} }, episodes: [] };
+  await W.saveItemRecord(store2, item2);
+  const u2 = (p) => new URL('http://localhost/api/admin' + p);
+  const post2 = (p, body) => new Request(u2(p), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  /* نسخهٔ اول با لینک پخش خودش */
+  let r2 = await W.handleAdmin(store2, u2('/item/i_plclob/variant'), post2('/item/i_plclob/variant', { track: 'sub', quality: '720', title: '720 معمولی', url: 'https://t.me/c/1234567890/21', pl: 'https://cdn.example.com/a.mp4', addFile: true }), admin2);
+  let saved2 = (await r2.json()).item;
+  const fA = saved2.variants.sub['720'].files[0];
+  assert.equal(fA.pl, 'https://cdn.example.com/a.mp4');
+  /* افزودن نسخهٔ دوم با لینک پخش خودش — لینک نسخهٔ اول نباید بازنویسی شود */
+  r2 = await W.handleAdmin(store2, u2('/item/i_plclob/variant'), post2('/item/i_plclob/variant', { track: 'sub', quality: '720', title: '720p.10bit', url: 'https://t.me/c/1234567890/22', pl: 'https://cdn.example.com/b.mp4', addFile: true }), admin2);
+  saved2 = (await r2.json()).item;
+  const fB = saved2.variants.sub['720'].files[1];
+  assert.equal(fA.pl, 'https://cdn.example.com/a.mp4', 'افزودن نسخهٔ دوم لینک پخش نسخهٔ اول را بازنویسی نکند');
+  assert.equal(fB.pl, 'https://cdn.example.com/b.mp4', 'لینک پخش نسخهٔ تازه روی همان نسخه می‌نشیند');
+  /* pl بدون شناسه روی سلول چندفایلی: هیچ نسخه‌ای نباید دست بخورد */
+  r2 = await W.handleAdmin(store2, u2('/item/i_plclob/variant'), post2('/item/i_plclob/variant', { track: 'sub', quality: '720', pl: 'https://cdn.example.com/c.mp4' }), admin2);
+  saved2 = (await r2.json()).item;
+  assert.equal(saved2.variants.sub['720'].files[0].pl, 'https://cdn.example.com/a.mp4', 'بدون شناسه، لینک نسخهٔ اول دست نمی‌خورد');
+  assert.equal(saved2.variants.sub['720'].files[1].pl, 'https://cdn.example.com/b.mp4');
+  /* هر دو نسخه در فهرست پخش حاضر و قابل انتخاب‌اند */
+  const st2 = W.streamsOf(saved2);
+  assert.equal(st2.length, 2);
+  assert.equal(st2.find(s => s.id === 'vf_' + fA.id).url, 'https://cdn.example.com/a.mp4');
+  assert.equal(st2.find(s => s.id === 'vf_' + fB.id).url, 'https://cdn.example.com/b.mp4');
+  /* سلول تک‌فایلیِ قدیمی: pl بدون شناسه همچنان روی همان تک‌فایل می‌نشیند */
+  const single = { id: 'i_plone', type: 'movie', title: 'one', access: 'free',
+    variants: { sub: { '720': { source: { chatId: '-1', msgId: '5' }, files: [{ id: 'f_x1', title: 'one', source: { chatId: '-1', msgId: '5' } }] } } }, episodes: [] };
+  W.setVariantFilePl(single, 'sub', '720', '', 'https://cdn.example.com/one.mp4');
+  assert.equal(single.variants.sub['720'].files[0].pl, 'https://cdn.example.com/one.mp4', 'تک‌فایلِ بدون شناسه: همان یکی هدف می‌گیرد');
+  /* سلول قدیمی بدون آرایهٔ files: روی خود سلول (cell.pl) */
+  const legacy = { id: 'i_plleg', type: 'movie', title: 'قدیمی', access: 'free', variants: { sub: { '720': { source: { chatId: '-1', msgId: '6' } } } }, episodes: [] };
+  W.setVariantFilePl(legacy, 'sub', '720', '', 'https://cdn.example.com/leg.mp4');
+  assert.equal(legacy.variants.sub['720'].pl, 'https://cdn.example.com/leg.mp4');
+  /* پرچم hand: جریان دستی (ربات/فرم) از لینک پخشِ فایل جداست */
+  const hb = { id: 'i_hand', type: 'movie', title: 'hand', access: 'free',
+    variants: { sub: { '720': { files: [{ id: 'f_h1', title: 'v', source: { chatId: '-1', msgId: '7' } }] } } }, episodes: [] };
+  hb.streams = [{ id: 'v_1', track: 'sub', quality: '720', url: 'https://cdn.example.com/h.mp4', fmt: 'mp4', label: 'دستی', at: 0 }];
+  const hmap = W.publicStreamMap(hb, hb);
+  assert.equal(hmap.sub['720'].hand, 1, 'جریانِ دستی پرچم hand می‌گیرد');
+  const pmap = W.publicStreamMap(saved2, saved2);
+  assert.ok(!pmap.sub['720'].hand, 'لینکِ پخشِ فایل‌ها hand نیست');
+}
+console.log('PASS: play link binds to the exact version (no first-file clobber); hand streams flagged for the item page.');
+
 
 /* ── ۳. توکن پخش و لبه (همان کد در worker.js و scripts/stream-edge-worker.js) ── */
 execFileSync(process.execPath, [new URL('../scripts/build-stream-edge.mjs', import.meta.url).pathname, '--check'], { stdio: 'pipe' });
@@ -294,6 +345,15 @@ const setSet = async patch => { const s = await store.get('set'); await store.se
   assert.equal(sw.status, 409);
   const sw2 = await call(W.apiStreamOpen, userTok, { itemId: movie.id, reason: 'switch', sid: r.body.sid, track: 'dub', quality: '1080' });
   assert.equal(sw2.status, 200); assert.equal(sw2.body.cur.quality, '1080'); assert.equal(sw2.body.sid, r.body.sid);
+  /* version ids with uppercase letters (legacy/imported data): fileId must not be mangled */
+  const upItem = { id: 'i_up1', type: 'movie', title: 'Up', access: 'free', genres: [], variants: { sub: { '720': { files: [
+    { id: 'f_AbC1', title: 'A', source: { chatId: '-1', msgId: '21' }, pl: 'https://cdn.example.com/a.mp4' },
+    { id: 'f_AbC2', title: 'B', source: { chatId: '-1', msgId: '22' }, pl: 'https://cdn.example.com/b.mp4' }
+  ] } } }, episodes: [], seasons: [], updatedAt: 1 };
+  await W.saveItemRecord(store, upItem);
+  const up = await call(W.apiStreamOpen, userTok, { itemId: 'i_up1', track: 'sub', quality: '720', fileId: 'f_AbC2' });
+  assert.equal(up.status, 200, JSON.stringify(up.body));
+  assert.equal(up.body.cur.streamId, 'vf_f_AbC2', 'uppercase-labeled file id picks the exact version');
   await setSet({ streamMaxSessions: 1 });
   const other = await call(W.apiStreamOpen, userTok, { itemId: movie.id });
   assert.notEqual(other.body.sid, r.body.sid);
@@ -412,6 +472,7 @@ console.log('PASS: content-bot streams action (server-side revalidation, role ch
   const cues = fakeWin.MvxPlayer._parseVtt('WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\n<i>سلام</i>\nدنیا\n\n00:01:00,500 --> 00:01:02,000 align:start\nخط دوم\n');
   assert.equal(cues.length, 2); assert.equal(cues[0].t, 'سلام\nدنیا'); assert.equal(cues[1].s, 60.5);
   for (const k of ['controlslist="nodownload', 'disablepictureinpicture', "addEventListener('contextmenu'", 'mvp-wm', '/stream/open', '/stream/src', "'/api/ad/evs'", 'رد کردن تبلیغ']) assert.ok(a.code.includes(k), k);
+  assert.ok((a.code.match(/code === 4/g) || []).length >= 2, 'code-4 media error gives the precise message for every fmt');
   /* تمام‌صفحه در مینی‌اپ: اولویت با WebApp.requestFullscreen، همگامی آیکن با وضعیت واقعی، پیام برای کلاینت بدون پشتیبانی */
   for (const k of ['tgInApp', 'fsWanted', 'requestFullscreen', 'web_app_request_fullscreen', 'web_app_exit_fullscreen', 'web_app_expand', 'fullscreenChanged', 'fullscreenFailed', 'تمام‌صفحه در این کلاینت پشتیبانی نمی‌شود']) assert.ok(a.code.includes(k), k);
   for (const k of ['web_app_request_fullscreen', 'web_app_exit_fullscreen', 'fullscreen_changed', 'receiveEvent', 'TelegramWebviewProxy']) assert.ok(W.APP_HTML.includes(k), k);
@@ -487,6 +548,20 @@ console.log('PASS: content-bot streams action (server-side revalidation, role ch
     assert.ok(html.indexOf('نسخهٔ بلند بسیار طولانی برای تست تک‌خطی') < html.indexOf('📥 دانلود'), 'عنوان بالای دکمه‌هاست');
     assert.ok(html.includes('data-fid="f_2"'), 'دانلودِ هر نسخه، همان نسخه است');
     assert.ok(/q-play[^>]*data-fid="f_1"|data-fid="f_1"[^>]*q-play/.test(html) || (html.split('data-fid="f_1"').length - 1) >= 2, 'دکمهٔ پخش به نسخهٔ دارای لینک گره خورده');
+
+    /* regression: hand/bot play link at quality level must keep a play button on versions */
+    const htmlH = api.qualityButtonsHtml({ sub: { '720': { has: true, label: '720p', files: [
+      { id: 'f_1', title: 'v1', has: true, pl: false }, { id: 'f_2', title: 'v2', has: true, pl: false }
+    ] } }, dub: {} }, 'sub', false, { sub: { '720': { n: 1, hand: 1 } }, dub: {}, subs: 0 });
+    assert.equal(htmlH.split('q-play').length - 1, 2, 'hand stream: play button stays on version blocks');
+    const htmlH2 = api.qualityButtonsHtml({ sub: { '720': { has: true, label: '720p', files: [
+      { id: 'f_1', title: 'v1', has: true, pl: false }, { id: 'f_2', title: 'v2', has: true, pl: false }
+    ] } }, dub: {} }, 'sub', false, { sub: { '720': { n: 1 } }, dub: {}, subs: 0 });
+    assert.equal(htmlH2.split('q-play').length - 1, 0, 'no play link at all: no play button');
+    const htmlH3 = api.qualityButtonsHtml({ sub: { '720': { has: true, label: '720p', files: [
+      { id: 'f_1', title: 'v1', has: true, pl: true }, { id: 'f_2', title: 'v2', has: true, pl: false }
+    ] } }, dub: {} }, 'sub', false, { sub: { '720': { n: 1, hand: 1 } }, dub: {}, subs: 0 });
+    assert.equal(htmlH3.split('q-play').length - 1, 1, 'sibling has its own link: pl-less version keeps the no-button rule');
   }
   /* تبلیغ پیش از دانلود: بدون دکمه/متن اضافه زیر تبلیغ؛ ثانیه‌شمار فقط بعد از لود کامل رسانه */
   assert.ok(!W.APP_HTML.includes('id="adx-go"'), 'دکمهٔ «ادامه» زیر تبلیغ پیش از دانلود حذف شده');

@@ -1733,8 +1733,10 @@ function upsertVariantFile(bag, track, quality, opts) {
   let files = variantFilesOf(prev);
   const title = String(opts.title || '').trim().slice(0, 220);
   const fileId = String(opts.fileId || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 20);
+  let targetId = fileId || '';
   if (opts.remove) {
     files = files.filter(function (f) { return f.id !== fileId; });
+    targetId = '';
   } else if (fileId) {
     let found = false;
     files = files.map(function (f) {
@@ -1746,12 +1748,16 @@ function upsertVariantFile(bag, track, quality, opts) {
       files.push({ ...(opts.contentIdentity ? {contentIdentity:opts.contentIdentity} : {}), id: fileId || ('f_' + randomHex(3)), title: title, source: opts.source, sizeBytes: opts.sizeBytes || null });
     }
   } else if (opts.source) {
-    files.push({ id: 'f_' + randomHex(3), title: title, source: opts.source, sizeBytes: opts.sizeBytes || null });
+    const nid = 'f_' + randomHex(3);
+    files.push({ id: nid, title: title, source: opts.source, sizeBytes: opts.sizeBytes || null });
+    targetId = nid;
   }
   files = files.filter(function (f) { return f && f.source; });
-  if (!files.length) { delete v[t][q]; return q; }
+  if (!files.length) { delete v[t][q]; return ''; }
   v[t][q] = { source: files[0].source, sizeBytes: files[0].sizeBytes || null, premium: !!prev.premium, label: prev.label || displayQuality(q, prev), files: files };
-  return q;
+  /* شناسهٔ فایلِ هدفِ این عملیات برگردانده می‌شود تا لینک پخش (f.pl) همان نسخه
+     را نشانه برود — نه اولین فایل سلول (بازنویسی لینک نسخهٔ دیگر). */
+  return targetId;
 }
 function setVariantPremium(bag, track, quality, on) {
   const v = ensureVariants(bag);
@@ -1772,7 +1778,9 @@ function setVariantFilePl(bag, track, quality, fileId, plVal) {
   const fid = String(fileId || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 20);
   const fl = Array.isArray(cell.files) && cell.files.length ? cell.files : null;
   if (fl) {
-    const targets = fid ? fl.filter(function (f) { return f && f.id === fid; }) : fl.slice(0, 1);
+    /* بدون شناسه فقط وقتی یک فایل هست هدف می‌گیرد (سلول قدیمی)؛ با چند نسخه
+       هدفِ مبهم است و نباید لینک پخشِ نسخهٔ اول را بازنویسی کرد (باگ کلیک‌خور). */
+    const targets = fid ? fl.filter(function (f) { return f && f.id === fid; }) : (fl.length === 1 ? fl.slice(0, 1) : []);
     targets.forEach(function (f) {
       if (plVal) f.pl = plVal; else delete f.pl;
     });
@@ -2412,6 +2420,9 @@ function publicStreamMap(bag, item) {
     if (!q) return;
     if (!out[t][q]) out[t][q] = { label: displayQuality(q), n: 0, premium: streamPremium(item, bag, t, q) };
     out[t][q].n += 1;
+    /* جریان‌های «دستی» (ربات سوم / فرم — با شناسهٔ v_) از لینک پخشِ فایل‌ها (vf_) جداست؛
+       صفحهٔ اثر با این پرچم می‌فهمد کیفیتِ بدونِ لینکِ نسخه، لینک پخشِ مستقل دارد. */
+    if (String(s.id || '').indexOf('vf_') !== 0) out[t][q].hand = (out[t][q].hand || 0) + 1;
   });
   out.subs = ((bag && bag.streamSubs) || []).length;
   return out;
@@ -2864,7 +2875,7 @@ async function apiStreamOpen(store, body, request, ctx) {
   if (!item) return json({ error: 'محتوا پیدا نشد' }, 404);
   if (!allowed(user, item, set)) return json({ error: 'این اثر ویژهٔ مشترکین است.', needSub: true }, 403);
   const reason = ['start', 'switch', 'renew', 'next', 'mid'].indexOf(body.reason) >= 0 ? body.reason : 'start';
-  const picked = pickStream(item, { epId: body.epId, track: body.track, quality: body.quality, streamId: String(body.streamId || '').replace(/[^a-z0-9_]/g, ''), fileId: String(body.fileId || '').replace(/[^a-z0-9_]/g, '') });
+  const picked = pickStream(item, { epId: body.epId, track: body.track, quality: body.quality, streamId: String(body.streamId || '').replace(/[^a-zA-Z0-9_]/g, ''), fileId: String(body.fileId || '').replace(/[^a-zA-Z0-9_]/g, '') });
   if (picked.error) return json({ error: picked.error }, picked.status || 400);
   const sub = hasActiveSub(user);
   if (picked.premium && !sub) return json({ error: 'این کیفیت/قسمت فقط برای مشترکین قابل پخش است.', needSub: true }, 403);
@@ -7583,6 +7594,9 @@ async function handleAdmin(store, url, request, adminUser) {
     const addFile = !!body.addFile;
     const removeFile = !!body.removeFile || (fileId && hasUrl && !raw);
     const pendingIndexes = [];
+    /* لینک پخش (pl) باید دقیقاً روی همان فایلی بنشیند که این درخواست تغییرش داده/ساخته —
+       نه «اولین فایل سلول» (وگرنه لینک پخش نسخهٔ اول با لینک نسخهٔ تازه بازنویسی می‌شد). */
+    let plTargetId = fileId;
     async function parseSrc(link) {
       let parsedLinks;
       try { parsedLinks = parseVersionLinks(link); }
@@ -7610,13 +7624,13 @@ async function handleAdmin(store, url, request, adminUser) {
         if (got.error) return json({ error: got.error }, 400);
         src = got.src; res = got.res;
       }
-      upsertVariantFile(bag, track, qk, {
+      plTargetId = upsertVariantFile(bag, track, qk, {
         fileId: fileId,
         title: body.title,
         source: src,
         sizeBytes: res.sizeBytes || null,
         remove: false,
-      });
+      }) || fileId;
       if (src) {
         if (!body.epId) {
           if (!item.source || !(item.source.tmeUrl || item.source.chatId)) item.source = src;
@@ -7648,7 +7662,7 @@ async function handleAdmin(store, url, request, adminUser) {
     if (Object.prototype.hasOwnProperty.call(body, 'pl')) {
       const plVal = String(body.pl || '').trim().slice(0, 500);
       if (plVal && !/^https?:\/\//i.test(plVal)) return json({ error: 'لینک پخش آنلاین معتبر نیست (باید با http:// یا https:// شروع شود)' }, 400);
-      setVariantFilePl(bag, track, qk, fileId, plVal);
+      setVariantFilePl(bag, track, qk, plTargetId, plVal);
     }
     if (body.premium !== undefined) {
       setVariantPremium(bag, track, qk, !!body.premium);
@@ -9541,6 +9555,10 @@ function MVX_PLAYER_MODULE(W) {
       return message('این فایل در مرورگر شما پخش نمی‌شود', 'فرمت یا کدک این نسخه با مرورگر شما سازگار نیست. کیفیت یا نسخهٔ دیگری را از ⚙ انتخاب کنید یا فایل را دانلود کنید.', [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }, 1], ['بستن', close]]);
     }
     if (P.errCount >= 2) {
+      /* کد ۴ = مرورگر این فایل/کدک را پخش نمی‌کند (مثلاً MKV/HEVC) — تلاش دوباره بی‌فایده است */
+      if (code === 4) {
+        return message('این فایل در مرورگر شما پخش نمی‌شود', 'فرمت یا کدک این نسخه با مرورگر شما سازگار نیست. کیفیت یا نسخهٔ دیگری را از ⚙ انتخاب کنید یا فایل را دانلود کنید.', [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }, 1], ['بستن', close]]);
+      }
       return message('پخش متوقف شد', 'اتصال به سرور پخش قطع شد. اینترنت/فیلترشکن را بررسی کنید و دوباره تلاش کنید.', [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; requestOpen('renew'); }, 1], ['بستن', close]]);
     }
     P.errCount = (P.errCount || 0) + 1;
@@ -11836,11 +11854,18 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
     var hasSt = !!st[k];
     var prem = !!(bagLock || (cell && cell.premium) || (st[k] && st[k].premium));
     var lab = (cell && cell.label) || (st[k] && st[k].label) || Q_LABEL[k] || k;
+    var anyPl = false;
+    for (var pi = 0; pi < files.length; pi++) if (files[pi] && files[pi].pl) { anyPl = true; break; }
+    /* لینک پخشِ ثبت‌شده از ربات سوم/فرم (جریان «دستی») مالِ کل کیفیت است، نه یک نسخه.
+       اگر هیچ نسخه‌ای لینک پخشِ خودش را ندارد اما کیفیت لینک پخشِ مستقل دارد،
+       دکمهٔ پخش همان کیفیت روی هر نسخه می‌ماند (مثل قبل از دکمه‌های جداگانهٔ هر نسخه). */
+    var handPlay = hasSt && !anyPl && !!(st[k] && st[k].hand);
     function metaLine (f) {
       var meta = [];
       if (f && f.sizeBytes) meta.push(esc(fmtBytes(f.sizeBytes)));
       else if (!f && cell && cell.sizeBytes) meta.push(esc(fmtBytes(cell.sizeBytes)));
       if (f && f.pl) meta.push('<span class="st">▶ پخش آنلاین</span>');
+      else if (f && handPlay) meta.push('<span class="st">▶ پخش آنلاین</span>');
       else if (!f && hasSt) meta.push('<span class="st">▶ پخش آنلاین</span>');
       if (prem && !sub) meta.push('⭐ ویژهٔ مشترکین');
       else if (price > 0) meta.push(esc(faMoney(price) + ' ' + unitName()));
@@ -11850,7 +11875,7 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
       return '<div class="q-act">' +
         (f ? '<button type="button" class="btn btn-primary q-dl" data-q="' + esc(k) + '" data-fid="' + esc(f.id || '') + '">📥 دانلود</button>' : '') +
         (f && f.pl ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '" data-fid="' + esc(f.id || '') + '">▶ پخش آنلاین</button>' : '') +
-        (!f && hasSt ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '" data-fid="">▶ پخش آنلاین</button>' : '') +
+        ((!f && hasSt) || (f && handPlay) ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '" data-fid="">▶ پخش آنلاین</button>' : '') +
         '</div>';
     }
     if (files.length) {
