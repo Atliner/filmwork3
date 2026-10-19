@@ -1870,7 +1870,7 @@ function publicVariantMap(bag, fallbackQuality) {
           sizeBytes: cell.sizeBytes || (files[0] && files[0].sizeBytes) || null,
           premium: !!cell.premium,
           files: files.map(function (f) {
-            return { id: f.id || '', title: f.title || '', sizeBytes: f.sizeBytes || null, has: true };
+            return { id: f.id || '', title: f.title || '', sizeBytes: f.sizeBytes || null, has: true, pl: !!(f.pl) };
           }),
         };
       }
@@ -2396,7 +2396,7 @@ function streamsOf(bag) {
         if (!f || !f.pl) return;
         const url = String(f.pl).trim();
         if (!/^https?:\/\//i.test(url)) return;
-        push({ id: 'vf_' + (f.id || (t + '_' + q)), track: t, quality: q, url: url, fmt: streamFmtOf(url), label: '', at: 0 });
+        push({ id: 'vf_' + (f.id || (t + '_' + q)), track: t, quality: q, url: url, fmt: streamFmtOf(url), label: String(f.title || '').trim(), at: 0 });
       });
     });
   });
@@ -2441,6 +2441,7 @@ function pickStream(item, opts) {
   const sorted = list.slice().sort(function (a, b) { return streamQRank(a.quality) - streamQRank(b.quality); });
   let s = null;
   if (opts.streamId) s = list.find(function (x) { return x.id === opts.streamId; }) || null;
+  if (!s && opts.fileId) s = list.find(function (x) { return x.id === 'vf_' + opts.fileId; }) || null;
   if (!s && track && want) s = list.find(function (x) { return x.track === track && qualityKey(x.quality) === want; }) || null;
   if (!s && track) s = sorted.find(function (x) { return x.track === track; }) || null;
   if (!s && want) s = list.find(function (x) { return qualityKey(x.quality) === want; }) || null;
@@ -2455,7 +2456,7 @@ function streamOptionsOf(item, bag, user) {
     const t = s.track === 'dub' ? 'dub' : 'sub';
     const q = qualityKey(s.quality) || s.quality;
     const prem = streamPremium(item, bag, t, q);
-    out[t].push({ id: s.id, q: q, label: displayQuality(q) + (s.label ? ' — ' + s.label : ''), premium: prem, locked: prem && !sub, fmt: s.fmt || streamFmtOf(s.url) });
+    out[t].push({ id: s.id, q: q, label: s.label || displayQuality(q), premium: prem, locked: prem && !sub, fmt: s.fmt || streamFmtOf(s.url) });
   });
   return out;
 }
@@ -2832,7 +2833,7 @@ async function streamBuild(store, set, user, item, picked, sid, request, avoid) 
     ok: true, sid: sid, src: src, fmt: fmt, exp: exp * 1000, edge: edge.id,
     item: { id: item.id, title: item.title, type: item.type, poster: posterUrlFor({ posterOverride: item.posterOverride || '', posterSrc: (item.source && item.source.tmeUrl) || '', galleryPoster: galleryPosterOf(item) }) },
     ep: ep,
-    cur: { track: picked.track, quality: picked.quality, streamId: picked.stream.id, label: displayQuality(picked.quality) + (picked.stream.label ? ' — ' + picked.stream.label : '') },
+    cur: { track: picked.track, quality: picked.quality, streamId: picked.stream.id, label: picked.stream.label || displayQuality(picked.quality) },
     options: streamOptionsOf(item, picked.bag, user),
     subs: subs,
     subDefault: picked.track === 'sub' && subs.length ? subs[0].id : '',
@@ -2863,7 +2864,7 @@ async function apiStreamOpen(store, body, request, ctx) {
   if (!item) return json({ error: 'محتوا پیدا نشد' }, 404);
   if (!allowed(user, item, set)) return json({ error: 'این اثر ویژهٔ مشترکین است.', needSub: true }, 403);
   const reason = ['start', 'switch', 'renew', 'next', 'mid'].indexOf(body.reason) >= 0 ? body.reason : 'start';
-  const picked = pickStream(item, { epId: body.epId, track: body.track, quality: body.quality, streamId: String(body.streamId || '').replace(/[^a-z0-9_]/g, '') });
+  const picked = pickStream(item, { epId: body.epId, track: body.track, quality: body.quality, streamId: String(body.streamId || '').replace(/[^a-z0-9_]/g, ''), fileId: String(body.fileId || '').replace(/[^a-z0-9_]/g, '') });
   if (picked.error) return json({ error: picked.error }, picked.status || 400);
   const sub = hasActiveSub(user);
   if (picked.premium && !sub) return json({ error: 'این کیفیت/قسمت فقط برای مشترکین قابل پخش است.', needSub: true }, 403);
@@ -9420,7 +9421,7 @@ function MVX_PLAYER_MODULE(W) {
     var keepAt = (reason === 'switch' || reason === 'renew' || reason === 'mid') && P.video ? P.video.currentTime : 0;
     if (keepAt) P.pendingSeek = keepAt;
     if (reason !== 'mid') setLoading(true);
-    var body = { itemId: P.opts.itemId, epId: P.opts.epId || '', track: P.cur.track || '', quality: P.cur.quality || '', streamId: P.cur.streamId || '', sid: P.sid || '', reason: reason, lastAdAt: P.lastAdAt || 0, seen: seenMap().m };
+    var body = { itemId: P.opts.itemId, epId: P.opts.epId || '', track: P.cur.track || '', quality: P.cur.quality || '', streamId: P.cur.streamId || '', fileId: P.opts.fileId || '', sid: P.sid || '', reason: reason, lastAdAt: P.lastAdAt || 0, seen: seenMap().m };
     if (extra) for (var k in extra) body[k] = extra[k];
     var mine = P;
     return api('/stream/open', body).then(function (r) {
@@ -9701,7 +9702,7 @@ function MVX_PLAYER_MODULE(W) {
     if (tracks.length) html += '<div class="mvp-sec"><h6>نسخه (صدا)</h6><div class="mvp-opts">' + tracks.map(function (t) {
       return '<button type="button" class="mvp-opt' + (t[0] === cur.track ? ' on' : '') + '" data-track="' + t[0] + '">' + t[1] + '</button>';
     }).join('') + '</div></div>';
-    if (qs.length) html += '<div class="mvp-sec"><h6>کیفیت</h6><div class="mvp-opts">' + qs.map(function (o) {
+    if (qs.length) html += '<div class="mvp-sec"><h6>نسخه / کیفیت</h6><div class="mvp-opts">' + qs.map(function (o) {
       return '<button type="button" class="mvp-opt' + (o.id === cur.streamId ? ' on' : '') + (o.locked ? ' lock' : '') + '" data-sid="' + esc(o.id) + '" data-q="' + esc(o.q) + '">' + esc(o.label) + (o.locked ? ' ⭐' : '') + '</button>';
     }).join('') + '</div></div>';
     if ((P.subs || []).length) {
@@ -10892,7 +10893,7 @@ button.dp-slide{cursor:zoom-in}
 .q-secs{display:flex;flex-direction:column;gap:12px;max-width:560px;margin:8px 0 12px}
 .q-sec{display:flex;flex-direction:column;gap:10px;border:1px solid var(--glass-line);border-radius:14px;padding:12px 12px 11px;background:rgba(255,255,255,.045)}
 .q-sec.lock{border-color:rgba(255,176,31,.45);box-shadow:inset 0 0 0 1px rgba(255,176,31,.18)}
-.q-sec .q-head{font-size:15px;color:var(--tx);font-weight:900;margin:0}
+.q-sec .q-head{font-size:15px;color:var(--tx);font-weight:900;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .q-sec .q-meta{font-size:11.5px;color:var(--tx3);font-weight:700;margin:0;display:flex;flex-wrap:wrap;gap:2px 10px}
 .q-sec .q-meta .st{color:var(--acc2)}
 .q-sec .q-alts{margin:0;max-width:none;gap:8px}
@@ -11827,42 +11828,44 @@ function qualityButtonsHtml (variants, track, bagLock, stm) {
   var tLab = track === 'dub' ? 'دوبله' : 'زیرنویس';
   /* مثل قدیم: برای هر کیفیت یک عنوان نوشته می‌شود و زیر همان عنوان،
      لینک‌های دانلود و پخش آنلاینِ همان کیفیت قرار می‌گیرد (بدون کلیک روی کارت). */
+  /* برای هر «نسخه» (فایل) یک بخش جدا: عنوان بالا (یک خط) و دکمه‌ها زیر آن —
+     دکمهٔ دانلود همیشه، دکمهٔ پخش آنلاین فقط اگر همان نسخه لینک پخش داشته باشد. */
   return '<div class="q-secs">' + keys.map(function (k) {
     var cell = v[k];
     var files = cellFilesOf(cell);
     var hasSt = !!st[k];
     var prem = !!(bagLock || (cell && cell.premium) || (st[k] && st[k].premium));
     var lab = (cell && cell.label) || (st[k] && st[k].label) || Q_LABEL[k] || k;
-    /* عنوان بخش دقیقاً همان چیزی است که در پنل ادمین ثبت شده (مثل
-       «Mymovies | 480p.WEB-DL.Doble | 357.9 MB»)؛ برچسب «480p — دوبله» فقط
-       جایزین است وقتی برای فایل عنوانی ثبت نشده باشد. */
-    var vTitle = (files.length === 1 && files[0].title && String(files[0].title).trim())
-      ? String(files[0].title).trim() : '';
-    var meta = [];
-    if (!vTitle) {
-      if (files.length > 1) meta.push(esc(faNum(files.length) + ' نسخه'));
-      else if (files.length && cell && cell.sizeBytes) meta.push(esc(fmtBytes(cell.sizeBytes)));
+    function metaLine (f) {
+      var meta = [];
+      if (f && f.sizeBytes) meta.push(esc(fmtBytes(f.sizeBytes)));
+      else if (!f && cell && cell.sizeBytes) meta.push(esc(fmtBytes(cell.sizeBytes)));
+      if (f && f.pl) meta.push('<span class="st">▶ پخش آنلاین</span>');
+      else if (!f && hasSt) meta.push('<span class="st">▶ پخش آنلاین</span>');
+      if (prem && !sub) meta.push('⭐ ویژهٔ مشترکین');
+      else if (price > 0) meta.push(esc(faMoney(price) + ' ' + unitName()));
+      return meta.length ? '<div class="q-meta">' + meta.join(' · ') + '</div>' : '';
     }
-    if (hasSt) meta.push('<span class="st">▶ پخش آنلاین</span>');
-    if (prem && !sub) meta.push('⭐ ویژهٔ مشترکین');
-    else if (files.length && price > 0) meta.push(esc(faMoney(price) + ' ' + unitName()));
-    var html = '<div class="q-sec' + (prem && !sub ? ' lock' : '') + '">' +
-      '<div class="q-sec-h"><div class="q-head">' + esc(vTitle || (lab + ' — ' + tLab)) + '</div>' +
-      (meta.length ? '<div class="q-meta">' + meta.join(' · ') + '</div>' : '') + '</div>';
-    if (files.length > 1) {
-      html += '<div class="q-alts">' + files.map(function (f, i) {
-        var flab = (f.title && f.title.trim()) ? f.title : (lab + (i ? (' — نسخه ' + faNum(i + 1)) : ''));
-        return '<button type="button" class="q-alt" data-q="' + esc(k) + '" data-fid="' + esc(f.id || '') + '"><span>' + esc(flab) + '</span><span class="go">📥 دانلود</span></button>';
-      }).join('') + '</div>';
-      if (hasSt) html += '<div class="q-act"><button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '">▶ پخش آنلاین</button></div>';
-    } else {
-      html += '<div class="q-act">' +
-        (files.length ? '<button type="button" class="btn btn-primary q-dl" data-q="' + esc(k) + '" data-fid="' + esc((files[0] && files[0].id) || '') + '">📥 دانلود</button>' : '') +
-        (hasSt ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '">▶ پخش آنلاین</button>' : '') +
+    function acts (f) {
+      return '<div class="q-act">' +
+        (f ? '<button type="button" class="btn btn-primary q-dl" data-q="' + esc(k) + '" data-fid="' + esc(f.id || '') + '">📥 دانلود</button>' : '') +
+        (f && f.pl ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '" data-fid="' + esc(f.id || '') + '">▶ پخش آنلاین</button>' : '') +
+        (!f && hasSt ? '<button type="button" class="btn btn-white q-play" data-q="' + esc(k) + '" data-fid="">▶ پخش آنلاین</button>' : '') +
         '</div>';
-      if (!files.length) html += '<p class="note" style="margin:0">این کیفیت فقط پخش آنلاین دارد.</p>';
     }
-    return html + '</div>';
+    if (files.length) {
+      return files.map(function (f, i) {
+        var vTitle = (f.title && String(f.title).trim()) ? String(f.title).trim()
+          : (lab + ' — ' + tLab + (files.length > 1 ? ' — نسخه ' + faNum(i + 1) : ''));
+        return '<div class="q-sec' + (prem && !sub ? ' lock' : '') + '">' +
+          '<div class="q-sec-h"><div class="q-head">' + esc(vTitle) + '</div>' + metaLine(f) + '</div>' +
+          acts(f) + '</div>';
+      }).join('');
+    }
+    /* بدون فایل: فقط پخش آنلاینِ دستی (لینک‌های ربات/فرم) */
+    return '<div class="q-sec' + (prem && !sub ? ' lock' : '') + '">' +
+      '<div class="q-sec-h"><div class="q-head">' + esc(lab + ' — ' + tLab) + '</div>' + metaLine(null) + '</div>' +
+      acts(null) + '<p class="note" style="margin:0">این کیفیت فقط پخش آنلاین دارد.</p></div>';
   }).join('') + '</div>';
 }
 function trackTabsHtml (id, onTrack) {
@@ -11948,14 +11951,14 @@ function openPlayer (it, opts) {
   if (opts.track) rememberTrack(opts.track);
   closeModal();
   __watchFromItem = currentRoute().path.indexOf('/item/') === 0;
-  nav('#/watch/' + it.id + '?ep=' + encodeURIComponent(opts.epId || '') + '&t=' + encodeURIComponent(opts.track || '') + '&q=' + encodeURIComponent(opts.quality || ''));
+  nav('#/watch/' + it.id + '?ep=' + encodeURIComponent(opts.epId || '') + '&t=' + encodeURIComponent(opts.track || '') + '&q=' + encodeURIComponent(opts.quality || '') + '&f=' + encodeURIComponent(opts.fileId || ''));
 }
 function launchPlayer (it, opts) {
   if (!APP.user) { nav('#/auth'); return; }
   loadPlayer(function (MP) {
     if (!MP) { toast('بارگذاری پلیر ناموفق بود؛ اتصال را بررسی کنید.', 'err'); return; }
     if (currentRoute().path.indexOf('/watch/' + it.id) !== 0 || MP.isOpen()) return;
-    MP.open({ itemId: it.id, epId: opts.epId || '', track: opts.track || '', quality: opts.quality || '', title: it.title || '' }, {
+    MP.open({ itemId: it.id, epId: opts.epId || '', track: opts.track || '', quality: opts.quality || '', fileId: opts.fileId || '', title: it.title || '' }, {
       api: api, openExt: openExt, tg: TG,
       onNeedSub: function () { nav('#/subscribe'); },
       onNeedLogin: function () { nav('#/auth'); },
@@ -13152,7 +13155,7 @@ function bindQualityClicks (root, it, track, ep, bagLock) {
   $all('.q-play', root).forEach(function (b) {
     b.addEventListener('click', function () {
       if (lockGuard(b)) return;
-      openPlayer(it, { epId: ep && ep.id, track: track, quality: b.getAttribute('data-q') });
+      openPlayer(it, { epId: ep && ep.id, track: track, quality: b.getAttribute('data-q'), fileId: b.getAttribute('data-fid') || '' });
     });
   });
   $all('.q-alt', root).forEach(function (a) {
@@ -15855,7 +15858,7 @@ function render () {
     var wId = m[1], wq = r.query;
     var startWatch = function () {
       var wit = (__itemData && __itemData.item && __itemData.item.id === wId) ? __itemData.item : { id: wId, title: '' };
-      launchPlayer(wit, { epId: wq.ep || '', track: wq.t || '', quality: wq.q || '' });
+      launchPlayer(wit, { epId: wq.ep || '', track: wq.t || '', quality: wq.q || '', fileId: wq.f || '' });
     };
     if (__itemShown === wId && $('#dl-box')) { startWatch(); return; }
     loadItemData(wId, fresh).then(function (d) {

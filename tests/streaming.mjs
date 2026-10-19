@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 
 const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 const W = await import('data:text/javascript;base64,' + Buffer.from(source + `
-export { parseStreamLines, applyStreamEntries, streamLinesOf, publicStreamMap, pickStream, streamTokenMake, streamTokenOpen, streamIpPrefix,
+export { parseStreamLines, applyStreamEntries, streamLinesOf, publicStreamMap, publicVariantMap, pickStream, streamOptionsOf, streamTokenMake, streamTokenOpen, streamIpPrefix,
   streamBindHash, streamEdgeHandle, decodeSubtitleBytes, apiStreamOpen, apiStreamSrc, apiItem, Store, saveUser, saveItemRecord, createTgUser, makeToken,
   bustSettings, getSettings, contentBotAction, buildPlayerJs, handleAssets, APP_HTML, MVX_PLAYER_MODULE, handleAdmin, bustItem, decorateItemStreams, bustAds };`).toString('base64'));
 const edgeMod = await import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(new URL('../scripts/stream-edge-worker.js', import.meta.url), 'utf8')).toString('base64'));
@@ -92,7 +92,7 @@ console.log('PASS: stream entries merge/dedupe/remove, auto episode creation, pr
   assert.ok(!JSON.stringify(map).includes('cdn.example.com'), 'نقشهٔ عمومی بدون لینک بماند');
   const pick = W.pickStream(series2, { epId: ep.id, track: 'dub' });
   assert.equal(pick.quality, '480');
-  assert.equal(pick.stream.label, '', 'لینک پخش نسخه عنوان ندارد');
+  assert.equal(pick.stream.label, 'Filimo | 480p', 'عنوانِ نسخه روی لینک پخش می‌آید تا کاربر نسخه را در پلیر بشناسد');
   assert.equal(pick.stream.url, 'https://cdn.example.com/play/480.m3u8');
   assert.equal(pick.stream.fmt, 'hls');
   const pick2 = W.pickStream(series2, { epId: ep.id, track: 'sub', quality: '720' });
@@ -108,6 +108,28 @@ console.log('PASS: stream entries merge/dedupe/remove, auto episode creation, pr
   delete ep.streams;
   assert.deepEqual(Object.keys(W.publicStreamMap(ep, series2).sub), [], 'بدون لینک پخش، آن کیفیت از نقشهٔ پخش می‌رود');
 }
+
+{
+  /* ── ۲.ج) انتخاب دقیقِ نسخه در پلیر: دو نسخه از یک کیفیت، هر کدام با عنوان و شناسهٔ خودش ── */
+  const it = { id: 'i_ver', type: 'movie', title: 'فیلم', access: 'free', variants: {
+    sub: { '720': { files: [
+      { id: 'f_1', title: '720p معمولی', source: { chatId: '-1', msgId: '1' }, pl: 'https://cdn.example.com/720.mp4' },
+      { id: 'f_2', title: '720p.10bit', source: { chatId: '-1', msgId: '2' }, pl: 'https://cdn.example.com/720-10bit.mp4' },
+      { id: 'f_3', title: '720p بدون پخش', source: { chatId: '-1', msgId: '3' } }
+    ] } }
+  } };
+  const opts = W.streamOptionsOf(it, it, null);
+  assert.equal(opts.sub.length, 2, 'فقط نسخه‌های دارای لینک پخش در فهرست پلیر می‌آیند');
+  assert.equal(opts.sub[0].label, '720p معمولی', 'عنوان دقیقِ نسخه در پلیر دیده می‌شود');
+  assert.equal(opts.sub[1].label, '720p.10bit');
+  assert.notEqual(opts.sub[0].id, opts.sub[1].id, 'هر نسخه شناسهٔ جدا دارد');
+  const pm = W.publicVariantMap(it, '720');
+  assert.deepEqual(pm.sub['720'].files.map(f => !!f.pl), [true, true, false], 'پرچمِ پخشِ هر نسخه در دادهٔ صفحه هست');
+  const p2 = W.pickStream(it, { track: 'sub', fileId: 'f_2' });
+  assert.equal(p2.stream.id, 'vf_f_2', 'انتخاب دقیقِ نسخه با fileId');
+  assert.equal(p2.stream.label, '720p.10bit');
+}
+
 console.log('PASS: per-version online-play link (title-less) merges into streams and drives playback.');
 
 /* ── ۲.ب. ذخیرهٔ لینک پخش نسخه از همان مسیر عنوان/لینک فایل (endpoint نسخه) ── */
@@ -435,6 +457,37 @@ console.log('PASS: content-bot streams action (server-side revalidation, role ch
     assert.ok(evs.includes('web_app_request_fullscreen'), 'چرخهٔ بعدی دوباره سالم وارد می‌شود');
   }
 
+
+  /* نسخه‌ها در صفحهٔ اثر و پلیر: عنوانِ هر نسخه بالا (یک خط) و دکمه‌ها زیر آن؛
+     پخش آنلاین فقط برای نسخهٔ دارای لینک؛ پلیر شناسهٔ نسخه را می‌فرستد */
+  assert.ok(a.code.includes('fileId: P.opts.fileId'), 'پلیر شناسهٔ نسخه را به سرور می‌فرستد');
+  assert.ok(a.code.includes('نسخه / کیفیت'), 'منوی پلیر نسخه‌ها را جدا و با عنوان نشان می‌دهد');
+  for (const k of ['data-fid', '&f=', 'q-play', 'q-dl', 'white-space:nowrap']) assert.ok(W.APP_HTML.includes(k), k);
+  {
+    const page = W.APP_HTML;
+    function grabFn(name) {
+      const start = page.indexOf('function ' + name);
+      assert.ok(start >= 0, name);
+      const lineStart = page.lastIndexOf('\n', start) + 1;
+      const indent = page.slice(lineStart, start);
+      const end = page.indexOf('\n' + indent + '}', start);
+      return page.slice(start, end + 1 + indent.length + 1);
+    }
+    const body = [grabFn('cellFilesOf'), grabFn('qualityButtonsHtml'),
+      'return { qualityButtonsHtml: qualityButtonsHtml };'].join('\n');
+    const fn = new Function('esc', 'faNum', 'Q_LABEL', 'fmtBytes', 'faMoney', 'unitName', 'currentDlPrice', 'hasSub', 'streamReady', body);
+    const api = fn((s) => String(s), String, {}, String, String, () => 'تومان', () => 0, () => false, () => true);
+    const variants = { sub: { '720': { has: true, label: '720p', sizeBytes: 100, files: [
+      { id: 'f_1', title: 'نسخهٔ بلند بسیار طولانی برای تست تک‌خطی', sizeBytes: 123, has: true, pl: true },
+      { id: 'f_2', title: 'نسخه ۲', sizeBytes: 123, has: true, pl: false }
+    ] } }, dub: {} };
+    const html = api.qualityButtonsHtml(variants, 'sub', false, { sub: { '720': { n: 1 } }, dub: {}, subs: 0 });
+    assert.equal(html.split('q-dl').length - 1, 2, 'برای هر نسخه یک دکمهٔ دانلود');
+    assert.equal(html.split('q-play').length - 1, 1, 'پخش آنلاین فقط برای نسخهٔ دارای لینک');
+    assert.ok(html.indexOf('نسخهٔ بلند بسیار طولانی برای تست تک‌خطی') < html.indexOf('📥 دانلود'), 'عنوان بالای دکمه‌هاست');
+    assert.ok(html.includes('data-fid="f_2"'), 'دانلودِ هر نسخه، همان نسخه است');
+    assert.ok(/q-play[^>]*data-fid="f_1"|data-fid="f_1"[^>]*q-play/.test(html) || (html.split('data-fid="f_1"').length - 1) >= 2, 'دکمهٔ پخش به نسخهٔ دارای لینک گره خورده');
+  }
   /* تبلیغ پیش از دانلود: بدون دکمه/متن اضافه زیر تبلیغ؛ ثانیه‌شمار فقط بعد از لود کامل رسانه */
   assert.ok(!W.APP_HTML.includes('id="adx-go"'), 'دکمهٔ «ادامه» زیر تبلیغ پیش از دانلود حذف شده');
   assert.ok(!W.APP_HTML.includes('adx-cta'), 'متن cta روی تبلیغ پیش از دانلود حذف شده');
