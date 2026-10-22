@@ -163,9 +163,15 @@ async function streamEdgeProgressive(request, tok, opts) {
   const range = request.headers.get('range');
   if (range && /^bytes=\d*-\d*$/.test(range)) headers.range = range;
   let up;
+  const upCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const upTo = upCtrl ? setTimeout(function () { try { upCtrl.abort(); } catch (e) { } }, 8000) : 0;
   try {
-    up = await fetch(tok.u, { method: request.method === 'HEAD' ? 'HEAD' : 'GET', headers: headers, redirect: 'follow', cf: opts && opts.cacheTtl ? { cacheEverything: true, cacheTtl: opts.cacheTtl } : undefined });
-  } catch (e) { return new Response('upstream unreachable', { status: 502, headers: streamEdgeCors(request, tok) }); }
+    up = await fetch(tok.u, { method: request.method === 'HEAD' ? 'HEAD' : 'GET', headers: headers, redirect: 'follow', signal: upCtrl ? upCtrl.signal : undefined, cf: opts && opts.cacheTtl ? { cacheEverything: true, cacheTtl: opts.cacheTtl } : undefined });
+    clearTimeout(upTo);
+  } catch (e) {
+    clearTimeout(upTo);
+    return new Response('upstream unreachable', { status: 502, headers: Object.assign({ 'x-mvx-deny': 'upstream' }, streamEdgeCors(request, tok)) });
+  }
   if (up.status >= 400 && up.status !== 416) return new Response('upstream ' + up.status, { status: up.status === 404 ? 404 : 502, headers: Object.assign({ 'cache-control': 'no-store' }, streamEdgeCors(request, tok)) });
   const h = new Headers(streamEdgeCors(request, tok));
   h.set('content-type', streamMime(tok.f, up.headers.get('content-type')));
@@ -303,7 +309,7 @@ async function streamEdgeSubtitle(request, tok) {
   return new Response(text, { status: 200, headers: h });
 }
 async function streamEdgeStatus(request, secret, tok) {
-  const json = (o) => new Response(JSON.stringify(o), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+  const json = (o) => new Response(JSON.stringify(o), { status: 200, headers: Object.assign({ 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }, streamEdgeCors(request, tok)) });
   if (!tok || tok.v !== 1) return json({ ok: false, reason: 'token' });
   if (!(Number(tok.e) > Date.now() / 1000)) return json({ ok: false, reason: 'expired' });
   const ref = request.headers.get('referer') || request.headers.get('origin') || '';
@@ -318,7 +324,7 @@ async function streamEdgeStatus(request, secret, tok) {
     const ua = request.headers.get('user-agent') || '';
     if (!/AppleCoreMedia/i.test(ua) && tok.a && tok.a !== await streamBindHash(secret, 'ua', ua)) return json({ ok: false, reason: 'ua' });
     try {
-      const up = await fetch(tok.u, { method: 'GET', headers: { 'range': 'bytes=0-1', 'user-agent': ua || 'Mozilla/5.0' }, redirect: 'follow' });
+      const up = await fetch(tok.u, { method: 'GET', headers: { 'range': 'bytes=0-1', 'user-agent': ua || 'Mozilla/5.0' }, redirect: 'follow', signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(4000) : undefined });
       const st = up.status;
       try { if (up.body) await up.body.cancel(); } catch (e) { }
       if (st >= 400 && st !== 416) return json({ ok: false, reason: 'upstream', upstream: st });

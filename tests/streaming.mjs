@@ -367,7 +367,8 @@ const setSet = async patch => { const s = await store.get('set'); await store.se
   assert.equal(r.body.cur.quality, '720'); assert.equal(r.body.subs.length, 1);
   assert.equal(r.body.subDefault, '', 'نسخهٔ دوبله: زیرنویس پیش‌فرض خاموش');
   assert.equal(r.body.wm, '2002', 'اولویت واترمارک با شناسهٔ عددی تلگرام است، نه یوزرنیم (@viewer)');
-  assert.ok(!JSON.stringify(r.body).includes('cdn.example.com'), 'API پخش لینک مبدأ را نشان نمی‌دهد');
+  assert.equal(r.body.direct, 'https://cdn.example.com/m-720.mp4', 'پخش مستقیم اضطراری (پیش‌فرض روشن) لینک خام را فقط به خودِ پلیر می‌دهد');
+  assert.ok(!JSON.stringify(Object.assign({}, r.body, { direct: '' })).includes('cdn.example.com'), 'بدون فیلد direct، API پخش هرگز لینک مبدأ را نشان نمی‌دهد');
   assert.ok(r.body.options.dub.length === 2 && r.body.options.sub.length === 0);
   /* لبهٔ داخلی Worker (/sv) همان توکن را با رمز ذخیره‌شده باز می‌کند */
   const set = await W.getSettings(store);
@@ -380,6 +381,11 @@ const setSet = async patch => { const s = await store.get('set'); await store.se
   assert.equal(sw.status, 409);
   const sw2 = await call(W.apiStreamOpen, userTok, { itemId: movie.id, reason: 'switch', sid: r.body.sid, track: 'dub', quality: '1080' });
   assert.equal(sw2.status, 200); assert.equal(sw2.body.cur.quality, '1080'); assert.equal(sw2.body.sid, r.body.sid);
+  await setSet({ streamDirectPlay: false });
+  const strict = await call(W.apiStreamOpen, userTok, { itemId: movie.id, reason: 'switch', sid: r.body.sid, track: 'dub', quality: '720' });
+  assert.equal(strict.status, 200);
+  assert.equal(strict.body.direct, '', 'با خاموش بودن «پخش مستقیم»، لینک مبدأ هرگز به پلیر داده نمی‌شود');
+  assert.ok(!JSON.stringify(strict.body).includes('cdn.example.com'), 'حالت سخت‌گیرانه: هیچ لینک مبدأ‌ای در API نیست');
   /* version ids with uppercase letters (legacy/imported data): fileId must not be mangled */
   const upItem = { id: 'i_up1', type: 'movie', title: 'Up', access: 'free', genres: [], variants: { sub: { '720': { files: [
     { id: 'f_AbC1', title: 'A', source: { chatId: '-1', msgId: '21' }, pl: 'https://cdn.example.com/a.mp4' },
@@ -410,6 +416,8 @@ const setSet = async patch => { const s = await store.get('set'); await store.se
   assert.equal(withAd.body.ad.mediaUrl, 'https://ads.example.com/v.mp4');
   const early = await call(W.apiStreamSrc, userTok, { gate: withAd.body.gate });
   assert.equal(early.status, 425, 'قبل از پایان تبلیغ (زمان سرور) آدرس داده نمی‌شود');
+  const earlyFail = await call(W.apiStreamSrc, userTok, { gate: withAd.body.gate, ad: { at: withAd.body.ad.at, failed: true } });
+  assert.equal(earlyFail.status, 200, 'تبلیغِ شکست‌خورده (رسانه لود نشد) نباید پخش را پشت گیت نگه دارد');
   const rn = Date.now; Date.now = () => rn() + 20000;
   try {
     const late = await call(W.apiStreamSrc, userTok, { gate: withAd.body.gate, ad: { at: withAd.body.ad.at, t: 8, done: true } });

@@ -414,6 +414,7 @@ function mergeSettings(s) {
     streamTokenMin: 180,
     streamMaxSessions: 2,
     streamBindIp: true,
+    streamDirectPlay: true,
     streamWatermark: true,
     /* ── شبکهٔ تبلیغات خودکار (ads.js روی Worker/اکانت دیگر) ── */
     adNetEnabled: false,
@@ -2618,9 +2619,15 @@ async function streamEdgeProgressive(request, tok, opts) {
   const range = request.headers.get('range');
   if (range && /^bytes=\d*-\d*$/.test(range)) headers.range = range;
   let up;
+  const upCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const upTo = upCtrl ? setTimeout(function () { try { upCtrl.abort(); } catch (e) { } }, 8000) : 0;
   try {
-    up = await fetch(tok.u, { method: request.method === 'HEAD' ? 'HEAD' : 'GET', headers: headers, redirect: 'follow', cf: opts && opts.cacheTtl ? { cacheEverything: true, cacheTtl: opts.cacheTtl } : undefined });
-  } catch (e) { return new Response('upstream unreachable', { status: 502, headers: streamEdgeCors(request, tok) }); }
+    up = await fetch(tok.u, { method: request.method === 'HEAD' ? 'HEAD' : 'GET', headers: headers, redirect: 'follow', signal: upCtrl ? upCtrl.signal : undefined, cf: opts && opts.cacheTtl ? { cacheEverything: true, cacheTtl: opts.cacheTtl } : undefined });
+    clearTimeout(upTo);
+  } catch (e) {
+    clearTimeout(upTo);
+    return new Response('upstream unreachable', { status: 502, headers: Object.assign({ 'x-mvx-deny': 'upstream' }, streamEdgeCors(request, tok)) });
+  }
   if (up.status >= 400 && up.status !== 416) return new Response('upstream ' + up.status, { status: up.status === 404 ? 404 : 502, headers: Object.assign({ 'cache-control': 'no-store' }, streamEdgeCors(request, tok)) });
   const h = new Headers(streamEdgeCors(request, tok));
   h.set('content-type', streamMime(tok.f, up.headers.get('content-type')));
@@ -2738,7 +2745,7 @@ async function streamEdgeSubtitle(request, tok) {
    (توکن/مهلت/آی‌پی/مرورگر یا در دسترس نبودنِ مبدأ فایل) را به کاربر بگوید.
    هیچ بایتی از رسانه برنمی‌گرداند و عمداً سخت‌گیری dest ندارد (fetch تشخیصی است). */
 async function streamEdgeStatus(request, secret, tok) {
-  const json = (o) => new Response(JSON.stringify(o), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+  const json = (o) => new Response(JSON.stringify(o), { status: 200, headers: Object.assign({ 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }, streamEdgeCors(request, tok)) });
   if (!tok || tok.v !== 1) return json({ ok: false, reason: 'token' });
   if (!(Number(tok.e) > Date.now() / 1000)) return json({ ok: false, reason: 'expired' });
   const ref = request.headers.get('referer') || request.headers.get('origin') || '';
@@ -2753,7 +2760,7 @@ async function streamEdgeStatus(request, secret, tok) {
     const ua = request.headers.get('user-agent') || '';
     if (!/AppleCoreMedia/i.test(ua) && tok.a && tok.a !== await streamBindHash(secret, 'ua', ua)) return json({ ok: false, reason: 'ua' });
     try {
-      const up = await fetch(tok.u, { method: 'GET', headers: { 'range': 'bytes=0-1', 'user-agent': ua || 'Mozilla/5.0' }, redirect: 'follow' });
+      const up = await fetch(tok.u, { method: 'GET', headers: { 'range': 'bytes=0-1', 'user-agent': ua || 'Mozilla/5.0' }, redirect: 'follow', signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(4000) : undefined });
       const st = up.status;
       try { if (up.body) await up.body.cancel(); } catch (e) { }
       if (st >= 400 && st !== 416) return json({ ok: false, reason: 'upstream', upstream: st });
@@ -2900,6 +2907,7 @@ async function streamBuild(store, set, user, item, picked, sid, request, avoid) 
   const ep = streamEpisodeInfo(item, picked.bag);
   return {
     ok: true, sid: sid, src: src, fmt: fmt, exp: exp * 1000, edge: edge.id,
+    direct: set.streamDirectPlay !== false ? picked.stream.url : '',
     item: { id: item.id, title: item.title, type: item.type, poster: posterUrlFor({ posterOverride: item.posterOverride || '', posterSrc: (item.source && item.source.tmeUrl) || '', galleryPoster: galleryPosterOf(item) }) },
     ep: ep,
     cur: { track: picked.track, quality: picked.quality, streamId: picked.stream.id, label: picked.stream.label || displayQuality(picked.quality) },
@@ -2970,7 +2978,8 @@ async function apiStreamSrc(store, body, request, ctx) {
   if (gate) return json(gate, gate.status);
   const g = await verifyToken(String(body.gate || ''), set.secret);
   if (!g || g.g !== 'st' || g.u !== user.username) return json({ error: 'مهلت این پخش تمام شده؛ دوباره پخش را بزنید.' }, 410);
-  if (Date.now() + 1500 < Number(g.nb || 0)) return json({ error: 'تبلیغ هنوز تمام نشده است', remain: Math.ceil((g.nb - Date.now()) / 1000) }, 425);
+  const adFailed = !!(body.ad && typeof body.ad === 'object' && body.ad.failed);
+  if (Date.now() + 1500 < Number(g.nb || 0) && !adFailed) return json({ error: 'تبلیغ هنوز تمام نشده است', remain: Math.ceil((g.nb - Date.now()) / 1000) }, 425);
   if (body.ad && typeof body.ad === 'object') await adResultRecord(store, set, ctx, request, user, body.ad);
   const item = await getItem(store, g.it);
   if (!item) return json({ error: 'محتوا پیدا نشد' }, 404);
@@ -7009,6 +7018,7 @@ function streamAdminState(set) {
     tokenMin: Math.max(10, Math.min(720, parseInt(set.streamTokenMin, 10) || 180)),
     maxSessions: Math.max(1, Math.min(10, parseInt(set.streamMaxSessions, 10) || 2)),
     bindIp: set.streamBindIp !== false, watermark: set.streamWatermark !== false,
+    directPlay: set.streamDirectPlay !== false,
     edges: (set.streamEdges || []).map(function (e) { return { id: e.id, url: e.url, off: !!e.off, secret: maskToken(e.secret) }; }),
   };
 }
@@ -7035,7 +7045,7 @@ function applyStreamAdSettings(set, body, env) {
     patch[k] = n;
     return '';
   }
-  ['streamEnabled', 'streamPublic', 'streamBindIp', 'streamWatermark', 'adNetEnabled', 'adNetHouseFallback', 'adNetBotLinks',
+  ['streamEnabled', 'streamPublic', 'streamBindIp', 'streamWatermark', 'streamDirectPlay', 'adNetEnabled', 'adNetHouseFallback', 'adNetBotLinks',
     'plAdPre', 'plAdSwitch', 'plAdBanner', 'plAdPause', 'dlChargeEnabled'].forEach(function (k) { if (body[k] !== undefined) patch[k] = !!body[k]; });
   const errs = [
     int('streamTokenMin', 10, 720, 'اعتبار توکن پخش (دقیقه)'), int('streamMaxSessions', 1, 10, 'تعداد پخش هم‌زمان'),
@@ -9510,6 +9520,7 @@ function MVX_PLAYER_MODULE(W) {
         return runAd(r.ad, function (res) {
           if (P !== mine || !P || P.closed) return;
           setLoading(true);
+          P.gate = r.gate; P.adRes = res;
           return api('/stream/src', { gate: r.gate, ad: res, seen: seenMap().m }).then(function (r2) { if (P === mine && !P.closed) load(r2, reason); });
         });
       }
@@ -9522,12 +9533,27 @@ function MVX_PLAYER_MODULE(W) {
     var d = (e && e.data) || {};
     if (d.needSub) return message('ویژهٔ مشترکین', e.message || 'این بخش فقط برای مشترکین قابل پخش است.', [['خرید اشتراک', function () { var h = P.host; close(); if (h.onNeedSub) h.onNeedSub(); }, 1], ['بستن', close]]);
     if (d.needLogin || e.status === 401) return message('ورود لازم است', e.message || 'برای پخش آنلاین ابتدا وارد شوید.', [['ورود', function () { var h = P.host; close(); if (h.onNeedLogin) h.onNeedLogin(); }, 1], ['بستن', close]]);
-    if (d.remain) { setTimeout(function () { requestOpen(reason); }, (d.remain + 0.5) * 1000); return; }
+    if (d.remain) {
+      var wait = (Number(d.remain) || 1) * 1000 + 500;
+      if (P.gate && P.adRes && (P.gateRetry || 0) < 4) {
+        P.gateRetry = (P.gateRetry || 0) + 1;
+        setTimeout(function () {
+          if (!P) return;
+          setLoading(true);
+          api('/stream/src', { gate: P.gate, ad: P.adRes, seen: seenMap().m }).then(function (r2) { if (P) load(r2, reason); }).catch(function (e2) { if (P) handleErr(e2, reason); });
+        }, wait);
+        return;
+      }
+      setTimeout(function () { requestOpen(reason); }, wait);
+      return;
+    }
     message('پخش ممکن نشد', (e && e.message) || 'خطای ناشناخته', [['تلاش دوباره', function () { hideMsg(); requestOpen(P.info ? 'renew' : 'start'); }, 1], ['بستن', close]]);
   }
   function load(info, reason) {
     if (!P) return;
     P.info = info;
+    P.gateRetry = 0;
+    if (info && info.src) P.triedDirect = false;
     P.cur = { track: info.cur.track, quality: info.cur.quality, streamId: info.cur.streamId };
     P.adCfg = info.noAds ? null : info.adCfg;
     P.banners = info.banners || [];
@@ -10067,14 +10093,24 @@ function MVX_PLAYER_MODULE(W) {
         }).catch(function (e) {
           if (!P || P.mkv !== m) return;
           if (m.seeking) return;
+          if (P.info && P.info.direct && !P.triedDirect) {
+            P.triedDirect = true;
+            destroyMkv();
+            return startMkv(P.info.direct);
+          }
           destroyMkv();
           mkvFail('پخش MKV قطع شد', 'دانلود بایت‌های فایل ناتمام ماند. اینترنت را بررسی و دوباره تلاش کنید.');
         });
       })();
     }).catch(function (e) {
       if (!P || P.mkv !== m) return;
+      if (P.info && P.info.direct && !P.triedDirect) {
+        P.triedDirect = true;
+        destroyMkv();
+        return startMkv(P.info.direct);
+      }
       destroyMkv();
-      mkvFail('بارگذاری فایل MKV ممکن نشد', 'دریافت بایت‌های این فایل از مبدأ ممکن نشد. اگر لینک منقضی شده نسخهٔ دیگری را انتخاب کنید یا فایل را دانلود کنید.');
+      mkvFail('بارگذاری فایل MKV ممکن نشد', 'دریافت بایت‌های این فایل ممکن نشد؛ نه سرور توانست از مبدأ بگیرد و نه مرورگر اجازهٔ خواندن مستقیم داشت. اگر لینک را مستقیم باز می‌کنید و پخش می‌شود یعنی مبدأ دسترسی را محدود کرده؛ نسخهٔ دیگری انتخاب یا فایل را دانلود کنید.');
     });
   }
   function startMkv(src) {
@@ -10169,43 +10205,49 @@ function MVX_PLAYER_MODULE(W) {
     var src = (P && P.info && P.info.src) || '';
     var u = String(src).replace(/\/(v|h)\/([^/]+)(\/.*)?$/, '/status/$2');
     if (!u || u === src) return cb(null);
+    var done = false;
+    var to = setTimeout(function () { if (!done) { done = true; cb(null); } }, 4500);
+    function fin(j) { if (!done) { done = true; clearTimeout(to); cb(j); } }
     try {
-      W.fetch(u, { headers: { accept: 'application/json' } }).then(function (r) { return r.json(); }).then(function (j) { cb(j || null); }).catch(function () { cb(null); });
-    } catch (e) { cb(null); }
+      W.fetch(u, { headers: { accept: 'application/json' } }).then(function (r) { return r.json(); }).then(function (j) { fin(j || null); }).catch(function () { fin(null); });
+    } catch (e) { fin(null); }
   }
   function onVideoError() {
     if (!P || P.closed || P.adActive || !P.info) return;
     var err = P.video.error;
     var code = err ? err.code : 0;
     var fmt = P.info.fmt;
-    if (P.errCount >= 1 && code === 4 && (fmt === 'mkv' || fmt === 'auto')) {
-      return message('این فایل در مرورگر شما پخش نمی‌شود', 'فرمت یا کدک این نسخه با مرورگر شما سازگار نیست. کیفیت یا نسخهٔ دیگری را از ⚙ انتخاب کنید یا فایل را دانلود کنید.', [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }], ['بستن', close]]);
-    }
-    if (P.errCount >= 2) {
-      /* کد ۴ = مرورگر این فایل/کدک را پخش نمی‌کند — تلاش دوباره بی‌فایده است */
-      if (code === 4) {
-        return message('این فایل در مرورگر شما پخش نمی‌شود', 'فرمت یا کدک این نسخه با مرورگر شما سازگار نیست. کیفیت یا نسخهٔ دیگری را از ⚙ انتخاب کنید یا فایل را دانلود کنید.', [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }], ['بستن', close]]);
-      }
-      return message('پخش متوقف شد', 'اتصال به سرور پخش قطع شد. اینترنت/فیلترشکن را بررسی کنید و دوباره تلاش کنید.', [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; requestOpen('renew'); }], ['بستن', close]]);
-    }
     P.errCount = (P.errCount || 0) + 1;
-    /* تشخیص دقیق: مسیر وضعیت می‌گوید مشکل از آی‌پی/مرورگر است یا مبدأ فایل جواب نمی‌دهد */
+    /* یک شانس پخش مستقیم (بدون پراکسی): وقتی مبدأ، دسترسی سرور را می‌بندد یا قفل IP می‌زند */
+    if (P.info.direct && !P.triedDirect) {
+      P.triedDirect = true;
+      return setSource(P.info.direct, fmt, false);
+    }
+    var hardCodec = code === 4 && (fmt === 'mkv' || fmt === 'auto') && P.errCount >= 2;
+    if (P.errCount < 3 && !hardCodec) {
+      requestOpen('renew', P.errCount === 2 ? { avoidEdge: P.info.edge || '' } : null);
+      return;
+    }
     diagExplain(function (j) {
       if (!P || P.closed) return;
-      var hard = j && j.ok === false && (j.reason === 'upstream' || j.reason === 'origin' || j.reason === 'ua');
-      if (hard) {
-        var texts = {
-          upstream: ['مبدأ این لینک در دسترس نیست', 'سرورِ داخلِ لینک پاسخ نداد (کد ' + (j.upstream || 0) + '). معمولاً لینک منقضی شده یا مبدأ فقط به برخی کشورها/ای‌پی‌ها سرویس می‌دهد. لینک را در مرورگر خودتان باز کنید؛ اگر باز شد یعنی مبدأ سرویس را محدود کرده و باید لینک را عوض کنید.'],
-          origin: ['این لینک از این صفحه باز نمی‌شود', 'آدرس پخش متعلق به سایت دیگری است و فقط از صفحهٔ خودش قابل استفاده است.'],
-          ua: ['مرورگر یا دستگاه تغییر کرده است', 'این پخش به همان مرورگرِ هنگامِ شروع گره خورده است. از همان مرورگر باز کنید یا دوباره پخش را بسازید.']
-        };
-        var t = texts[j.reason];
-        return message(t[0], t[1], [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; requestOpen('renew'); }], ['بستن', close]]);
-      }
-      if (j && j.ok === false && j.reason === 'ip' && P.errCount >= 2) {
-        return message('پخش به اینترنتِ هنگامِ شروع گره خورده است', 'اینترنت دستگاه عوض شده (ای‌پی تغییر کرده). با همین اینترنت دوباره «تلاش دوباره» را بزنید تا پخش تازه ساخته شود.', [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; requestOpen('renew'); }], ['بستن', close]]);
-      }
-      requestOpen('renew', P.errCount === 2 ? { avoidEdge: P.info.edge || '' } : null);
+      var r = (j && j.ok === false && j.reason) || '';
+      var retry = [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; P.triedDirect = false; requestOpen('renew'); }], ['بستن', close]];
+      var texts = {
+        upstream: P.triedDirect
+          ? ['مبدأ این لینک در دسترس نیست', 'هم سرور و هم مرورگر شما نتوانستند این فایل را از مبدأ بگیرند (کد ' + (j.upstream || 0) + '). اگر همین لینک را مستقیم در مرورگر باز می‌کنید و پخش می‌شود، یعنی مبدأ دسترسی سرورها را محدود کرده؛ باید لینک را عوض کنید یا مبدأ دیگری بگذارید.']
+          : ['مبدأ این لینک در دسترس نیست', 'سرورِ داخلِ لینک پاسخ نداد (کد ' + (j.upstream || 0) + '). معمولاً لینک منقضی شده یا مبدأ، درخواست را قبول نمی‌کند. لینک را در مرورگر خودتان باز کنید؛ اگر باز شد یعنی مبدأ فقط به برخی ای‌پی‌ها سرویس می‌دهد.'],
+        ip: ['پخش به اینترنتِ هنگامِ شروع گره خورده است', 'اینترنت دستگاه عوض شده (ای‌پی تغییر کرده). با «تلاش دوباره» پخش تازه ساخته می‌شود. اگر زیاد این پیام را می‌بینید، «قفل توکن به IP» را در تنظیمات پخش بردارید.'],
+        ua: ['مرورگر یا دستگاه تغییر کرده است', 'این پخش به همان مرورگرِ هنگامِ شروع گره خورده است. از همان مرورگر باز کنید یا دوباره پخش را بسازید.'],
+        origin: ['این لینک از این صفحه باز نمی‌شود', 'آدرس پخش متعلق به سایت دیگری است و فقط از صفحهٔ خودش قابل استفاده است.'],
+        expired: ['مهلت این پخش تمام شده', 'توکن پخش منقضی شده است؛ دوباره دکمهٔ پخش را بزنید.'],
+        token: ['پخش معتبر نیست', 'توکن پخش خوانده نشد؛ دوباره پخش را باز کنید.']
+      };
+      var t = texts[r] || (code === 4
+        ? ['این فایل در مرورگر شما پخش نمی‌شود', 'فرمت یا کدک این نسخه با مرورگر شما سازگار نیست. کیفیت یا نسخهٔ دیگری را از ⚙ انتخاب کنید یا فایل را دانلود کنید.']
+        : ['پخش متوقف شد', 'اتصال به سرور پخش قطع شد. اینترنت/فیلترشکن را بررسی کنید و دوباره تلاش کنید.']);
+      message(t[0], t[1], r === 'expired' || r === 'token'
+        ? [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; P.triedDirect = false; requestOpen('start'); }], ['بستن', close]]
+        : (code === 4 && !r ? [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }], ['بستن', close]] : retry));
     });
   }
 
@@ -10241,7 +10283,7 @@ function MVX_PLAYER_MODULE(W) {
       box.innerHTML = '';
       P.adActive = false;
       P.lastAdAt = Date.now();
-      var res = { at: ad.at, t: Math.round((isVid ? real : watched) * 10) / 10, done: !skipped && !failed, skip: !!skipped };
+      var res = { at: ad.at, t: Math.round((isVid ? real : watched) * 10) / 10, done: !skipped && !failed, skip: !!skipped, failed: !!failed };
       Promise.resolve(then(res)).catch(function (e) { handleErr(e, 'switch'); });
     }
     function paint() {
@@ -10277,7 +10319,8 @@ function MVX_PLAYER_MODULE(W) {
       var snd = q('.snd', box);
       var setSnd = function () { snd.innerHTML = media.muted ? I.mute : I.vol; };
       snd.onclick = function () { media.muted = !media.muted; setSnd(); if (media.paused) media.play().catch(function () { }); };
-      media.addEventListener('error', function () { failed = true; });
+      media.addEventListener('error', function () { failed = true; setTimeout(function () { finish(false); }, 500); });
+      media.addEventListener('loadeddata', function () { adLoaded = true; });
       media.muted = !!ad.muted;
       media.src = ad.mediaUrl;
       var pr = media.play();
@@ -10285,10 +10328,12 @@ function MVX_PLAYER_MODULE(W) {
       setSnd();
     } else {
       media.onload = function () { adLoaded = true; };
-      media.onerror = function () { failed = true; };
+      media.onerror = function () { failed = true; setTimeout(function () { finish(false); }, 500); };
       media.src = ad.mediaUrl;
     }
     paint();
+    /* محافظ: رسانهٔ تبلیغ اگر نیامد/گیر کرد، بیش از ۱۲ ثانیه پخش را معطل نگه نمی‌داریم */
+    setTimeout(function () { if (!adLoaded && !finished) { failed = true; finish(false); } }, 12000);
   }
 
   /* ── زیرنویس جدا (VTT/SRT از لبهٔ امن) ── */
@@ -14898,6 +14943,7 @@ function streamAdminHtml (st) {
     admNum('set-st-max', 'حداکثر پخش هم‌زمان هر حساب', st.maxSessions || 2, 1, 10, 'جلسهٔ قدیمی‌تر در تمدید بعدی قطع می‌شود.') +
     '</div>' +
     admChk('set-st-ip', st.bindIp !== false, 'قفل توکن به IP کاربر (لینک کپی‌شده روی اینترنت دیگر کار نمی‌کند)') +
+    admChk('set-st-direct', st.directPlay !== false, 'پخش مستقیم اضطراری: اگر سرور نتوانست فایل را از مبدأ بگیرد، مرورگر خودش مستقیم از لینک بگیرد (لینک فایل در مرورگر دیده می‌شود؛ برای لینک‌هایی که مبدأ، دسترسی سرور را می‌بندد لازم است)') +
     admChk('set-st-wm', st.watermark !== false, 'واترمارک متحرک شناسهٔ کاربر روی تصویر (ردیابی ضبط صفحه)') +
     '<div class="d-sec-h" style="margin-top:12px">لبه‌های پخش (Worker روی اکانت‌های دیگر)</div>' +
     (edges || '<p class="note" style="margin:8px 0">لبه‌ای اضافه نشده؛ ویدئو از همین Worker (مسیر /sv) پراکسی می‌شود. برای سهمیهٔ بیشتر، یک یا چند لبه روی اکانت‌های رایگان دیگر بسازید.</p>') +
@@ -15849,6 +15895,7 @@ function bindAdminTab (tab, q) {
         streamTokenMin: $('#set-st-ttl') ? $('#set-st-ttl').value : undefined,
         streamMaxSessions: $('#set-st-max') ? $('#set-st-max').value : undefined,
         streamBindIp: $('#set-st-ip') ? $('#set-st-ip').checked : undefined,
+        streamDirectPlay: $('#set-st-direct') ? $('#set-st-direct').checked : undefined,
         streamWatermark: $('#set-st-wm') ? $('#set-st-wm').checked : undefined,
       };
       var btEl = $('#set-bot');
