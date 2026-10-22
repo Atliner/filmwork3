@@ -138,9 +138,16 @@ async function streamEdgeChecks(request, secret, tok, kind) {
   if (tok.a && tok.a !== await streamBindHash(secret, 'ua', ua)) return 'ua';
   const dest = request.headers.get('sec-fetch-dest');
   if (dest) {
-    const ok = kind === 'v' ? ['video', 'audio'] : ['video', 'audio', 'empty'];
+    /* mkv needs a JS demuxer: the page itself fetches the bytes (dest empty) */
+    const ok = kind === 'v'
+      ? ['video', 'audio', 'media'].concat(tok.f === 'mkv' ? ['empty'] : [])
+      : ['video', 'audio', 'media', 'empty'];
     if (ok.indexOf(dest) < 0) return 'dest';
-  } else if (streamModernBrowserUa(ua)) return 'client';
+  } else if (streamModernBrowserUa(ua)) {
+    /* WebView/older browsers may omit Fetch Metadata entirely — allow when the
+       request clearly comes from the player page; a bare downloader (no referer) stays out. */
+    if (!ref) return 'client';
+  }
   return '';
 }
 function streamMime(fmt, upstreamType) {
@@ -295,15 +302,42 @@ async function streamEdgeSubtitle(request, tok) {
   h.set('cache-control', 'private, max-age=3600');
   return new Response(text, { status: 200, headers: h });
 }
+async function streamEdgeStatus(request, secret, tok) {
+  const json = (o) => new Response(JSON.stringify(o), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+  if (!tok || tok.v !== 1) return json({ ok: false, reason: 'token' });
+  if (!(Number(tok.e) > Date.now() / 1000)) return json({ ok: false, reason: 'expired' });
+  const ref = request.headers.get('referer') || request.headers.get('origin') || '';
+  if (ref && Array.isArray(tok.o) && tok.o.length) {
+    let host = '';
+    try { host = new URL(ref).host.toLowerCase(); } catch (e) { host = ''; }
+    if (host && tok.o.indexOf(host) < 0) return json({ ok: false, reason: 'origin' });
+  }
+  if (tok.k !== 't') {
+    const ip = request.headers.get('cf-connecting-ip') || '';
+    if (tok.i && ip && tok.i !== await streamBindHash(secret, 'ip', streamIpPrefix(ip))) return json({ ok: false, reason: 'ip' });
+    const ua = request.headers.get('user-agent') || '';
+    if (!/AppleCoreMedia/i.test(ua) && tok.a && tok.a !== await streamBindHash(secret, 'ua', ua)) return json({ ok: false, reason: 'ua' });
+    try {
+      const up = await fetch(tok.u, { method: 'GET', headers: { 'range': 'bytes=0-1', 'user-agent': ua || 'Mozilla/5.0' }, redirect: 'follow' });
+      const st = up.status;
+      try { if (up.body) await up.body.cancel(); } catch (e) { }
+      if (st >= 400 && st !== 416) return json({ ok: false, reason: 'upstream', upstream: st });
+    } catch (e) {
+      return json({ ok: false, reason: 'upstream', upstream: 0 });
+    }
+  }
+  return json({ ok: true });
+}
 async function streamEdgeHandle(request, secret, opts) {
   opts = opts || {};
   if (!secret) return new Response('edge not configured', { status: 503 });
   const url = new URL(request.url);
   let path = url.pathname;
   if (opts.prefix && path.indexOf(opts.prefix) === 0) path = path.slice(opts.prefix.length);
-  const m = /^\/(v|h|t)\/([A-Za-z0-9_-]{24,4000})(\/.*)?$/.exec(path);
+  const m = /^\/(v|h|t|status)\/([A-Za-z0-9_-]{24,4000})(\/.*)?$/.exec(path);
   if (!m) return new Response('not found', { status: 404 });
   const tok = await streamTokenOpen(secret, m[2]);
+  if (m[1] === 'status') return streamEdgeStatus(request, secret, tok);
   if (request.method === 'OPTIONS') {
     const h = streamEdgeCors(request, tok);
     h['access-control-allow-methods'] = 'GET, HEAD, OPTIONS';

@@ -12,7 +12,7 @@ const root = new URL('../', import.meta.url);
 const source = fs.readFileSync(new URL('worker.js', root), 'utf8');
 const NAMES = ['bytesToHex', 'hmacSha256Bytes', 'hmacHex', 'b64urlDecode', 'bytesB64url', 'streamAesKey', 'streamTokenOpen',
   'streamIpPrefix', 'streamBindHash', 'streamModernBrowserUa', 'streamEdgeCors', 'streamEdgeDeny', 'streamEdgeChecks', 'streamMime',
-  'streamEdgeProgressive', 'streamEdgeHls', 'decodeSubtitleBytes', 'tsToVtt', 'srtToVtt', 'streamEdgeSubtitle', 'streamEdgeHandle'];
+  'streamEdgeProgressive', 'streamEdgeHls', 'decodeSubtitleBytes', 'tsToVtt', 'srtToVtt', 'streamEdgeSubtitle', 'streamEdgeStatus', 'streamEdgeHandle'];
 const mod = await import('data:text/javascript;base64,' + Buffer.from(source + '\nexport { ' + NAMES.join(', ') + ', WIN1256_HIGH };').toString('base64'));
 
 const header = `/*

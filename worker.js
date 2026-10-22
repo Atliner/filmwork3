@@ -2593,9 +2593,16 @@ async function streamEdgeChecks(request, secret, tok, kind) {
   if (tok.a && tok.a !== await streamBindHash(secret, 'ua', ua)) return 'ua';
   const dest = request.headers.get('sec-fetch-dest');
   if (dest) {
-    const ok = kind === 'v' ? ['video', 'audio'] : ['video', 'audio', 'empty'];
+    /* mkv needs a JS demuxer: the page itself fetches the bytes (dest empty) */
+    const ok = kind === 'v'
+      ? ['video', 'audio', 'media'].concat(tok.f === 'mkv' ? ['empty'] : [])
+      : ['video', 'audio', 'media', 'empty'];
     if (ok.indexOf(dest) < 0) return 'dest';
-  } else if (streamModernBrowserUa(ua)) return 'client';
+  } else if (streamModernBrowserUa(ua)) {
+    /* WebView/older browsers may omit Fetch Metadata entirely — allow when the
+       request clearly comes from the player page; a bare downloader (no referer) stays out. */
+    if (!ref) return 'client';
+  }
   return '';
 }
 function streamMime(fmt, upstreamType) {
@@ -2727,15 +2734,45 @@ async function streamEdgeSubtitle(request, tok) {
   return new Response(text, { status: 200, headers: h });
 }
 /* دروازهٔ لبه: /v/<توکن> (MP4/WebM)، /h/<توکن>/<مسیر> (HLS)، /t/<توکن> (زیرنویس) */
+/* تشخیصِ پخش: وقتی <video> خطا می‌دهد، پلیر این مسیر را می‌گیرد تا دلیل دقیق
+   (توکن/مهلت/آی‌پی/مرورگر یا در دسترس نبودنِ مبدأ فایل) را به کاربر بگوید.
+   هیچ بایتی از رسانه برنمی‌گرداند و عمداً سخت‌گیری dest ندارد (fetch تشخیصی است). */
+async function streamEdgeStatus(request, secret, tok) {
+  const json = (o) => new Response(JSON.stringify(o), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+  if (!tok || tok.v !== 1) return json({ ok: false, reason: 'token' });
+  if (!(Number(tok.e) > Date.now() / 1000)) return json({ ok: false, reason: 'expired' });
+  const ref = request.headers.get('referer') || request.headers.get('origin') || '';
+  if (ref && Array.isArray(tok.o) && tok.o.length) {
+    let host = '';
+    try { host = new URL(ref).host.toLowerCase(); } catch (e) { host = ''; }
+    if (host && tok.o.indexOf(host) < 0) return json({ ok: false, reason: 'origin' });
+  }
+  if (tok.k !== 't') {
+    const ip = request.headers.get('cf-connecting-ip') || '';
+    if (tok.i && ip && tok.i !== await streamBindHash(secret, 'ip', streamIpPrefix(ip))) return json({ ok: false, reason: 'ip' });
+    const ua = request.headers.get('user-agent') || '';
+    if (!/AppleCoreMedia/i.test(ua) && tok.a && tok.a !== await streamBindHash(secret, 'ua', ua)) return json({ ok: false, reason: 'ua' });
+    try {
+      const up = await fetch(tok.u, { method: 'GET', headers: { 'range': 'bytes=0-1', 'user-agent': ua || 'Mozilla/5.0' }, redirect: 'follow' });
+      const st = up.status;
+      try { if (up.body) await up.body.cancel(); } catch (e) { }
+      if (st >= 400 && st !== 416) return json({ ok: false, reason: 'upstream', upstream: st });
+    } catch (e) {
+      return json({ ok: false, reason: 'upstream', upstream: 0 });
+    }
+  }
+  return json({ ok: true });
+}
 async function streamEdgeHandle(request, secret, opts) {
   opts = opts || {};
   if (!secret) return new Response('edge not configured', { status: 503 });
   const url = new URL(request.url);
   let path = url.pathname;
   if (opts.prefix && path.indexOf(opts.prefix) === 0) path = path.slice(opts.prefix.length);
-  const m = /^\/(v|h|t)\/([A-Za-z0-9_-]{24,4000})(\/.*)?$/.exec(path);
+  const m = /^\/(v|h|t|status)\/([A-Za-z0-9_-]{24,4000})(\/.*)?$/.exec(path);
   if (!m) return new Response('not found', { status: 404 });
   const tok = await streamTokenOpen(secret, m[2]);
+  if (m[1] === 'status') return streamEdgeStatus(request, secret, tok);
   if (request.method === 'OPTIONS') {
     const h = streamEdgeCors(request, tok);
     h['access-control-allow-methods'] = 'GET, HEAD, OPTIONS';
@@ -9517,11 +9554,569 @@ function MVX_PLAYER_MODULE(W) {
     }
     HLS_WAIT.push(cb);
   }
+  /* ── پخش MKV در مرورگر: demux جریانیِ EBML + تبدیل به fMP4 و تغذیهٔ MediaSource ──
+     مرورگرها MKV را مستقیم نمی‌پذیرند؛ پس بایت‌ها با fetch (dest=empty — لبه برای
+     فرمت mkv مجاز می‌کند) خوانده می‌شوند، بلوک‌ها demux و به فرگمنت fMP4 تبدیل
+     می‌شوند. کدک‌های MVP: H.264 (V_MPEG4/ISO/AVC) و AAC. Range برای جهش (seek) استفاده
+     می‌شود؛ خوشه‌ها (Cluster) آفست می‌گیرند. */
+  function mkvBytes(parts) {
+    var n = 0, i;
+    for (i = 0; i < parts.length; i++) n += parts[i].length;
+    var out = new Uint8Array(n), o = 0;
+    for (i = 0; i < parts.length; i++) { out.set(parts[i], o); o += parts[i].length; }
+    return out;
+  }
+  function mkvVint(buf, pos, keep) {
+    if (pos >= buf.length) return null;
+    var b0 = buf[pos], len = 1, m = 0x80;
+    while (len <= 8 && !(b0 & m)) { m >>= 1; len++; }
+    if (len > 8 || pos + len > buf.length) return null;
+    var v = 0, i;
+    if (keep) { for (i = 0; i < len; i++) v = v * 256 + buf[pos + i]; }
+    else {
+      v = b0 & (0xff >> len);
+      for (i = 1; i < len; i++) v = v * 256 + buf[pos + i];
+      if (v === Math.pow(2, 7 * len) - 1) v = -1;
+    }
+    return { v: v, len: len };
+  }
+  function mkvUi(buf, pos, len) {
+    var v = 0;
+    for (var i = 0; i < len; i++) v = v * 256 + buf[pos + i];
+    return v;
+  }
+  function mkvF64(buf, pos, len) {
+    if (len === 4) { var d4 = new DataView(buf.buffer, buf.byteOffset + pos, 4); return d4.getFloat32(0); }
+    var d8 = new DataView(buf.buffer, buf.byteOffset + pos, 8); return d8.getFloat64(0);
+  }
+  function mkvStr(buf, pos, len) {
+    var s = '';
+    for (var i = 0; i < len; i++) s += String.fromCharCode(buf[pos + i]);
+    return s.replace(/\0+$/, '');
+  }
+  function mkvElem(buf, pos) {
+    var id = mkvVint(buf, pos, true);
+    if (!id) return null;
+    var sz = mkvVint(buf, pos + id.len, false);
+    if (!sz) return null;
+    return { id: id.v, size: sz.v, hlen: id.len + sz.len };
+  }
+  function mkvSplitLacing(buf, pos, end, lacing) {
+    var frames = [], i;
+    if (lacing === 0) { if (end > pos) frames.push(buf.subarray(pos, end)); return frames; }
+    if (lacing === 1) {
+      var sizes = [], p = pos;
+      var count = buf[pos]; p++;
+      for (i = 0; i < count; i++) {
+        var sz = 0, b;
+        do { b = buf[p++]; sz += b; } while (b === 255);
+        sizes.push(sz);
+      }
+      var sum = 0;
+      for (i = 0; i < count; i++) sum += sizes[i];
+      sizes.push(Math.max(0, end - p - sum));
+      var off = p;
+      for (i = 0; i <= count; i++) { frames.push(buf.subarray(off, off + sizes[i])); off += sizes[i]; }
+      return frames;
+    }
+    if (lacing === 2) {
+      var c2 = buf[pos]; var p2 = pos + 1;
+      var s2 = [], acc = 0;
+      var v0 = mkvVint(buf, p2, false); p2 += v0.len; acc = v0.v; s2.push(acc);
+      for (i = 1; i < c2; i++) {
+        var vd = mkvVint(buf, p2, false); p2 += vd.len;
+        var dlt = vd.v;
+        if (dlt >= Math.pow(2, 7 * vd.len - 1)) dlt -= Math.pow(2, 7 * vd.len);
+        acc += dlt; s2.push(acc);
+      }
+      var sum2 = 0;
+      for (i = 0; i < c2; i++) sum2 += s2[i];
+      s2.push(end - p2 - sum2);
+      var off2 = p2;
+      for (i = 0; i <= c2; i++) { frames.push(buf.subarray(off2, off2 + s2[i])); off2 += s2[i]; }
+      return frames;
+    }
+    var c3 = buf[pos];
+    var each = Math.floor((end - pos - 1) / (c3 + 1));
+    for (i = 0; i <= c3; i++) frames.push(buf.subarray(pos + 1 + i * each, pos + 1 + (i + 1) * each));
+    return frames;
+  }
+  function mkvParseTracks(buf, pos, end) {
+    var out = [];
+    while (pos < end) {
+      var e = mkvElem(buf, pos);
+      if (!e || e.size < 0 || pos + e.hlen + e.size > end) break;
+      if (e.id === 0xAE) {
+        var t = { no: 0, type: 0, codec: '', priv: null, w: 0, h: 0, rate: 48000, ch: 2 };
+        var p = pos + e.hlen, pe = p + e.size;
+        while (p < pe) {
+          var c = mkvElem(buf, p);
+          if (!c || c.size < 0 || p + c.hlen + c.size > pe) break;
+          var dp = p + c.hlen;
+          if (c.id === 0xD7) t.no = mkvUi(buf, dp, c.size);
+          else if (c.id === 0x83) t.type = mkvUi(buf, dp, c.size);
+          else if (c.id === 0x86) t.codec = mkvStr(buf, dp, c.size);
+          else if (c.id === 0x63A2) t.priv = buf.slice(dp, dp + c.size);
+          else if (c.id === 0xE0) {
+            var vp = dp, ve = dp + c.size;
+            while (vp < ve) {
+              var vc = mkvElem(buf, vp);
+              if (!vc || vc.size < 0 || vp + vc.hlen + vc.size > ve) break;
+              if (vc.id === 0xB0) t.w = mkvUi(buf, vp + vc.hlen, vc.size);
+              if (vc.id === 0xBA) t.h = mkvUi(buf, vp + vc.hlen, vc.size);
+              vp += vc.hlen + vc.size;
+            }
+          } else if (c.id === 0xE1) {
+            var ap = dp, ae = dp + c.size;
+            while (ap < ae) {
+              var ac = mkvElem(buf, ap);
+              if (!ac || ac.size < 0 || ap + ac.hlen + ac.size > ae) break;
+              if (ac.id === 0xB5) t.rate = mkvF64(buf, ap + ac.hlen, ac.size);
+              if (ac.id === 0x9F) t.ch = mkvUi(buf, ap + ac.hlen, ac.size);
+              ap += ac.hlen + ac.size;
+            }
+          }
+          p += c.hlen + c.size;
+        }
+        out.push(t);
+      }
+      pos += e.hlen + e.size;
+    }
+    return out;
+  }
+  function mkvCreate(h) {
+    return {
+      h: h, buf: new Uint8Array(0), pos: 0, base: 0, segPos: -1, inCl: false, clEnd: -1,
+      clTime: -1, clOff: -1, scaleMs: 1, tracks: null, clusters: [], cues: [], ended: false
+    };
+  }
+  function mkvGrow(st, chunk) {
+    var keep = st.buf.subarray(st.pos);
+    var add = chunk || new Uint8Array(0);
+    if (st.pos > 1024 * 1024) {
+      st.base += st.pos;
+      st.buf = mkvBytes([keep, add]);
+      st.pos = 0;
+    } else {
+      st.buf = mkvBytes([st.buf, add]);
+    }
+  }
+  function mkvCloseCluster(st) {
+    if (st.h.clusterEnd) st.h.clusterEnd(st.clTime, st.clOff);
+    st.inCl = false; st.clEnd = -1; st.clTime = -1; st.clOff = -1;
+  }
+  function mkvFeed(st, chunk) {
+    if (chunk && chunk.length) mkvGrow(st, chunk);
+    if (!chunk) st.ended = true;
+    for (;;) {
+      if (st.inCl && st.clEnd >= 0 && st.pos >= st.clEnd) { mkvCloseCluster(st); continue; }
+      var hd = mkvElem(st.buf, st.pos);
+      if (!hd) return;
+      var avail = st.buf.length - st.pos;
+      var total = hd.hlen + (hd.size < 0 ? 0 : hd.size);
+      var fileOff = st.base + st.pos;
+      var TOP = { 0x18538067: 1, 0x1F43B675: 1, 0x1654AE6B: 1, 0x1549A966: 1, 0x1C53BB6B: 1, 0x114D9B74: 1 };
+      if (st.inCl && st.clEnd < 0 && (hd.id === 0x1F43B675 || hd.id === 0x1654AE6B || hd.id === 0x1549A966 || hd.id === 0x1C53BB6B || hd.id === 0x114D9B74 || hd.id === 0x1254C367 || hd.id === 0x1043A770)) {
+        mkvCloseCluster(st); continue;
+      }
+      if (hd.id === 0x18538067) {
+        st.segPos = fileOff + hd.hlen;
+        st.pos += hd.hlen;
+        continue;
+      }
+      if (hd.id === 0x1F43B675) {
+        st.inCl = true;
+        st.clEnd = hd.size < 0 ? -1 : st.pos + total;
+        st.clTime = -1; st.clOff = fileOff;
+        st.pos += hd.hlen;
+        st.clusters.push({ t: -1, off: fileOff });
+        continue;
+      }
+      if (st.inCl) {
+        if (hd.id === 0xA3 || hd.id === 0xA0) {
+          if (avail < total) return;
+          var pl = st.pos + hd.hlen, pe = pl + hd.size, key = hd.id === 0xA3, block = null, ref = false;
+          if (hd.id === 0xA0) {
+            var gp = pl;
+            while (gp < pe) {
+              var ge = mkvElem(st.buf, gp);
+              if (!ge || ge.size < 0 || gp + ge.hlen + ge.size > pe) break;
+              if (ge.id === 0xA1) { block = { p: gp + ge.hlen, e: gp + ge.hlen + ge.size }; }
+              if (ge.id === 0xFB) ref = true;
+              gp += ge.hlen + ge.size;
+            }
+            key = !!block && !ref;
+          } else block = { p: pl, e: pe };
+          if (block) {
+            var tv = mkvVint(st.buf, block.p, false);
+            if (tv && tv.len + 3 <= block.e - block.p) {
+              var rel = (st.buf[block.p + tv.len] << 8) | st.buf[block.p + tv.len + 1];
+              if (rel >= 32768) rel -= 65536;
+              var flags = st.buf[block.p + tv.len + 2];
+              var lacing = (flags >> 1) & 3;
+              if (hd.id === 0xA3) key = !!(flags & 0x80);
+              var frames = mkvSplitLacing(st.buf, block.p + tv.len + 3, block.e, lacing);
+              var tMs = st.clTime < 0 ? 0 : st.clTime * st.scaleMs + rel * st.scaleMs;
+              for (var fi = 0; fi < frames.length; fi++) {
+                if (st.h.sample) st.h.sample(tv.v, tMs, key, frames[fi]);
+              }
+              var lastC = st.clusters[st.clusters.length - 1];
+              if (lastC && lastC.t < 0) lastC.t = tMs;
+            }
+          }
+          st.pos += total;
+          continue;
+        }
+        if (hd.id === 0xE7) {
+          if (avail < total) return;
+          st.clTime = mkvUi(st.buf, st.pos + hd.hlen, hd.size);
+          st.pos += total;
+          continue;
+        }
+        if (avail < total) return;
+        st.pos += total;
+        continue;
+      }
+      /* فرزندان Segment / سطح بالا */
+      if (hd.size < 0) {
+        if (avail < hd.hlen) return;
+        st.pos += hd.hlen;
+        continue;
+      }
+      if (avail < total) {
+        if (st.ended) return;
+        return;
+      }
+      if (hd.id === 0x1549A966) {
+        var ip = st.pos + hd.hlen, ie = ip + hd.size;
+        while (ip < ie) {
+          var ie2 = mkvElem(st.buf, ip);
+          if (!ie2 || ie2.size < 0 || ip + ie2.hlen + ie2.size > ie) break;
+          if (ie2.id === 0x2AD7B1) st.scaleMs = mkvUi(st.buf, ip + ie2.hlen, ie2.size) / 1000000;
+          ip += ie2.hlen + ie2.size;
+        }
+      } else if (hd.id === 0x1654AE6B) {
+        st.tracks = mkvParseTracks(st.buf, st.pos + hd.hlen, st.pos + total);
+        if (st.h.tracks) st.h.tracks(st.tracks);
+      } else if (hd.id === 0x1C53BB6B) {
+        var cp = st.pos + hd.hlen, ce = cp + hd.size;
+        while (cp < ce) {
+          var cpe = mkvElem(st.buf, cp);
+          if (!cpe || cpe.size < 0 || cp + cpe.hlen + cpe.size > ce) break;
+          if (cpe.id === 0xBB) {
+            var cT = -1, cPos = -1, q = cp + cpe.hlen, qe = q + cpe.size;
+            while (q < qe) {
+              var qe2 = mkvElem(st.buf, q);
+              if (!qe2 || qe2.size < 0 || q + qe2.hlen + qe2.size > qe) break;
+              if (qe2.id === 0xB3) cT = mkvUi(st.buf, q + qe2.hlen, qe2.size);
+              if (qe2.id === 0xB7) {
+                var w = q + qe2.hlen, we = w + qe2.size;
+                while (w < we) {
+                  var we2 = mkvElem(st.buf, w);
+                  if (!we2 || we2.size < 0 || w + we2.hlen + we2.size > we) break;
+                  if (we2.id === 0xF1) cPos = mkvUi(st.buf, w + we2.hlen, we2.size);
+                  w += we2.hlen + we2.size;
+                }
+              }
+              q += qe2.hlen + qe2.size;
+            }
+            if (cT >= 0 && cPos >= 0 && st.segPos >= 0) st.cues.push({ t: cT * st.scaleMs, off: st.segPos + cPos });
+          }
+          cp += cpe.hlen + cpe.size;
+        }
+      }
+      st.pos += total;
+    }
+  }
+  /* ── مبدل fMP4 ── */
+  function u16(n) { return new Uint8Array([(n >> 8) & 255, n & 255]); }
+  function u32(n) { return new Uint8Array([(n >> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255]); }
+  function mkvAscii(s) { var a = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 255; return a; }
+  function mkvBox(type, parts) {
+    var body = mkvBytes(parts || []);
+    return mkvBytes([u32(body.length + 8), mkvAscii(type), body]);
+  }
+  function mkvFull(type, ver, flags, parts) {
+    return mkvBox(type, [new Uint8Array([ver, (flags >> 16) & 255, (flags >> 8) & 255, flags & 255])].concat(parts || []));
+  }
+  function mkvMatrix() { return mkvBytes([u32(0x00010000), u32(0), u32(0), u32(0), u32(0x00010000), u32(0), u32(0), u32(0), u32(0x40000000)]); }
+  function mkvDsmLen(n) {
+    return new Uint8Array([0x80 | ((n >> 21) & 127), 0x80 | ((n >> 14) & 127), 0x80 | ((n >> 7) & 127), n & 127]);
+  }
+  function mp4Init(tracks) {
+    var ftyp = mkvBox('ftyp', [mkvAscii('iso5'), u32(0), mkvAscii('iso5'), mkvAscii('iso6'), mkvAscii('mp41')]);
+    var mvhd = mkvFull('mvhd', 0, 0, [u32(0), u32(0), u32(0), u32(1000), u32(0), u32(0x00010000), u16(0x0100), u16(0), u32(0), u32(0), mkvMatrix(),
+      u32(0), u32(0), u32(0), u32(0), u32(0), u32(0), u32(3)]);
+    var traks = [];
+    for (var i = 0; i < tracks.length; i++) {
+      var t = tracks[i];
+      var tkhd = mkvFull('tkhd', 0, 3, [u32(0), u32(0), u32(t.id), u32(0), u32(0), u32(0), u32(0), u16(0), u16(0), u16(t.kind === 'audio' ? 0x0100 : 0), u16(0), mkvMatrix(),
+        u32((t.w || 0) * 65536), u32((t.h || 0) * 65536)]);
+      var mdhd = mkvFull('mdhd', 0, 0, [u32(0), u32(0), u32(t.timescale), u32(0), u16(0x55c4), u16(0)]);
+      var hdlr = mkvFull('hdlr', 0, 0, [u32(0), mkvAscii(t.kind === 'video' ? 'vide' : 'soun'), u32(0), u32(0), u32(0), mkvAscii(t.kind === 'video' ? 'VideoHandler' : 'SoundHandler'), new Uint8Array([0])]);
+      var minf0 = t.kind === 'video'
+        ? mkvFull('vmhd', 0, 1, [u16(0), u16(0), u16(0), u16(0)])
+        : mkvFull('smhd', 0, 0, [u16(0), u16(0)]);
+      var dinf = mkvBox('dinf', [mkvFull('dref', 0, 0, [u32(1), mkvFull('url ', 0, 1, [])])]);
+      var entry;
+      if (t.kind === 'video') {
+        entry = mkvBox('avc1', [new Uint8Array(6), u16(1), u16(0), u16(0), u32(0), u32(0), u32(0), u16(t.w || 0), u16(t.h || 0),
+          u32(0x00480000), u32(0x00480000), u32(0), u16(1), new Uint8Array(32), u16(0x0018), u16(0xffff),
+          mkvBox('avcC', [t.extra])]);
+      } else {
+        var asc = t.extra && t.extra.length ? t.extra : new Uint8Array([0x12, (t.ch > 2 ? 0x0f : 0x10) | 0x00]);
+        if (!(t.extra && t.extra.length)) asc = new Uint8Array([0x10 | ((t.rate === 44100 ? 4 : 3) >> 1), ((t.rate === 44100 ? 4 : 3) & 1) << 7 | (t.ch & 15) << 3]);
+        var dsi = mkvBytes([new Uint8Array([0x05]), mkvDsmLen(asc.length), asc]);
+        var dcr = mkvBytes([new Uint8Array([0x04]), mkvDsmLen(13 + dsi.length), new Uint8Array([0x40, 0x15, 0, 0, 0]), u32(0), u32(0), dsi]);
+        var slc = mkvBytes([new Uint8Array([0x06]), mkvDsmLen(1), new Uint8Array([0x02])]);
+        var esd = mkvBytes([new Uint8Array([0x03]), mkvDsmLen(3 + dcr.length + slc.length), u16(t.id), new Uint8Array([0]), dcr, slc]);
+        entry = mkvBox('mp4a', [new Uint8Array(6), u16(1), u32(0), u32(0), u16(t.ch || 2), u16(16), u16(0), u16(0), u32(Math.round((t.timescale || 48000) * 65536)), mkvFull('esds', 0, 0, [esd])]);
+      }
+      var stbl = mkvBox('stbl', [mkvFull('stsd', 0, 0, [u32(1), entry]), mkvFull('stts', 0, 0, [u32(0)]), mkvFull('stsc', 0, 0, [u32(0)]),
+        mkvFull('stsz', 0, 0, [u32(0), u32(0)]), mkvFull('stco', 0, 0, [u32(0)])]);
+      var minf = mkvBox('minf', [minf0, dinf, stbl]);
+      traks.push(mkvBox('trak', [tkhd, mkvBox('mdia', [mdhd, hdlr, minf])]));
+    }
+    return mkvBytes([ftyp, mkvBox('moov', [mvhd].concat(traks))]);
+  }
+  function mp4Fragment(track, samples, seq) {
+    var tfhd = mkvFull('tfhd', 0, 0x020000, [u32(track.id)]);
+    var tfdt = mkvFull('tfdt', 0, 0, [u32(samples[0].bt)]);
+    var flags = 0x001 | 0x100 | 0x200 | (track.kind === 'video' ? 0x400 : 0);
+    var smp = [], dataSize = 0, i;
+    for (i = 0; i < samples.length; i++) {
+      smp.push(u32(samples[i].dur), u32(samples[i].data.length));
+      if (track.kind === 'video') smp.push(u32(samples[i].key ? 0x02000000 : 0x01010000));
+      dataSize += samples[i].data.length;
+    }
+    var smpBody = mkvBytes(smp);
+    function buildTrun(off) {
+      return mkvBox('trun', [new Uint8Array([0, (flags >> 16) & 255, (flags >> 8) & 255, flags & 255]), u32(samples.length), u32(off), smpBody]);
+    }
+    var trun = buildTrun(0);
+    var traf = mkvBox('traf', [tfhd, tfdt, trun]);
+    var mfhd = mkvFull('mfhd', 0, 0, [u32(seq)]);
+    var moof = mkvBox('moof', [mfhd, traf]);
+    trun = buildTrun(moof.length + 8);
+    traf = mkvBox('traf', [tfhd, tfdt, trun]);
+    moof = mkvBox('moof', [mfhd, traf]);
+    var parts = [moof, u32(dataSize + 8), mkvAscii('mdat')];
+    for (i = 0; i < samples.length; i++) parts.push(samples[i].data);
+    return mkvBytes(parts);
+  }
+  function mkvCodecString(tr) {
+    if (tr.kind === 'video' && tr.extra && tr.extra.length >= 4) {
+      var h = function (n) { return (n < 16 ? '0' : '') + n.toString(16); };
+      return 'avc1.' + h(tr.extra[1]) + h(tr.extra[2]) + h(tr.extra[3]);
+    }
+    return 'mp4a.40.2';
+  }
+  function mkvFail(title, body) {
+    message(title, body, [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }], ['بستن', close]]);
+  }
+  function destroyMkv() {
+    if (!P || !P.mkv) return;
+    var m = P.mkv;
+    P.mkv = null;
+    try { if (m.reader) m.reader.cancel(); } catch (e) { }
+    try { if (m.ctrl) m.ctrl.abort(); } catch (e) { }
+    try { if (m.vid) m.vid.removeEventListener('seeking', m.onSeek); } catch (e) { }
+    try { if (m.url) URL.revokeObjectURL(m.url); } catch (e) { }
+    try { if (m.ms && m.ms.readyState === 'open') m.ms.endOfStream(); } catch (e) { }
+  }
+  function mkvPump() {
+    var m = P && P.mkv;
+    if (!m || !m.sb || m.sb.updating) return;
+    if (m.queue.length) {
+      try { m.sb.appendBuffer(m.queue.shift()); return; } catch (e) { }
+      return;
+    }
+    if (m.ended && !m.sb.updating) {
+      try { m.ms.endOfStream(); } catch (e) { }
+      m.ended = 'done';
+      return;
+    }
+    try {
+      var b = m.sb.buffered, v = m.vid;
+      if (b && b.length && v && b.end(b.length - 1) > v.currentTime + 90) m.sb.remove(0, Math.max(0, v.currentTime - 30));
+    } catch (e) { }
+  }
+  function mkvOnSeek() {
+    var m = P && P.mkv;
+    if (!m || !m.tracks || !m.sb) return;
+    var v = m.vid, t = v.currentTime * 1000;
+    var b = m.sb.buffered, covered = false;
+    for (var i = 0; i < (b ? b.length : 0); i++) {
+      if (t >= b.start(i) * 1000 - 800 && t <= b.end(i) * 1000 + 800) { covered = true; break; }
+    }
+    if (covered) return;
+    var best = null, all = m.clusters.concat(m.cues).sort(function (a, c) { return a.t - c.t; });
+    for (var j = 0; j < all.length; j++) {
+      if (all[j].t <= t + 1 && (!best || all[j].t > best.t)) best = all[j];
+    }
+    if (!best) {
+      /* جلوتر از آنچه دانلود شده: فقط نمونه‌ها را تا زمان هدف دور می‌ریزیم */
+      m.skipUntil = t;
+      return;
+    }
+    m.skipUntil = 0;
+    m.queue = [];
+    try { if (m.reader) m.reader.cancel(); } catch (e) { }
+    try { m.sb.abort(); } catch (e) { }
+    m.ended = false;
+    runMkvFetch(m, best.off);
+  }
+  function runMkvFetch(m, from) {
+    var st = mkvCreate({
+      tracks: function (trs) {
+        var vid = null, aud = null;
+        for (var i = 0; i < trs.length; i++) {
+          if (trs[i].type === 1 && !vid) vid = trs[i];
+          if (trs[i].type === 2 && !aud) aud = trs[i];
+        }
+        if (!vid || !/^V_MPEG4\/ISO\/AVC/.test(vid.codec)) {
+          destroyMkv();
+          return mkvFail('کدک این فایل MKV پشتیبانی نمی‌شود', 'ویدئوی این نسخه با کدک «' + (vid ? vid.codec : 'نامشخص') + '» است و در پخش داخل صفحه فقط H.264 پشتیبانی می‌شود. نسخه/کیفیت دیگری انتخاب یا فایل را دانلود کنید.');
+        }
+        var tlist = [{ id: 1, kind: 'video', timescale: 1000, w: vid.w, h: vid.h, extra: vid.priv || new Uint8Array([1, 0x4d, 0x40, 0x28, 0xff, 0xe1, 0, 0]) }];
+        var dropAudio = false;
+        if (aud && /^A_AAC/.test(aud.codec)) {
+          tlist.push({ id: 2, kind: 'audio', timescale: Math.round(aud.rate) || 48000, ch: aud.ch, extra: aud.priv });
+        } else if (aud) dropAudio = true;
+        var type = 'video/mp4; codecs="' + tlist.map(mkvCodecString).join(',') + '"';
+        if (!W.MediaSource || !W.MediaSource.isTypeSupported || !W.MediaSource.isTypeSupported(type)) {
+          destroyMkv();
+          return mkvFail('مرورگر این کدک را ندارد', 'مرورگر شما از کدک این نسخه MKV پشتیبانی نمی‌کند. کیفیت/نسخهٔ دیگری انتخاب یا فایل را دانلود کنید.');
+        }
+        m.tracks = {};
+        for (var j = 0; j < tlist.length; j++) m.tracks[tlist[j].id] = tlist[j];
+        try {
+          m.sb = m.ms.addSourceBuffer(type);
+          m.sb.mode = 'segments';
+          m.sb.addEventListener('updateend', mkvPump);
+        } catch (e) {
+          destroyMkv();
+          return mkvFail('پخش شروع نشد', 'ساخت پخش داخل صفحه در این مرورگر ممکن نشد. فایل را دانلود کنید.');
+        }
+        m.queue.push(mp4Init(tlist));
+        mkvPump();
+        if (dropAudio) message('صدا پخش نمی‌شود', 'کدک صدای این نسخه در مرورگر پشتیبانی نمی‌شود؛ فقط تصویر پخش می‌شود.', [['بستن', hideMsg]]);
+        go();
+      },
+      sample: function (no, t, key, data) {
+        var m2 = P && P.mkv;
+        if (!m2 || !m2.tracks) return;
+        var tr = m2.tracks[no];
+        if (!tr) return;
+        if (m2.skipUntil && t < m2.skipUntil) return;
+        if (!m2.pend) m2.pend = {};
+        if (!m2.pend[no]) m2.pend[no] = [];
+        var arr = m2.pend[no];
+        var bt;
+        if (tr.kind === 'audio') {
+          if (typeof m2.aFrames !== 'number') m2.aFrames = Math.round(t * tr.timescale / 1000 / 1024);
+          bt = m2.aFrames * 1024;
+          m2.aFrames++;
+        } else bt = Math.round(t);
+        arr.push({ t: t, bt: bt, dur: tr.kind === 'audio' ? 1024 : 0, key: key, data: data.slice() });
+      },
+      clusterEnd: function () {
+        var m2 = P && P.mkv;
+        if (!m2 || !m2.tracks || !m2.pend) return;
+        var seq = m2.seq || 1;
+        for (var no in m2.pend) {
+          var arr = m2.pend[no];
+          if (!arr.length) continue;
+          var tr = m2.tracks[no];
+          for (var i = 0; i < arr.length - 1; i++) {
+            if (!arr[i].dur) arr[i].dur = Math.max(1, Math.round(arr[i + 1].t - arr[i].t));
+          }
+          if (!arr[arr.length - 1].dur) arr[arr.length - 1].dur = arr.length > 1 ? arr[arr.length - 2].dur : (tr.kind === 'audio' ? 1024 : 33);
+          m2.queue.push(mp4Fragment(tr, arr, seq++));
+          m2.pend[no] = [];
+        }
+        m2.seq = seq;
+        mkvPump();
+      }
+    });
+    st.base = from || 0;
+    m.st = st;
+    var headers = { accept: '*/*' };
+    if (from) headers.range = 'bytes=' + from + '-';
+    var opts = { headers: headers, credentials: 'omit' };
+    var chain = W.fetch(m.src, opts).then(function (res) {
+      if (!res || !res.ok) throw new Error('http ' + (res ? res.status : 0));
+      if (!res.body || !res.body.getReader) throw new Error('no stream');
+      m.reader = res.body.getReader();
+      if (res.body.locked !== undefined && m.ctrl === undefined) { /* noop */ }
+      (function pumpRead() {
+        m.reader.read().then(function (r) {
+          if (P && P.mkv !== m) return;
+          if (r.done) {
+            mkvFeed(st, null);
+            var last = P && P.mkv;
+            if (last) {
+              st.h.clusterEnd();
+              last.ended = true;
+              mkvPump();
+            }
+            return;
+          }
+          mkvFeed(st, r.value && r.value.length ? r.value : new Uint8Array(0));
+          pumpRead();
+        }).catch(function (e) {
+          if (!P || P.mkv !== m) return;
+          if (m.seeking) return;
+          destroyMkv();
+          mkvFail('پخش MKV قطع شد', 'دانلود بایت‌های فایل ناتمام ماند. اینترنت را بررسی و دوباره تلاش کنید.');
+        });
+      })();
+    }).catch(function (e) {
+      if (!P || P.mkv !== m) return;
+      destroyMkv();
+      mkvFail('بارگذاری فایل MKV ممکن نشد', 'دریافت بایت‌های این فایل از مبدأ ممکن نشد. اگر لینک منقضی شده نسخهٔ دیگری را انتخاب کنید یا فایل را دانلود کنید.');
+    });
+  }
+  function startMkv(src) {
+    destroyMkv();
+    var v = P.video;
+    if (!W.MediaSource) {
+      return mkvFail('مرورگر شما MKV را پخش نمی‌کند', 'این مرورگر از پخش داخل صفحهٔ MKV پشتیبانی نمی‌کند. فایل را دانلود کنید یا نسخهٔ mp4 را انتخاب کنید.');
+    }
+    var ms = new W.MediaSource();
+    var url = '';
+    try { url = URL.createObjectURL(ms); } catch (e) {
+      return mkvFail('مرورگر شما MKV را پخش نمی‌کند', 'ساخت پخش داخل صفحه در این مرورگر ممکن نشد.');
+    }
+    var m = { ms: ms, url: url, src: src, queue: [], pend: {}, seq: 1, clusters: [], cues: [], vid: v, ended: false, skipUntil: 0 };
+    m.onSeek = function () { mkvOnSeek(); };
+    P.mkv = m;
+    try { v.src = url; } catch (e) { }
+    v.addEventListener('seeking', m.onSeek);
+    ms.addEventListener('sourceopen', function onOpen() {
+      if (!P || P.mkv !== m) return;
+      ms.removeEventListener('sourceopen', onOpen);
+      runMkvFetch(m, 0);
+    });
+    setLoading(true);
+    setTimeout(function () { if (P) setLoading(false); }, 2500);
+  }
+  W.MVX_MKV = {
+    mkvVint: mkvVint, mkvElem: mkvElem, mkvCreate: mkvCreate, mkvFeed: mkvFeed,
+    mp4Init: mp4Init, mp4Fragment: mp4Fragment, mkvSplitLacing: mkvSplitLacing, mkvCodecString: mkvCodecString
+  };
   function setSource(src, fmt, fresh) {
     var v = P.video;
     destroyHls();
+    destroyMkv();
     hidePause();
     var seekTo = P.pendingSeek || 0;
+    if (fmt === 'mkv') {
+      startMkv(src);
+      if (seekTo) try { v.currentTime = seekTo; } catch (e) { }
+      else if (fresh) { var sk = ls(posKey()); if (sk && sk.t > 20) { P.pendingSeek = sk.t; try { v.currentTime = sk.t; } catch (e) { } } }
+      return;
+    }
     P.pendingSeek = 0;
     var resume = 0;
     if (fresh && !seekTo) { var sp = ls(posKey()); if (sp && sp.t > 20) resume = sp.t; }
@@ -9570,23 +10165,48 @@ function MVX_PLAYER_MODULE(W) {
     q('[data-r="no"]', box).onclick = function () { done(false); };
     P.resT = setTimeout(function () { done(true); }, 7000);
   }
+  function diagExplain(cb) {
+    var src = (P && P.info && P.info.src) || '';
+    var u = String(src).replace(/\/(v|h)\/([^/]+)(\/.*)?$/, '/status/$2');
+    if (!u || u === src) return cb(null);
+    try {
+      W.fetch(u, { headers: { accept: 'application/json' } }).then(function (r) { return r.json(); }).then(function (j) { cb(j || null); }).catch(function () { cb(null); });
+    } catch (e) { cb(null); }
+  }
   function onVideoError() {
     if (!P || P.closed || P.adActive || !P.info) return;
     var err = P.video.error;
     var code = err ? err.code : 0;
     var fmt = P.info.fmt;
     if (P.errCount >= 1 && code === 4 && (fmt === 'mkv' || fmt === 'auto')) {
-      return message('این فایل در مرورگر شما پخش نمی‌شود', 'فرمت یا کدک این نسخه با مرورگر شما سازگار نیست. کیفیت یا نسخهٔ دیگری را از ⚙ انتخاب کنید یا فایل را دانلود کنید.', [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }, 1], ['بستن', close]]);
+      return message('این فایل در مرورگر شما پخش نمی‌شود', 'فرمت یا کدک این نسخه با مرورگر شما سازگار نیست. کیفیت یا نسخهٔ دیگری را از ⚙ انتخاب کنید یا فایل را دانلود کنید.', [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }], ['بستن', close]]);
     }
     if (P.errCount >= 2) {
-      /* کد ۴ = مرورگر این فایل/کدک را پخش نمی‌کند (مثلاً MKV/HEVC) — تلاش دوباره بی‌فایده است */
+      /* کد ۴ = مرورگر این فایل/کدک را پخش نمی‌کند — تلاش دوباره بی‌فایده است */
       if (code === 4) {
-        return message('این فایل در مرورگر شما پخش نمی‌شود', 'فرمت یا کدک این نسخه با مرورگر شما سازگار نیست. کیفیت یا نسخهٔ دیگری را از ⚙ انتخاب کنید یا فایل را دانلود کنید.', [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }, 1], ['بستن', close]]);
+        return message('این فایل در مرورگر شما پخش نمی‌شود', 'فرمت یا کدک این نسخه با مرورگر شما سازگار نیست. کیفیت یا نسخهٔ دیگری را از ⚙ انتخاب کنید یا فایل را دانلود کنید.', [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }], ['بستن', close]]);
       }
-      return message('پخش متوقف شد', 'اتصال به سرور پخش قطع شد. اینترنت/فیلترشکن را بررسی کنید و دوباره تلاش کنید.', [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; requestOpen('renew'); }, 1], ['بستن', close]]);
+      return message('پخش متوقف شد', 'اتصال به سرور پخش قطع شد. اینترنت/فیلترشکن را بررسی کنید و دوباره تلاش کنید.', [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; requestOpen('renew'); }], ['بستن', close]]);
     }
     P.errCount = (P.errCount || 0) + 1;
-    requestOpen('renew', P.errCount === 2 ? { avoidEdge: P.info.edge || '' } : null);
+    /* تشخیص دقیق: مسیر وضعیت می‌گوید مشکل از آی‌پی/مرورگر است یا مبدأ فایل جواب نمی‌دهد */
+    diagExplain(function (j) {
+      if (!P || P.closed) return;
+      var hard = j && j.ok === false && (j.reason === 'upstream' || j.reason === 'origin' || j.reason === 'ua');
+      if (hard) {
+        var texts = {
+          upstream: ['مبدأ این لینک در دسترس نیست', 'سرورِ داخلِ لینک پاسخ نداد (کد ' + (j.upstream || 0) + '). معمولاً لینک منقضی شده یا مبدأ فقط به برخی کشورها/ای‌پی‌ها سرویس می‌دهد. لینک را در مرورگر خودتان باز کنید؛ اگر باز شد یعنی مبدأ سرویس را محدود کرده و باید لینک را عوض کنید.'],
+          origin: ['این لینک از این صفحه باز نمی‌شود', 'آدرس پخش متعلق به سایت دیگری است و فقط از صفحهٔ خودش قابل استفاده است.'],
+          ua: ['مرورگر یا دستگاه تغییر کرده است', 'این پخش به همان مرورگرِ هنگامِ شروع گره خورده است. از همان مرورگر باز کنید یا دوباره پخش را بسازید.']
+        };
+        var t = texts[j.reason];
+        return message(t[0], t[1], [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; requestOpen('renew'); }], ['بستن', close]]);
+      }
+      if (j && j.ok === false && j.reason === 'ip' && P.errCount >= 2) {
+        return message('پخش به اینترنتِ هنگامِ شروع گره خورده است', 'اینترنت دستگاه عوض شده (ای‌پی تغییر کرده). با همین اینترنت دوباره «تلاش دوباره» را بزنید تا پخش تازه ساخته شود.', [['تلاش دوباره', function () { hideMsg(); P.errCount = 0; requestOpen('renew'); }], ['بستن', close]]);
+      }
+      requestOpen('renew', P.errCount === 2 ? { avoidEdge: P.info.edge || '' } : null);
+    });
   }
 
   /* ── تبلیغ ویدئویی/تصویری داخل پلیر (قبل از شروع و قبل از هر تعویض) ── */
@@ -10272,6 +10892,7 @@ function MVX_PLAYER_MODULE(W) {
     p.closed = true;
     clearInterval(p.wmT); clearInterval(p.nxT); clearTimeout(p.uiT); clearTimeout(p.resT); clearTimeout(p.bhT); clearTimeout(p.padT);
     destroyHls();
+    destroyMkv();
     try { p.video.pause(); p.video.removeAttribute('src'); p.video.load(); } catch (e) { }
     if (D.fullscreenElement || D.webkitFullscreenElement) { try { (D.exitFullscreen || D.webkitExitFullscreen).call(D); } catch (e) { } }
     if (p.tgFsOn) { try { tgFs(false); } catch (e) { } }

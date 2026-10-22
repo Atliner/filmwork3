@@ -276,13 +276,29 @@ try {
     const deny = async (h, reason, path = '/v/' + tok) => { const r = await handler(req(path, h)); assert.equal(r.status, 403, name + ' ' + reason); assert.equal(r.headers.get('x-mvx-deny'), reason); };
     await deny({ 'cf-connecting-ip': '9.9.9.9' }, 'ip');
     await deny({ 'sec-fetch-dest': 'document' }, 'dest');       // کپی لینک در تب جدید
-    await deny({ 'sec-fetch-dest': 'empty' }, 'dest');          // fetch افزونه‌ها
-    await deny({ 'sec-fetch-dest': '' }, 'client');             // دانلودمنیجر با UA کپی‌شده
+    await deny({ 'sec-fetch-dest': 'empty' }, 'dest');          // fetch افزونه‌ها/دانلودمنیجر (mp4)
+    await deny({ 'sec-fetch-dest': 'image' }, 'dest');
+    await deny({ 'sec-fetch-dest': '', referer: '' }, 'client'); // دانلودمنیجر با UA کپی‌شده و بدون referer
+    await deny({ 'sec-fetch-dest': '', referer: '', origin: '' }, 'client');
     await deny({ 'user-agent': 'Mozilla/5.0 Firefox/120.0' }, 'ua');
     await deny({ referer: 'https://evil.test/' }, 'origin');
+    const expired = await W.streamTokenMake(SECRET, { ...base, e: now - 5 });
+    const media = await handler(req('/v/' + tok, { 'sec-fetch-dest': 'media' }));
+    assert.equal(media.status, 206, 'Sec-Fetch-Dest: media (کرومیوم قدیمی) مجاز است');
+    const noMeta = await handler(req('/v/' + tok, { 'sec-fetch-dest': '' }));
+    assert.equal(noMeta.status, 206, 'WebView بدون هدرهای Sec-Fetch ولی با referer مجاز است');
+    const mktok = await W.streamTokenMake(SECRET, { ...base, f: 'mkv' });
+    const mkFetch = await handler(req('/v/' + mktok, { 'sec-fetch-dest': 'empty' }));
+    assert.equal(mkFetch.status, 206, 'برای mkv بایت‌ها با fetch صفحه (demux در مرورگر) گرفته می‌شود');
     const ios = await handler(req('/v/' + tok, { 'user-agent': 'AppleCoreMedia/1.0.0.21A329 (iPhone; U; CPU OS 17_0 like Mac OS X)', 'sec-fetch-dest': '' }));
     assert.equal(ios.status, 206, 'پخش‌کنندهٔ بومی iOS (بدون Sec-Fetch و با UA متفاوت) مجاز است');
-    const expired = await W.streamTokenMake(SECRET, { ...base, e: now - 5 });
+    /* مسیر تشخیصی: دلیل دقیق خطا + سلامت مبدأ، بدون بایت رسانه */
+    const st1 = await handler(req('/status/' + tok, { 'sec-fetch-dest': '' }));
+    assert.deepEqual(await st1.json(), { ok: true }, name + ' status ok');
+    const st2 = await handler(req('/status/' + tok, { 'cf-connecting-ip': '9.9.9.9', 'sec-fetch-dest': '' }));
+    assert.equal((await st2.json()).reason, 'ip', name + ' status ip');
+    const st3 = await handler(req('/status/' + expired, { 'sec-fetch-dest': '' }));
+    assert.equal((await st3.json()).reason, 'expired', name + ' status expired');
     await deny({}, 'expired', '/v/' + expired);
     await deny({}, 'token', '/h/' + tok + '/index.m3u8'); // نوع توکن باید با مسیر بخواند
   }
@@ -311,7 +327,7 @@ try {
   const h = await edge.fetch(new Request('https://edge.test/health?ts=' + now + '&sig=bad'), env);
   assert.deepEqual(await h.json(), { ok: true, v: 'mvx-edge-1', configured: true, auth: false });
 } finally { globalThis.fetch = realFetch; }
-console.log('PASS: encrypted stream tokens, edge anti-download checks (IP/UA/Sec-Fetch/Referer/expiry), iOS CoreMedia, HLS rewrite with signed foreign segments, cp1256 subtitles; edge file in sync with worker.js.');
+console.log('PASS: encrypted stream tokens, edge checks (IP/UA/Sec-Fetch/Referer/expiry; WebViews without Sec-Fetch play, downloaders stay out), mkv JS-fetch allowed, status diagnostic route, iOS CoreMedia, HLS rewrite with signed foreign segments, cp1256 subtitles; edge file in sync with worker.js.');
 
 /* ── ۴. API پخش: کلید اصلی، فقط مدیر، اشتراک، جلسه‌ها، تبلیغ پیش از پخش، لبهٔ داخلی ── */
 function memKV() {
@@ -644,6 +660,156 @@ console.log('PASS: ad platform outage falls back to house ads with a 30s backoff
   assert.equal(sub2Open.body.banners, undefined, 'مشترک واقعی بنر نمی‌بیند');
   assert.equal(sub2Open.body.wm, '7007', 'با وجود یوزرنیم، واترمارک شناسهٔ عددی تلگرام است (اولویت با عددی)');
 }
+/* ── ۱۳. موتور MKV: demux جریانیِ EBML + مبدل fMP4 (پخش mkv داخل پلیر) ── */
+{
+  const win = {};
+  W.MVX_PLAYER_MODULE(win);
+  const K = win.MVX_MKV;
+  assert.ok(K && K.mkvFeed && K.mp4Init && K.mp4Fragment, 'ماژول MKV روی پنجره سوار می‌شود');
+  const ui8 = (arr) => new Uint8Array(arr);
+  const cat = (...parts) => {
+    let n = 0; for (const p of parts) n += p.length;
+    const out = new Uint8Array(n); let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  };
+  const asc = (s) => ui8([...s].map(c => c.charCodeAt(0)));
+  const sz = (n) => {
+    for (let len = 1; len <= 8; len++) {
+      const max = Math.pow(2, 7 * len) - 2;
+      if (n <= max) {
+        const b = new Array(len).fill(0);
+        let v = n;
+        for (let i = len - 1; i >= 0; i--) { b[i] = v & 255; v = Math.floor(v / 256); }
+        b[0] |= (0x100 >> len) & 255;
+        return ui8(b);
+      }
+    }
+    throw new Error('size too big');
+  };
+  const el = (id, payload) => cat(id, sz(payload.length), payload);
+  const ID = {
+    ebml: ui8([0x1A, 0x45, 0xDF, 0xA3]), seg: ui8([0x18, 0x53, 0x80, 0x67]),
+    info: ui8([0x15, 0x49, 0xA9, 0x66]), tScale: ui8([0x2A, 0xD7, 0xB1]),
+    tracks: ui8([0x16, 0x54, 0xAE, 0x6B]), entry: ui8([0xAE]),
+    tNo: ui8([0xD7]), tType: ui8([0x83]), codec: ui8([0x86]), priv: ui8([0x63, 0xA2]),
+    video: ui8([0xE0]), w: ui8([0xB0]), h: ui8([0xBA]),
+    audio: ui8([0xE1]), rate: ui8([0xB5]), ch: ui8([0x9F]),
+    cues: ui8([0x1C, 0x53, 0xBB, 0x6B]), cuePt: ui8([0xBB]), cueTime: ui8([0xB3]),
+    cuePos: ui8([0xB7]), cueTrack: ui8([0xF7]), cueCluster: ui8([0xF1]),
+    cluster: ui8([0x1F, 0x43, 0xB6, 0x75]), clTime: ui8([0xE7]), block: ui8([0xA3])
+  };
+  const uint = (n, len) => { const b = new Array(len).fill(0); for (let i = len - 1; i >= 0; i--) { b[i] = n & 255; n = Math.floor(n / 256); } return ui8(b); };
+  const str = (s) => cat(asc(s), ui8([0]));
+  const avcC = ui8([1, 0x4d, 0x40, 0x28, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x4d, 0x40, 0x28, 0x01, 0x00, 0x04, 0x68, 0xee, 0x3c, 0x80]);
+  const ascAac = ui8([0x12, 0x10]);
+  const vidFrames = [ui8([0, 0, 0, 2, 0x65, 0x88]), ui8([0, 0, 0, 1, 0x41]), ui8([0, 0, 0, 1, 0x42])];
+  const audFrames = [ui8([0x21, 0x10, 0x04]), ui8([0x21, 0x11, 0x05])];
+  const blockOf = (track, rel, key, frame) => cat(
+    ui8([0x80 | track]), uint(rel < 0 ? rel + 65536 : rel, 2), ui8([key ? 0x80 : 0x00]), frame);
+  const trackEntry = (no, type, codecId, priv, extra) => el(ID.entry, cat(
+    el(ID.tNo, uint(no, 1)), el(ID.tType, uint(type, 1)), el(ID.codec, str(codecId)), el(ID.priv, priv), extra));
+  const videoTrack = trackEntry(1, 1, 'V_MPEG4/ISO/AVC', avcC,
+    el(ID.video, cat(el(ID.w, uint(1280, 2)), el(ID.h, uint(720, 2)))));
+  const rate8 = new Uint8Array(8); new DataView(rate8.buffer).setFloat64(0, 48000);
+  const audioTrack = trackEntry(2, 2, 'A_AAC', ascAac,
+    el(ID.audio, cat(el(ID.rate, rate8), el(ID.ch, uint(2, 1)))));
+  const cluster1 = el(ID.cluster, cat(
+    el(ID.clTime, uint(0, 1)),
+    el(ID.block, blockOf(1, 0, true, vidFrames[0])),
+    el(ID.block, blockOf(2, 0, true, audFrames[0]))));
+  const cluster2 = el(ID.cluster, cat(
+    el(ID.clTime, uint(40, 1)),
+    el(ID.block, blockOf(1, 0, false, vidFrames[1])),
+    el(ID.block, blockOf(1, 20, true, vidFrames[2])),
+    el(ID.block, blockOf(2, 0, true, audFrames[1]))));
+  const infoEl = el(ID.info, el(ID.tScale, uint(1000000, 3)));
+  const tracksEl = el(ID.tracks, cat(videoTrack, audioTrack));
+  const ebmlHdr = el(ID.ebml, ui8([0x1A, 0x45, 0xDF, 0xA3, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]));
+  const cuesBody = (clusterRel) => el(ID.cues, el(ID.cuePt, cat(el(ID.cueTime, uint(40, 1)),
+    el(ID.cuePos, cat(el(ID.cueTrack, uint(1, 1)), el(ID.cueCluster, uint(clusterRel, 4)))))));
+  const clusterRel = infoEl.length + tracksEl.length + cuesBody(0).length;
+  const file = cat(ebmlHdr, el(ID.seg, cat(infoEl, tracksEl, cuesBody(clusterRel), cluster1, cluster2)));
+
+  /* تغذیهٔ جریانی با تکه‌های ریز — درست مثل خواندن fetch */
+  const got = { tracks: null, samples: [], clusters: 0 };
+  const st = K.mkvCreate({
+    tracks: (tr) => { got.tracks = tr; },
+    sample: (no, t, key, data) => got.samples.push({ no, t, key, data: new Uint8Array(data) }),
+    clusterEnd: () => { got.clusters++; }
+  });
+  for (let i = 0; i < file.length; i += 7) K.mkvFeed(st, file.subarray(i, Math.min(file.length, i + 7)));
+  K.mkvFeed(st, null);
+  st.h.clusterEnd();
+
+  assert.equal(got.tracks.length, 2, 'دو ترک (ویدئو+صدا) پیدا شد');
+  assert.equal(got.tracks[0].codec, 'V_MPEG4/ISO/AVC');
+  assert.equal(got.tracks[0].w, 1280); assert.equal(got.tracks[0].h, 720);
+  assert.deepEqual([...got.tracks[0].priv], [...avcC], 'CodecPrivate ویدئو دست‌نخورده');
+  assert.equal(got.tracks[1].codec, 'A_AAC');
+  assert.equal(got.tracks[1].rate, 48000); assert.equal(got.tracks[1].ch, 2);
+  assert.deepEqual([...got.tracks[1].priv], [...ascAac]);
+  assert.equal(st.scaleMs, 1, 'TimecodeScale=1ms');
+  assert.equal(got.samples.length, 5, '۵ نمونه (۳ ویدئو + ۲ صدا)');
+  const vs = got.samples.filter(s => s.no === 1), as = got.samples.filter(s => s.no === 2);
+  assert.deepEqual(vs.map(s => s.t), [0, 40, 60], 'زمان‌بندی نمونه‌های ویدئو');
+  assert.deepEqual(vs.map(s => s.key), [true, false, true], 'کی‌فریم‌ها از فلگ SimpleBlock');
+  assert.deepEqual([...vs[1].data], [...vidFrames[1]], 'بایت‌های فریم بدون تغییر');
+  assert.deepEqual(as.map(s => s.t), [0, 40]);
+  assert.ok(st.clusters.length >= 2 && st.clusters[0].off > 0, 'آفست خوشه‌ها برای seek ثبت شد');
+  assert.equal(st.cues.length, 1);
+  assert.ok(Math.abs(st.cues[0].t - 40) < 0.01, 'Cues خوانده شد');
+  assert.equal(st.cues[0].off, st.segPos + clusterRel, 'آفست Cues نسبت به Segment درست است');
+
+  /* مبدل fMP4 */
+  const tlist = [
+    { id: 1, kind: 'video', timescale: 1000, w: 1280, h: 720, extra: avcC },
+    { id: 2, kind: 'audio', timescale: 48000, ch: 2, extra: ascAac }
+  ];
+  assert.equal(K.mkvCodecString(tlist[0]), 'avc1.4d4028', 'رشتهٔ کدک H.264 از avcC');
+  assert.equal(K.mkvCodecString(tlist[1]), 'mp4a.40.2');
+  const init = K.mp4Init(tlist);
+  const initStr = String.fromCharCode(...init);
+  for (const box of ['ftyp', 'moov', 'mvhd', 'trak', 'avc1', 'avcC', 'mp4a', 'esds', 'stbl']) {
+    assert.ok(initStr.includes(box), 'init segment جعبهٔ ' + box + ' دارد');
+  }
+  assert.ok(initStr.includes('iso5'), 'ftyp با major brand iso5');
+  const samples = [
+    { t: 0, bt: 0, dur: 40, key: true, data: vidFrames[0] },
+    { t: 40, bt: 40, dur: 20, key: false, data: vidFrames[1] }
+  ];
+  const frag = K.mp4Fragment(tlist[0], samples, 1);
+  const moofLen = (frag[0] << 24 | frag[1] << 16 | frag[2] << 8 | frag[3]);
+  const fragStr = String.fromCharCode(...frag);
+  assert.ok(fragStr.includes('moof') && fragStr.includes('traf') && fragStr.includes('trun') && fragStr.includes('tfdt'), 'فرگمنت ساختار moof/traf/trun/tfdt دارد');
+  assert.ok(fragStr.includes('mdat'), 'فرگمنت mdat دارد');
+  const trunAt = fragStr.indexOf('trun');
+  const dataOffset = (frag[trunAt + 12] << 24 | frag[trunAt + 13] << 16 | frag[trunAt + 14] << 8 | frag[trunAt + 15]); // پس از type+ver/flags+count
+  assert.equal(dataOffset, moofLen + 8, 'data_offset در trun به ابتدای دادهٔ mdat اشاره می‌کند');
+  const mdatAt = fragStr.indexOf('mdat') + 4;
+  assert.deepEqual([...frag.slice(mdatAt, mdatAt + vidFrames[0].length)], [...vidFrames[0]], 'نمونه‌ها بدون تغییر در mdat');
+  assert.deepEqual([...frag.slice(mdatAt + vidFrames[0].length, mdatAt + vidFrames[0].length + vidFrames[1].length)], [...vidFrames[1]]);
+
+  /* lacing: Xiph و EBML و fixed */
+  const laced = cat(ui8([2, 3, 5]), ui8([1, 2, 3]), ui8([9, 9, 9, 9, 9]), ui8([7])); // Xiph: اندازه‌ها 3 و 5
+  const fr = K.mkvSplitLacing(laced, 0, laced.length, 1);
+  assert.equal(fr.length, 3, 'Xiph سه قاب');
+  assert.deepEqual([...fr[0]], [1, 2, 3]);
+  assert.deepEqual([...fr[1]], [9, 9, 9, 9, 9]);
+  assert.deepEqual([...fr[2]], [7]);
+  const laced2 = cat(ui8([2, 0x83, 0xFF]), ui8([1, 2, 3]), ui8([4, 5]), ui8([6, 7, 8])); // EBML: size0=0x83→3، delta=0xFF→-1 ⇒ 2
+  const fr2 = K.mkvSplitLacing(laced2, 0, laced2.length, 2);
+  assert.equal(fr2.length, 3, 'EBML lacing سه قاب');
+  assert.deepEqual([...fr2[0]], [1, 2, 3]);
+  assert.deepEqual([...fr2[1]], [4, 5]);
+  assert.deepEqual([...fr2[2]], [6, 7, 8]);
+  const laced3 = cat(ui8([1]), ui8([1, 2, 3, 4, 5, 6]));
+  const fr3 = K.mkvSplitLacing(laced3, 0, laced3.length, 3);
+  assert.equal(fr3.length, 2, 'fixed lacing دو قاب');
+  assert.deepEqual([...fr3[0]], [1, 2, 3]);
+}
+console.log('PASS: MKV demux (EBML جریانی، خوشه‌ها، lacing، Cues) + fMP4 mux (ftyp/moov/avcC/esds، trun data_offset، mdat دست‌نخورده) — پخش داخل‌صفحهٔ mkv.');
+
 console.log('PASS: player banners fall back to house ads (wide overlay + pause), watermark is the numeric Telegram id (username only as fallback), admins see player ads for testing while real subscribers stay ad-free.');
 // تایمر ارسال دسته‌ای رویدادها (waitUntil ۲۰ ثانیه‌ای) را در Node منتظر نمی‌مانیم.
 process.exit(0);
