@@ -9554,6 +9554,7 @@ function MVX_PLAYER_MODULE(W) {
     P.info = info;
     P.gateRetry = 0;
     if (info && info.src) P.triedDirect = false;
+    P.mkvRungs = null; P.mkvRun = null; P.mkvDone = false; P.mkvWhy = '';
     P.cur = { track: info.cur.track, quality: info.cur.quality, streamId: info.cur.streamId };
     P.adCfg = info.noAds ? null : info.adCfg;
     P.banners = info.banners || [];
@@ -9612,7 +9613,9 @@ function MVX_PLAYER_MODULE(W) {
     return v;
   }
   function mkvF64(buf, pos, len) {
+    if (pos + len > buf.length) return 48000;
     if (len === 4) { var d4 = new DataView(buf.buffer, buf.byteOffset + pos, 4); return d4.getFloat32(0); }
+    if (len < 8) return 48000;
     var d8 = new DataView(buf.buffer, buf.byteOffset + pos, 8); return d8.getFloat64(0);
   }
   function mkvStr(buf, pos, len) {
@@ -9632,10 +9635,11 @@ function MVX_PLAYER_MODULE(W) {
     if (lacing === 0) { if (end > pos) frames.push(buf.subarray(pos, end)); return frames; }
     if (lacing === 1) {
       var sizes = [], p = pos;
+      if (pos >= end) return frames;
       var count = buf[pos]; p++;
       for (i = 0; i < count; i++) {
         var sz = 0, b;
-        do { b = buf[p++]; sz += b; } while (b === 255);
+        do { if (p >= end) return frames; b = buf[p++]; sz += b; } while (b === 255);
         sizes.push(sz);
       }
       var sum = 0;
@@ -9646,25 +9650,33 @@ function MVX_PLAYER_MODULE(W) {
       return frames;
     }
     if (lacing === 2) {
+      if (pos >= end) return frames;
       var c2 = buf[pos]; var p2 = pos + 1;
       var s2 = [], acc = 0;
-      var v0 = mkvVint(buf, p2, false); p2 += v0.len; acc = v0.v; s2.push(acc);
+      var v0 = mkvVint(buf, p2, false);
+      if (!v0) return frames;
+      p2 += v0.len; acc = v0.v; s2.push(acc);
       for (i = 1; i < c2; i++) {
-        var vd = mkvVint(buf, p2, false); p2 += vd.len;
+        var vd = mkvVint(buf, p2, false);
+        if (!vd) return frames;
+        p2 += vd.len;
         var dlt = vd.v;
         if (dlt >= Math.pow(2, 7 * vd.len - 1)) dlt -= Math.pow(2, 7 * vd.len);
         acc += dlt; s2.push(acc);
       }
       var sum2 = 0;
       for (i = 0; i < c2; i++) sum2 += s2[i];
-      s2.push(end - p2 - sum2);
+      s2.push(Math.max(0, end - p2 - sum2));
       var off2 = p2;
-      for (i = 0; i <= c2; i++) { frames.push(buf.subarray(off2, off2 + s2[i])); off2 += s2[i]; }
+      for (i = 0; i <= c2; i++) { if (off2 + s2[i] > end) break; frames.push(buf.subarray(off2, off2 + s2[i])); off2 += s2[i]; }
       return frames;
     }
-    var c3 = buf[pos];
-    var each = Math.floor((end - pos - 1) / (c3 + 1));
-    for (i = 0; i <= c3; i++) frames.push(buf.subarray(pos + 1 + i * each, pos + 1 + (i + 1) * each));
+    if (lacing === 3) {
+      if (pos >= end) return frames;
+      var c3 = buf[pos];
+      var each = Math.floor((end - pos - 1) / (c3 + 1));
+      for (i = 0; i <= c3; i++) frames.push(buf.subarray(pos + 1 + i * each, pos + 1 + (i + 1) * each));
+    }
     return frames;
   }
   function mkvParseTracks(buf, pos, end) {
@@ -9941,9 +9953,15 @@ function MVX_PLAYER_MODULE(W) {
     message(title, body, [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }], ['بستن', close]]);
   }
   function destroyMkv() {
-    if (!P || !P.mkv) return;
+    if (!P) return;
+    if (P.mkvNative) {
+      P.mkvNative = false;
+      try { P.video.removeAttribute('src'); P.video.load(); } catch (e) { }
+    }
+    if (!P.mkv) return;
     var m = P.mkv;
     P.mkv = null;
+    try { if (m.vid && String(m.vid.src || '') === String(m.url || '')) { m.vid.removeAttribute('src'); m.vid.load(); } } catch (e) { }
     try { if (m.reader) m.reader.cancel(); } catch (e) { }
     try { if (m.ctrl) m.ctrl.abort(); } catch (e) { }
     try { if (m.vid) m.vid.removeEventListener('seeking', m.onSeek); } catch (e) { }
@@ -10027,7 +10045,7 @@ function MVX_PLAYER_MODULE(W) {
         m.queue.push(mp4Init(tlist));
         mkvPump();
         if (dropAudio) message('صدا پخش نمی‌شود', 'کدک صدای این نسخه در مرورگر پشتیبانی نمی‌شود؛ فقط تصویر پخش می‌شود.', [['بستن', hideMsg]]);
-        go();
+        mkvGoPlay();
       },
       sample: function (no, t, key, data) {
         var m2 = P && P.mkv;
@@ -10071,8 +10089,8 @@ function MVX_PLAYER_MODULE(W) {
     if (from) headers.range = 'bytes=' + from + '-';
     var opts = { headers: headers, credentials: 'omit' };
     var chain = W.fetch(m.src, opts).then(function (res) {
-      if (!res || !res.ok) throw new Error('http ' + (res ? res.status : 0));
-      if (!res.body || !res.body.getReader) throw new Error('no stream');
+      if (!res || !res.ok) { m.why = 'http'; throw new Error('http ' + (res ? res.status : 0)); }
+      if (!res.body || !res.body.getReader) { m.why = m.src === (P.info && P.info.direct) ? 'cors' : 'net'; throw new Error('no stream'); }
       m.reader = res.body.getReader();
       if (res.body.locked !== undefined && m.ctrl === undefined) { /* noop */ }
       (function pumpRead() {
@@ -10088,43 +10106,102 @@ function MVX_PLAYER_MODULE(W) {
             }
             return;
           }
-          mkvFeed(st, r.value && r.value.length ? r.value : new Uint8Array(0));
+          try {
+            mkvFeed(st, r.value && r.value.length ? r.value : new Uint8Array(0));
+          } catch (demuxErr) {
+            try { m.reader.cancel(); } catch (e2) { }
+            m.why = 'demux';
+            return mkvFailStep('demux');
+          }
           pumpRead();
         }).catch(function (e) {
           if (!P || P.mkv !== m) return;
           if (m.seeking) return;
-          if (P.info && P.info.direct && !P.triedDirect) {
-            P.triedDirect = true;
-            destroyMkv();
-            return startMkv(P.info.direct);
-          }
-          destroyMkv();
-          mkvFail('پخش MKV قطع شد', 'دانلود بایت‌های فایل ناتمام ماند. اینترنت را بررسی و دوباره تلاش کنید.');
+          mkvFailStep(m.why || 'net');
         });
       })();
     }).catch(function (e) {
       if (!P || P.mkv !== m) return;
-      if (P.info && P.info.direct && !P.triedDirect) {
-        P.triedDirect = true;
-        destroyMkv();
-        return startMkv(P.info.direct);
-      }
-      destroyMkv();
-      mkvFail('بارگذاری فایل MKV ممکن نشد', 'دریافت بایت‌های این فایل ممکن نشد؛ نه سرور توانست از مبدأ بگیرد و نه مرورگر اجازهٔ خواندن مستقیم داشت. اگر لینک را مستقیم باز می‌کنید و پخش می‌شود یعنی مبدأ دسترسی را محدود کرده؛ نسخهٔ دیگری انتخاب یا فایل را دانلود کنید.');
+      mkvFailStep(m.why || 'http');
     });
   }
+  function mkvCanNative() {
+    try {
+      var p = P.video.canPlayType ? (P.video.canPlayType('video/x-matroska; codecs="avc1.4d401f,mp4a.40.2"') || P.video.canPlayType('video/x-matroska') || '') : '';
+      return p === 'probably' || p === 'maybe';
+    } catch (e) { return false; }
+  }
+  function mkvRungs() {
+    var out = [];
+    var d = (P.info && P.info.direct) || '';
+    if (mkvCanNative()) {
+      out.push({ mode: 'native', src: P.info.src });
+      if (d) out.push({ mode: 'native', src: d });
+    }
+    out.push({ mode: 'demux', src: P.info.src });
+    if (d) out.push({ mode: 'demux', src: d });
+    return out;
+  }
+  /* هر شکستی (خطای ویدئو، قطع دانلود، خوانده نشدن ساختار) به پلهٔ بعدی می‌رود؛
+     پیام فقط وقتی همهٔ پله‌ها تمام شد با دلیلِ دقیقِ آخرین تلاش نشان داده می‌شود. */
+  function mkvGoPlay() {
+    if (!P || P.closed) return;
+    setLoading(false);
+    var v = P.video;
+    if (P.mkvSeek) { try { v.currentTime = P.mkvSeek; } catch (e) { } P.mkvSeek = 0; }
+    var pr = v.play();
+    if (pr && pr.catch) pr.catch(function () { if (P) { setLoading(false); P.root.classList.add('paused'); showUi(true); } });
+  }
+  function mkvFailStep(why) {
+    if (!P || P.mkvDone) return;
+    if (why) P.mkvWhy = why;
+    P.mkvRun = (P.mkvRun || 0) + 1;
+    var rungs = P.mkvRungs || [];
+    if (P.mkvRun < rungs.length) return mkvGo();
+    P.mkvDone = true;
+    destroyMkv();
+    var why2 = P.mkvWhy || 'net';
+    if (why2 === 'codec') return mkvFail('کدک این فایل MKV پشتیبانی نمی‌شود', 'ویدئوی این نسخه با کدکی است که مرورگر در این حالت پخش نمی‌کند. نسخه/کیفیت دیگری انتخاب یا فایل را دانلود کنید.');
+    if (why2 === 'demux') return mkvFail('ساختار این فایل MKV خوانده نشد', 'پخش داخل‌صفحه نتوانست ساختار این MKV را بخواند. ممکن است فایل نامتعارف باشد؛ نسخهٔ دیگری را امتحان یا فایل را دانلود کنید.');
+    if (why2 === 'mse') return mkvFail('مرورگر شما MKV را پخش نمی‌کند', 'این مرورگر نه پخش بومی MKV را دارد و نه از پخش داخل‌صفحه پشتیبانی می‌کند. فایل را دانلود کنید یا نسخهٔ mp4 را انتخاب کنید.');
+    if (why2 === 'cors') return mkvFail('مبدأ اجازهٔ خواندن مستقیم نداد', 'سرور نتوانست فایل را بگیرد و مبدأ هم به مرورگر اجازهٔ خواندن مستقیم (CORS) نداد. اگر لینک را در مرورگر باز می‌کنید و پخش می‌شود یعنی مبدأ دسترسی سرور را محدود کرده؛ لینک را عوض کنید یا مبدأ دیگری بگذارید.');
+    if (why2 === 'http') return mkvFail('دریافت فایل ممکن نشد', 'مبدأ این فایل به درخواست پاسخ سالم نداد؛ ممکن است لینک منقضی شده باشد. لینک را در مرورگر باز کنید؛ اگر باز شد یعنی مبدأ دسترسی را محدود کرده.');
+    return mkvFail('بارگذاری فایل MKV ممکن نشد', 'دانلود بایت‌های این فایل ناتمام ماند. اینترنت را بررسی و دوباره تلاش کنید؛ اگر لینک را در مرورگر باز می‌کنید و پخش می‌شود یعنی مبدأ اتصال سرور/پراکسی را قطع می‌کند.');
+  }
   function startMkv(src) {
+    if (!P) return;
+    P.mkvRungs = mkvRungs();
+    P.mkvRun = 0;
+    P.mkvDone = false;
+    P.mkvWhy = '';
+    mkvGo();
+  }
+  function mkvGo() {
+    if (!P || P.mkvDone) return;
+    var rung = (P.mkvRungs || [])[P.mkvRun];
+    if (!rung) return mkvFailStep('net');
     destroyMkv();
     var v = P.video;
-    if (!W.MediaSource) {
-      return mkvFail('مرورگر شما MKV را پخش نمی‌کند', 'این مرورگر از پخش داخل صفحهٔ MKV پشتیبانی نمی‌کند. فایل را دانلود کنید یا نسخهٔ mp4 را انتخاب کنید.');
+    if (rung.mode === 'native') {
+      /* اندروید/کروم و برخی مرورگرها خودِ MKV (H.264+AAC) را بومی می‌خوانند —
+         برای <video> هیچ CORS لازم نیست؛ پس لینک مستقیم هم اینجا کار می‌کند. */
+      P.mkvNative = true;
+      try {
+        v.removeAttribute('src');
+        v.src = rung.src;
+        var onMeta = function () { v.removeEventListener('loadedmetadata', onMeta); mkvGoPlay(); };
+        v.addEventListener('loadedmetadata', onMeta);
+        v.load();
+      } catch (e) { return mkvFailStep('net'); }
+      setLoading(true);
+      setTimeout(function () { if (P) setLoading(false); }, 2500);
+      return;
     }
+    if (!W.MediaSource) return mkvFailStep('mse');
     var ms = new W.MediaSource();
     var url = '';
-    try { url = URL.createObjectURL(ms); } catch (e) {
-      return mkvFail('مرورگر شما MKV را پخش نمی‌کند', 'ساخت پخش داخل صفحه در این مرورگر ممکن نشد.');
-    }
-    var m = { ms: ms, url: url, src: src, queue: [], pend: {}, seq: 1, clusters: [], cues: [], vid: v, ended: false, skipUntil: 0 };
+    try { url = URL.createObjectURL(ms); } catch (e) { return mkvFailStep('mse'); }
+    var m = { ms: ms, url: url, src: rung.src, queue: [], pend: {}, seq: 1, clusters: [], cues: [], vid: v, ended: false, skipUntil: 0 };
     m.onSeek = function () { mkvOnSeek(); };
     P.mkv = m;
     try { v.src = url; } catch (e) { }
@@ -10148,9 +10225,10 @@ function MVX_PLAYER_MODULE(W) {
     hidePause();
     var seekTo = P.pendingSeek || 0;
     if (fmt === 'mkv') {
+      P.mkvSeek = seekTo || 0;
+      P.pendingSeek = 0;
+      if (!P.mkvSeek && fresh) { var sk = ls(posKey()); if (sk && sk.t > 20) P.mkvSeek = sk.t; }
       startMkv(src);
-      if (seekTo) try { v.currentTime = seekTo; } catch (e) { }
-      else if (fresh) { var sk = ls(posKey()); if (sk && sk.t > 20) { P.pendingSeek = sk.t; try { v.currentTime = sk.t; } catch (e) { } } }
       return;
     }
     P.pendingSeek = 0;
@@ -10217,6 +10295,11 @@ function MVX_PLAYER_MODULE(W) {
     var err = P.video.error;
     var code = err ? err.code : 0;
     var fmt = P.info.fmt;
+    if (fmt === 'mkv') {
+      /* پیام MKV فقط از نردبانِ خودش می‌آید؛ این خطاها پلهٔ بعدی را می‌زنند */
+      if (P.mkvDone) return;
+      if (P.mkvRungs && P.mkvRungs.length) return mkvFailStep('net');
+    }
     P.errCount = (P.errCount || 0) + 1;
     /* یک شانس پخش مستقیم (بدون پراکسی): وقتی مبدأ، دسترسی سرور را می‌بندد یا قفل IP می‌زند */
     if (P.info.direct && !P.triedDirect) {

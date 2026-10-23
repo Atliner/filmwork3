@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 
 const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 const W = await import('data:text/javascript;base64,' + Buffer.from(source + `
-export { parseStreamLines, applyStreamEntries, streamLinesOf, streamBagLinesOf, streamPlayUrl, streamsOf, publicStreamMap, publicVariantMap, pickStream, streamOptionsOf, streamTokenMake, streamTokenOpen, streamIpPrefix, setVariantFilePl, upsertVariantFile,
+export { parseStreamLines, applyStreamEntries, streamLinesOf, streamBagLinesOf, streamPlayUrl, streamFmtOf, streamsOf, publicStreamMap, publicVariantMap, pickStream, streamOptionsOf, streamTokenMake, streamTokenOpen, streamIpPrefix, setVariantFilePl, upsertVariantFile,
   streamBindHash, streamEdgeHandle, decodeSubtitleBytes, apiStreamOpen, apiStreamSrc, apiItem, Store, saveUser, saveItemRecord, createTgUser, makeToken,
   bustSettings, getSettings, contentBotAction, buildPlayerJs, handleAssets, APP_HTML, MVX_PLAYER_MODULE, handleAdmin, bustItem, decorateItemStreams, bustAds };`).toString('base64'));
 const edgeMod = await import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(new URL('../scripts/stream-edge-worker.js', import.meta.url), 'utf8')).toString('base64'));
@@ -816,7 +816,22 @@ console.log('PASS: ad platform outage falls back to house ads with a 30s backoff
   assert.equal(fr3.length, 2, 'fixed lacing دو قاب');
   assert.deepEqual([...fr3[0]], [1, 2, 3]);
 }
-console.log('PASS: MKV demux (EBML جریانی، خوشه‌ها، lacing، Cues) + fMP4 mux (ftyp/moov/avcC/esds، trun data_offset، mdat دست‌نخورده) — پخش داخل‌صفحهٔ mkv.');
+{
+  /* فرمت با query string (لینک‌های ?hash=) درست تشخیص داده شود */
+  assert.equal(W.streamFmtOf('https://download.hotdogmovie.net/x/The.Pitt.S01E15.720p.WEB-DL.KIMO.DUBLE.mkv?hash=k15zWKPAcmGZk'), 'mkv', 'mkv با query string');
+  assert.equal(W.streamFmtOf('https://h/x.MKV?hash=a'), 'mkv');
+  assert.equal(W.streamFmtOf('https://h/x.mp4?hash=a'), 'mp4');
+  assert.equal(W.streamFmtOf('https://h/x.m3u8?sig=1'), 'hls');
+  /* باگِ کشندهٔ قبلی: go() فقط داخل setScope بود و مسیر mkv با ReferenceError می‌مُرد —
+     هیچ فراخوانیِ go() خام نباید بیرون از بدنهٔ setSource بماند */
+  const mod = String(W.MVX_PLAYER_MODULE);
+  const setSrcAt = mod.indexOf('function setSource(src, fmt, fresh)');
+  const setSrcEnd = mod.indexOf('function offerResume', setSrcAt);
+  const outside = mod.slice(0, setSrcAt) + mod.slice(setSrcEnd);
+  assert.ok(!/\bgo\(\)/.test(outside), 'فراخوانی go() خام خارج از setSource نباید بماند');
+  assert.ok(mod.includes('mkvGoPlay();'), 'پخشِ mkv باید از mkvGoPlay سطحِ ماژول استفاده کند');
+}
+console.log('PASS: MKV demux (EBML جریانی، خوشه‌ها، lacing، Cues) + fMP4 mux (ftyp/moov/avcC/esds، trun data_offset، mdat دست‌نخورده) — پخش داخل‌صفحهٔ mkv؛ نردبان بومی←demux و fmt با query قفل شد.');
 
 console.log('PASS: player banners fall back to house ads (wide overlay + pause), watermark is the numeric Telegram id (username only as fallback), admins see player ads for testing while real subscribers stay ad-free.');
 // تایمر ارسال دسته‌ای رویدادها (waitUntil ۲۰ ثانیه‌ای) را در Node منتظر نمی‌مانیم.
