@@ -44,8 +44,9 @@ function pruneNonces() {
   }
 }
 function bytesToHex(b) {
+  const u = (b instanceof Uint8Array) ? b : new Uint8Array(b);
   let s = '';
-  for (let i = 0; i < b.length; i++) s += b[i].toString(16).padStart(2, '0');
+  for (let i = 0; i < u.length; i++) s += u[i].toString(16).padStart(2, '0');
   return s;
 }
 async function sha256Hex(text) {
@@ -62,6 +63,8 @@ function allowedKey(k) {
 }
 /* تأیید امضا + بازگشت متن بدنه برای استفادهٔ مجدد */
 async function verify(req, secret) {
+  /* رمز با Enter/فاصلهٔ انتهاییِ ذخیره‌شده هم کار کند (paste هنگام wrangler secret put) */
+  secret = String(secret == null ? '' : secret).trim();
   if (!secret) return { error: 'no-secret', body: '' };
   const ts = req.headers.get('x-shard-ts');
   const nonce = req.headers.get('x-shard-nonce');
@@ -119,7 +122,7 @@ export default {
       const db = await openDb(env);
       if (!db) return j({ error: 'no-d1-binding' }, 500);
 
-      if (p === '/health') return j({ ok: true, time: Date.now() });
+      if (p === '/health') return j({ ok: true, v: 2, time: Date.now() });
       if (p === '/get') {
         const k = url.searchParams.get('k') || '';
         if (!allowedKey(k)) return j({ error: 'key-not-allowed' }, 400);

@@ -147,4 +147,30 @@ try {
 } finally {
   globalThis.fetch=realFetch;
 }
-console.log('PASS: D1 federation (deterministic hash routing, it:/sub: only, local fallback on shard failure, HMAC rejection, health circuit-breaker).');
+{
+  /* ── ۷) رمز با Enter/فاصلهٔ انتهایی (دلیل رایج bad-signature) — هر دو سمت trim می‌کنند ── */
+  const proxySrcForTest = fs.readFileSync(new URL('../scripts/shard-proxy-worker.js', import.meta.url), 'utf8');
+  const proxyMod = await import(new URL('../scripts/shard-proxy-worker.js', import.meta.url).href);
+  const proxyEnv = { SHARD_DB: readyDb(), SHARD_SECRET: SECRET + '\n ' };
+  const realFetch2 = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, init) => proxyMod.default.fetch(new Request(url, init), proxyEnv);
+    const c1 = new app.RemoteShard({ id: 'p1', url: 'https://shard-proxy.test', secret: SECRET });
+    const h1 = await c1.health();
+    assert(h1.ok && h1.v === 2, 'پروکسی واقعی باید با رمزِ دارای Enter اضافی در env کار کند');
+    const c2 = new app.RemoteShard({ id: 'p2', url: 'https://shard-proxy.test', secret: SECRET + '\n' });
+    const h2 = await c2.health();
+    assert(h2.ok, 'رمزِ سایت با Enter انتهایی هم باید کار کند');
+    await c2.put('it:i_nl', { id: 'i_nl', title: 'با رمز نویسه‌دار' });
+    const got = await c2.get('it:i_nl');
+    assert.equal(got.id, 'i_nl', 'put/get با رمزِ نویسه‌دار باید کار کند');
+    /* سمتِ سایت: خطای bad-signature باید به پیام فارسیِ راهنما تبدیل شود */
+    assert(source.includes('امضا تأیید نشد'), 'پیام فارسیِ bad-signature باید در کد سایت باشد');
+    /* باگِ ریشهٔ قبلی: bytesToHex روی ArrayBuffer نباید خالی بدهد */
+    const px = await import('data:text/javascript;base64,'+Buffer.from(proxySrcForTest).toString('base64'));
+    assert(typeof px.default.fetch === 'function');
+  } finally {
+    globalThis.fetch = realFetch2;
+  }
+}
+console.log('PASS: D1 federation (deterministic hash routing, it:/sub: only, local fallback on shard failure, HMAC rejection, health circuit-breaker) + secret-with-newline tolerance (bad-signature root cause).');

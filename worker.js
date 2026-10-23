@@ -865,7 +865,7 @@ async function sha256Hex(text) {
 }
 async function hmacSign(secret, method, path, bodyText, ts, nonce) {
   const data = new TextEncoder().encode(method + '\n' + path + '\n' + (await sha256Hex(bodyText || '')) + '\n' + ts + '\n' + nonce);
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(secret == null ? '' : secret).trim()), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const sig = await crypto.subtle.sign('HMAC', key, data);
   return Array.from(new Uint8Array(sig)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
 }
@@ -879,7 +879,7 @@ class RemoteShard {
   constructor(cfg) {
     this.id = String(cfg.id || '');
     this.url = String(cfg.url || '').replace(/\/+$/, '');
-    this.secret = String(cfg.secret || '');
+    this.secret = String(cfg.secret || '').trim();
     this.fails = 0;
     this.lastFail = 0;
   }
@@ -6958,6 +6958,20 @@ async function setupContentWebhook(store, request) {
   return json({ok:true,url:url});
 }
 
+const SHARD_MSGS = {
+  'bad-signature': 'امضا تأیید نشد: SHARD_SECRET سمتِ شارد با این رمز یکسان نیست. رایج‌ترین دلیل، ذخیره شدن رمز با Enter/فاصلهٔ انتهایی است؛ روی شارد Secret را دوباره (بدون Enter) وارد کنید یا کد تازهٔ scripts/shard-proxy-worker.js را دوباره Deploy کنید (کد جدید رمز را خودش تمیز می‌کند).',
+  'no-secret': 'روی شارد، Secret به اسم SHARD_SECRET تنظیم نشده است.',
+  'missing-headers': 'نسخهٔ Deployشدهٔ شارد قدیمی یا ناسازگار است — فایل scripts/shard-proxy-worker.js را دوباره Deploy کنید.',
+  'timestamp-out-of-window': 'ساعت سرورها بیش از ۵ دقیقه اختلاف دارد.',
+  'nonce-reused': 'درخواست تکراری رد شد؛ یک بار دیگر تست کنید.',
+  'no-d1-binding': 'روی شارد، دیتابیس D1 با نام SHARD_DB متصل نشده است.',
+  'shard-incomplete': 'آدرس یا رمز شارد وارد نشده است.',
+  'not-found': 'آدرس شارد درست نیست یا Worker شارد پاسخ نمی‌دهد.'
+};
+function shardErrText (e) {
+  const m = (e && e.message) || String(e);
+  return SHARD_MSGS[m] || m;
+}
 async function handleShards(store, request, method) {
   if (method === 'GET') {
     const set = await getSettings(store);
@@ -6971,7 +6985,7 @@ async function handleShards(store, request, method) {
         latency = Date.now() - t0;
         ok = !!h.ok;
         count = h.count || 0;
-      } catch (e) { error = (e && e.message) || String(e); }
+      } catch (e) { error = shardErrText(e); }
       rows.push({ id: s.id, url: s.url, ok: ok, latency: latency, error: error, count: count, healthy: sh.healthy() });
     }
     return json({ shards: rows });
@@ -6983,8 +6997,9 @@ async function handleShards(store, request, method) {
     try {
       const t0 = Date.now();
       const h = await sh.health();
-      return json({ ok: true, latency: Date.now() - t0, count: h.count || 0 });
-    } catch (e) { return json({ ok: false, error: (e && e.message) || String(e) }, 400); }
+      const oldVer = h && h.ok && h.v == null;
+      return json({ ok: true, latency: Date.now() - t0, count: h.count || 0, note: oldVer ? 'نسخهٔ شارد قدیمی است؛ برای اطمینان کد تازهٔ shard-proxy-worker.js را Deploy کنید' : '' });
+    } catch (e) { return json({ ok: false, error: shardErrText(e) }, 400); }
   }
   if (body.action === 'add') {
     const id = String(body.id || '').trim();
