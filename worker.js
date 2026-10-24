@@ -1789,6 +1789,42 @@ function setVariantFilePl(bag, track, quality, fileId, plVal) {
     if (plVal) cell.pl = plVal; else delete cell.pl;
   }
 }
+/* «لینک فایل زیرنویس» هر نسخه (f.subs) — کنار لینک پخش؛ آرایهٔ {url,label}
+   (فایل‌های قدیمی بدون شناسه، روی خود سلول: cell.subs). */
+function setVariantFileSubs(bag, track, quality, fileId, subsArr) {
+  const v = ensureVariants(bag);
+  const t = track === 'dub' ? 'dub' : 'sub';
+  const q = qualityKey(quality);
+  if (!q || !v[t][q]) return;
+  const cell = v[t][q];
+  const fid = String(fileId || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 20);
+  const fl = Array.isArray(cell.files) && cell.files.length ? cell.files : null;
+  const val = (Array.isArray(subsArr) && subsArr.length) ? subsArr.slice(0, STREAM_SUBS_MAX) : null;
+  if (fl) {
+    const targets = fid ? fl.filter(function (f) { return f && f.id === fid; }) : (fl.length === 1 ? fl.slice(0, 1) : []);
+    targets.forEach(function (f) {
+      if (val) f.subs = val.map(function (s) { return { url: s.url, label: s.label || '' }; });
+      else delete f.subs;
+    });
+  } else {
+    if (val) cell.subs = val.map(function (s) { return { url: s.url, label: s.label || '' }; });
+    else delete cell.subs;
+  }
+}
+/* متن فیلد زیرنویس: «لینک | عنوان» با جداکنندهٔ ویرگول/خط جدید */
+function parseSubField(text) {
+  const out = [];
+  String(text || '').split(/[,،\n]/).map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (part) {
+    let label = '', url = part;
+    const bar = part.indexOf('|');
+    if (bar >= 0) { url = part.slice(0, bar).trim(); label = streamLabelClean(part.slice(bar + 1)); }
+    if (!streamIsSubtitleUrl(url)) return;
+    url = streamSafeUrl(url);
+    if (!url) return;
+    out.push({ url: url, label: label });
+    });
+  return out.slice(0, STREAM_SUBS_MAX);
+}
 function qualityLabel(q) {
   const k = qualityKey(q);
   if (k === '4k') return '4K';
@@ -2426,7 +2462,10 @@ function streamsOf(bag) {
         const url = streamPlayUrl(f.pl);
         if (!url) return;
         if (!/^https?:\/\//i.test(url)) return;
-        push({ id: 'vf_' + (f.id || (t + '_' + q)), track: t, quality: q, url: url, fmt: streamFmtOf(url), label: String(f.title || '').trim(), at: 0 });
+        const vf = { id: 'vf_' + (f.id || (t + '_' + q)), track: t, quality: q, url: url, fmt: streamFmtOf(url), label: String(f.title || '').trim(), at: 0 };
+        const fsubs = (f.subs && f.subs.length) ? f.subs : ((t === 'sub' || t === 'dub') && v[t][q] && v[t][q].subs) || null;
+        if (Array.isArray(fsubs) && fsubs.length) vf.subs = fsubs.filter(function (s) { return s && s.url; }).slice(0, STREAM_SUBS_MAX);
+        push(vf);
       });
     });
   });
@@ -2446,7 +2485,10 @@ function publicStreamMap(bag, item) {
        صفحهٔ اثر با این پرچم می‌فهمد کیفیتِ بدونِ لینکِ نسخه، لینک پخشِ مستقل دارد. */
     if (String(s.id || '').indexOf('vf_') !== 0) out[t][q].hand = (out[t][q].hand || 0) + 1;
   });
-  out.subs = ((bag && bag.streamSubs) || []).length;
+  const subUrls = new Set();
+  ((bag && bag.streamSubs) || []).forEach(function (t) { if (t && t.url) subUrls.add(t.url); });
+  streamsOf(bag).forEach(function (s) { (s.subs || []).forEach(function (t) { if (t && t.url) subUrls.add(t.url); }); });
+  out.subs = subUrls.size;
   return out;
 }
 function streamMapHas(map) {
@@ -2900,10 +2942,19 @@ async function streamBuild(store, set, user, item, picked, sid, request, avoid) 
     src += '/' + name;
   }
   const subs = [];
-  for (const t of (picked.bag.streamSubs || []).slice(0, STREAM_SUBS_MAX)) {
-    const st = await streamTokenMake(edge.secret, { v: 1, k: 't', u: t.url, e: exp + 6 * 3600, s: sid, o: hosts });
-    subs.push({ id: t.id, lang: t.lang || 'fa', label: t.label || 'فارسی', src: edge.base + '/t/' + st });
-  }
+  const seenSubUrls = new Set();
+  const addSub = async function (t, fallbackId) {
+    if (!t || subs.length >= STREAM_SUBS_MAX) return;
+    const u = streamSafeUrl(t.url);
+    if (!u || seenSubUrls.has(u)) return;
+    seenSubUrls.add(u);
+    const st = await streamTokenMake(edge.secret, { v: 1, k: 't', u: u, e: exp + 6 * 3600, s: sid, o: hosts });
+    subs.push({ id: t.id || fallbackId, lang: t.lang || 'fa', label: t.label || 'زیرنویس', src: edge.base + '/t/' + st });
+  };
+  /* زیرنویس‌های «همین نسخه» (f.subs) اول، بعد زیرنویس‌های کیسه (streamSubs) */
+  let sidx = 0;
+  for (const t of (picked.stream.subs || [])) await addSub(t, 'fs_' + (++sidx));
+  for (const t of (picked.bag.streamSubs || [])) await addSub(t, 't_' + (++sidx));
   const ep = streamEpisodeInfo(item, picked.bag);
   return {
     ok: true, sid: sid, src: src, fmt: fmt, exp: exp * 1000, edge: edge.id,
@@ -7750,6 +7801,11 @@ async function handleAdmin(store, url, request, adminUser) {
       }
       setVariantFilePl(bag, track, qk, plTargetId, plVal);
     }
+    if (Object.prototype.hasOwnProperty.call(body, 'subs')) {
+      const subsArr = parseSubField(body.subs);
+      if (String(body.subs || '').trim() && !subsArr.length) return json({ error: 'لینک زیرنویس معتبر نیست؛ باید پسوند srt یا vtt داشته باشد (مثلاً https://cdn.example.com/fa.srt) — با ویرگول می‌توانید چند لینک بدهید' }, 400);
+      setVariantFileSubs(bag, track, qk, plTargetId, subsArr);
+    }
     if (body.premium !== undefined) {
       setVariantPremium(bag, track, qk, !!body.premium);
     }
@@ -9570,6 +9626,7 @@ function MVX_PLAYER_MODULE(W) {
     P.gateRetry = 0;
     if (info && info.src) P.triedDirect = false;
     P.mkvRungs = null; P.mkvRun = null; P.mkvDone = false; P.mkvWhy = '';
+    P.embSubs = null;
     P.cur = { track: info.cur.track, quality: info.cur.quality, streamId: info.cur.streamId };
     P.adCfg = info.noAds ? null : info.adCfg;
     P.banners = info.banners || [];
@@ -9700,7 +9757,7 @@ function MVX_PLAYER_MODULE(W) {
       var e = mkvElem(buf, pos);
       if (!e || e.size < 0 || pos + e.hlen + e.size > end) break;
       if (e.id === 0xAE) {
-        var t = { no: 0, type: 0, codec: '', priv: null, w: 0, h: 0, rate: 48000, ch: 2 };
+        var t = { no: 0, type: 0, codec: '', priv: null, w: 0, h: 0, rate: 48000, ch: 2, name: '', lang: '' };
         var p = pos + e.hlen, pe = p + e.size;
         while (p < pe) {
           var c = mkvElem(buf, p);
@@ -9710,6 +9767,9 @@ function MVX_PLAYER_MODULE(W) {
           else if (c.id === 0x83) t.type = mkvUi(buf, dp, c.size);
           else if (c.id === 0x86) t.codec = mkvStr(buf, dp, c.size);
           else if (c.id === 0x63A2) t.priv = buf.slice(dp, dp + c.size);
+          else if (c.id === 0x536E) t.name = mkvStr(buf, dp, c.size);
+          else if (c.id === 0x22B59C) t.lang = mkvStr(buf, dp, c.size);
+          else if (c.id === 0x5654 && !t.lang) t.lang = mkvStr(buf, dp, c.size);
           else if (c.id === 0xE0) {
             var vp = dp, ve = dp + c.size;
             while (vp < ve) {
@@ -9731,16 +9791,46 @@ function MVX_PLAYER_MODULE(W) {
           }
           p += c.hlen + c.size;
         }
+        if (t.type === 0x11) {
+          t.subFmt = t.codec === 'S_TEXT/UTF8' ? 'srt'
+            : (t.codec === 'S_TEXT/WEBVTT' ? 'vtt'
+            : ((t.codec === 'S_TEXT/ASS' || t.codec === 'S_TEXT/SSA') ? 'ass' : 'bitmap'));
+        }
         out.push(t);
       }
       pos += e.hlen + e.size;
     }
     return out;
   }
+  /* متن زیرنویس داخلی: SRT/WEBVTT خام یا خط Dialogue در ASS/SSA */
+  function mkvAssText(text) {
+    var i = text.indexOf('Dialogue:');
+    if (i >= 0) {
+      var rest = text.slice(i + 9);
+      var parts = rest.split(',');
+      /* قالب استاندارد ASS: ۹ فیلد قبل از متن (Effect هشتم)؛ متن می‌تواند ویرگول داشته باشد */
+      text = parts.length > 9 ? parts.slice(9).join(',') : (parts.length > 8 ? parts.slice(8).join(',') : rest);
+    }
+    text = text.replace(/\{[^}]*\}/g, '').replace(/\\N/g, '\n').replace(/\\h/g, ' ');
+    return text.replace(/^\s+|\s+$/g, '');
+  }
+  function mkvSubPush(st, trk, tMs, bdur, frame) {
+    var key = trk.no;
+    var s = st.subs[key];
+    if (!s) s = st.subs[key] = { no: trk.no, name: trk.name || '', lang: trk.lang || '', fmt: trk.subFmt, cues: [] };
+    if (s.cues.length > 4000) return;
+    var text = '';
+    try { text = new TextDecoder('utf-8').decode(frame); } catch (e) { return; }
+    if (s.fmt === 'ass') text = mkvAssText(text);
+    else text = text.replace(/\r/g, '').replace(/\n+$/, '');
+    if (!text) return;
+    var durMs = (bdur && bdur > 0) ? bdur * st.scaleMs : 0;
+    s.cues.push({ s: tMs, e: tMs + (durMs > 0 ? durMs : 4000), t: text });
+  }
   function mkvCreate(h) {
     return {
       h: h, buf: new Uint8Array(0), pos: 0, base: 0, segPos: -1, inCl: false, clEnd: -1,
-      clTime: -1, clOff: -1, scaleMs: 1, tracks: null, clusters: [], cues: [], ended: false
+      clTime: -1, clOff: -1, scaleMs: 1, tracks: null, trackByNo: null, subs: {}, clusters: [], cues: [], ended: false
     };
   }
   function mkvGrow(st, chunk) {
@@ -9788,7 +9878,7 @@ function MVX_PLAYER_MODULE(W) {
       if (st.inCl) {
         if (hd.id === 0xA3 || hd.id === 0xA0) {
           if (avail < total) return;
-          var pl = st.pos + hd.hlen, pe = pl + hd.size, key = hd.id === 0xA3, block = null, ref = false;
+          var pl = st.pos + hd.hlen, pe = pl + hd.size, key = hd.id === 0xA3, block = null, ref = false, bdur = 0;
           if (hd.id === 0xA0) {
             var gp = pl;
             while (gp < pe) {
@@ -9796,6 +9886,7 @@ function MVX_PLAYER_MODULE(W) {
               if (!ge || ge.size < 0 || gp + ge.hlen + ge.size > pe) break;
               if (ge.id === 0xA1) { block = { p: gp + ge.hlen, e: gp + ge.hlen + ge.size }; }
               if (ge.id === 0xFB) ref = true;
+              if (ge.id === 0x9B) bdur = mkvUi(st.buf, gp + ge.hlen, ge.size);
               gp += ge.hlen + ge.size;
             }
             key = !!block && !ref;
@@ -9810,8 +9901,10 @@ function MVX_PLAYER_MODULE(W) {
               if (hd.id === 0xA3) key = !!(flags & 0x80);
               var frames = mkvSplitLacing(st.buf, block.p + tv.len + 3, block.e, lacing);
               var tMs = st.clTime < 0 ? 0 : st.clTime * st.scaleMs + rel * st.scaleMs;
+              var subTrk = st.trackByNo && st.trackByNo[tv.v];
               for (var fi = 0; fi < frames.length; fi++) {
-                if (st.h.sample) st.h.sample(tv.v, tMs, key, frames[fi]);
+                if (subTrk && subTrk.subFmt && subTrk.subFmt !== 'bitmap') mkvSubPush(st, subTrk, tMs, bdur, frames[fi]);
+                else if (st.h.sample) st.h.sample(tv.v, tMs, key, frames[fi]);
               }
               var lastC = st.clusters[st.clusters.length - 1];
               if (lastC && lastC.t < 0) lastC.t = tMs;
@@ -9850,6 +9943,8 @@ function MVX_PLAYER_MODULE(W) {
         }
       } else if (hd.id === 0x1654AE6B) {
         st.tracks = mkvParseTracks(st.buf, st.pos + hd.hlen, st.pos + total);
+        st.trackByNo = {};
+        for (var ti = 0; ti < st.tracks.length; ti++) st.trackByNo[st.tracks[ti].no] = st.tracks[ti];
         if (st.h.tracks) st.h.tracks(st.tracks);
       } else if (hd.id === 0x1C53BB6B) {
         var cp = st.pos + hd.hlen, ce = cp + hd.size;
@@ -10034,33 +10129,49 @@ function MVX_PLAYER_MODULE(W) {
           if (trs[i].type === 2 && !aud) aud = trs[i];
         }
         if (!vid || !/^V_MPEG4\/ISO\/AVC/.test(vid.codec)) {
-          destroyMkv();
-          return mkvFail('کدک این فایل MKV پشتیبانی نمی‌شود', 'ویدئوی این نسخه با کدک «' + (vid ? vid.codec : 'نامشخص') + '» است و در پخش داخل صفحه فقط H.264 پشتیبانی می‌شود. نسخه/کیفیت دیگری انتخاب یا فایل را دانلود کنید.');
+          return mkvFailStep('codec');
         }
-        var tlist = [{ id: 1, kind: 'video', timescale: 1000, w: vid.w, h: vid.h, extra: vid.priv || new Uint8Array([1, 0x4d, 0x40, 0x28, 0xff, 0xe1, 0, 0]) }];
+        var tlist = [{ id: 1, no: vid.no, kind: 'video', timescale: 1000, w: vid.w, h: vid.h, extra: vid.priv || new Uint8Array([1, 0x4d, 0x40, 0x28, 0xff, 0xe1, 0, 0]) }];
         var dropAudio = false;
         if (aud && /^A_AAC/.test(aud.codec)) {
-          tlist.push({ id: 2, kind: 'audio', timescale: Math.round(aud.rate) || 48000, ch: aud.ch, extra: aud.priv });
+          tlist.push({ id: 2, no: aud.no, kind: 'audio', timescale: Math.round(aud.rate) || 48000, ch: aud.ch, extra: aud.priv });
         } else if (aud) dropAudio = true;
         var type = 'video/mp4; codecs="' + tlist.map(mkvCodecString).join(',') + '"';
         if (!W.MediaSource || !W.MediaSource.isTypeSupported || !W.MediaSource.isTypeSupported(type)) {
-          destroyMkv();
-          return mkvFail('مرورگر این کدک را ندارد', 'مرورگر شما از کدک این نسخه MKV پشتیبانی نمی‌کند. کیفیت/نسخهٔ دیگری انتخاب یا فایل را دانلود کنید.');
+          return mkvFailStep('codec');
         }
         m.tracks = {};
-        for (var j = 0; j < tlist.length; j++) m.tracks[tlist[j].id] = tlist[j];
+        for (var j = 0; j < tlist.length; j++) m.tracks[tlist[j].no] = tlist[j];
         try {
           m.sb = m.ms.addSourceBuffer(type);
           m.sb.mode = 'segments';
           m.sb.addEventListener('updateend', mkvPump);
         } catch (e) {
-          destroyMkv();
-          return mkvFail('پخش شروع نشد', 'ساخت پخش داخل صفحه در این مرورگر ممکن نشد. فایل را دانلود کنید.');
+          return mkvFailStep('mse');
         }
         m.queue.push(mp4Init(tlist));
         mkvPump();
         if (dropAudio) message('صدا پخش نمی‌شود', 'کدک صدای این نسخه در مرورگر پشتیبانی نمی‌شود؛ فقط تصویر پخش می‌شود.', [['بستن', hideMsg]]);
         mkvGoPlay();
+        /* زیرنویس‌های داخلی MKV (ترک‌های متنی) به فهرست زیرنویس‌های پلیر می‌آیند */
+        var emb = [];
+        for (var si = 0; si < trs.length; si++) {
+          var ts = trs[si];
+          if (ts && ts.type === 0x11 && ts.subFmt && ts.subFmt !== 'bitmap') {
+            var nm = String(ts.name || '').trim();
+            if (!nm) {
+              var lg = String(ts.lang || '').toLowerCase();
+              nm = lg.indexOf('fa') === 0 ? 'فارسی' : (lg.indexOf('en') === 0 ? 'انگلیسی' : '');
+            }
+            emb.push({ id: 'emb_' + ts.no, label: nm || ('زیرنویس داخلی ' + (emb.length + 1)), embedded: ts.no, src: '' });
+          }
+        }
+        if (emb.length && P && P.mkv === m) {
+          P.embSubs = emb;
+          P.subs = (P.subs || []).concat(emb);
+          renderPanel();
+          if (!P.subOn && P.subPref === undefined && P.info && P.info.cur && P.info.cur.track === 'sub') selectSub(emb[0].id, true);
+        }
       },
       sample: function (no, t, key, data) {
         var m2 = P && P.mkv;
@@ -10149,12 +10260,13 @@ function MVX_PLAYER_MODULE(W) {
   function mkvRungs() {
     var out = [];
     var d = (P.info && P.info.direct) || '';
+    /* demux اول: زیرنویس‌های داخلی و کنترل کامل؛ اگر شکست خورد، پخش بومی (اندروید) */
+    out.push({ mode: 'demux', src: P.info.src });
+    if (d) out.push({ mode: 'demux', src: d });
     if (mkvCanNative()) {
       out.push({ mode: 'native', src: P.info.src });
       if (d) out.push({ mode: 'native', src: d });
     }
-    out.push({ mode: 'demux', src: P.info.src });
-    if (d) out.push({ mode: 'demux', src: d });
     return out;
   }
   /* هر شکستی (خطای ویدئو، قطع دانلود، خوانده نشدن ساختار) به پلهٔ بعدی می‌رود؛
@@ -10169,7 +10281,7 @@ function MVX_PLAYER_MODULE(W) {
   }
   function mkvFailStep(why) {
     if (!P || P.mkvDone) return;
-    if (why) P.mkvWhy = why;
+    if (why && (why !== 'net' || !P.mkvWhy)) P.mkvWhy = why;
     P.mkvRun = (P.mkvRun || 0) + 1;
     var rungs = P.mkvRungs || [];
     if (P.mkvRun < rungs.length) return mkvGo();
@@ -10200,6 +10312,15 @@ function MVX_PLAYER_MODULE(W) {
     if (rung.mode === 'native') {
       /* اندروید/کروم و برخی مرورگرها خودِ MKV (H.264+AAC) را بومی می‌خوانند —
          برای <video> هیچ CORS لازم نیست؛ پس لینک مستقیم هم اینجا کار می‌کند. */
+      if (P.embSubs) {
+        if (P.subOn && String(P.subOn).indexOf('emb_') === 0) {
+          P.subOn = ''; P.cues = []; P.cueIdx = 0; renderSub(true);
+          q('[data-a="cc"]', P.root).classList.remove('on');
+        }
+        P.subs = (P.subs || []).filter(function (s) { return s.embedded == null; });
+        P.embSubs = null;
+        renderPanel();
+      }
       P.mkvNative = true;
       try {
         v.removeAttribute('src');
@@ -10470,6 +10591,12 @@ function MVX_PLAYER_MODULE(W) {
     if (!id) { if (!silent) toast('زیرنویس خاموش'); return; }
     var sub = P.subs.filter(function (s) { return s.id === id; })[0];
     if (!sub) return;
+    if (sub.embedded != null) {
+      var est = P.mkv && P.mkv.st && P.mkv.st.subs && P.mkv.st.subs[sub.embedded];
+      P.cues = est ? est.cues : [];
+      if (!silent) toast('زیرنویس: ' + sub.label);
+      return;
+    }
     P.subCache = P.subCache || {};
     var url = sub.src;
     if (P.subCache[sub.id]) { P.cues = P.subCache[sub.id]; return; }
@@ -16099,6 +16226,7 @@ function openItemEditor (it, prefillUrl) {
             '<input data-vt="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="عنوان نسخه" value="' + esc(f.title || '') + '">' +
             '<input data-vu2="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی" value="' + esc(sourceHref(f.source) || '') + '" dir="ltr">' +
             '<input data-vpl="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="لینک پخش آنلاین (اختیاری)" title="برای دکمهٔ تماشای آنلاین همین نسخه؛ خالی = بدون پخش آنلاین" value="' + esc(f.pl || '') + '" dir="ltr">' +
+            '<input data-vsub="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="لینک زیرنویس‌ها (اختیاری) — با ویرگول جدا" title="فایل‌های زیرنویس این نسخه (srt/vtt)؛ هر لینک با « | عنوان» برای نام در پلیر. در تنظیمات پلیر نمایش داده می‌شوند" value="' + esc((f.subs || []).map(function (s) { return s.url + (s.label ? ' | ' + s.label : ''); }).join(', ')) + '" dir="ltr">' +
             '<button type="button" class="btn btn-danger btn-sm" data-vd="' + t.k + ':' + q + ':' + (epId || '') + ':' + esc(f.id) + '">حذف</button></div>';
         }).join('');
         return '<div class="var-q">' +
@@ -16382,6 +16510,8 @@ function openItemEditor (it, prefillUrl) {
           url: url
         };
         if (plEl) body.pl = plEl.value.trim();
+        var subEl = $('[data-vsub]', row);
+        if (subEl) body.subs = subEl.value.trim();
         api('/admin/item/' + it.id + '/variant', { method: 'POST', body: body }).then(function (r) {
           it = r.item;
           toast(url ? 'نسخه ذخیره شد ✓' : 'نسخه حذف شد', 'ok');
@@ -16395,6 +16525,9 @@ function openItemEditor (it, prefillUrl) {
         el.addEventListener('change', function () { saveVarRow(el); });
       });
       $all('[data-vpl]', root).forEach(function (el) {
+        el.addEventListener('change', function () { saveVarRow(el); });
+      });
+      $all('[data-vsub]', root).forEach(function (el) {
         el.addEventListener('change', function () { saveVarRow(el); });
       });
       $all('[data-vd]', root).forEach(function (b) {

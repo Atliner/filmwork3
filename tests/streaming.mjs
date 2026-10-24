@@ -158,6 +158,20 @@ console.log('PASS: per-version online-play link (title-less) merges into streams
   const rel = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', fileId: f.id, url: 'https://t.me/c/1234567890/89', pl: './The.Pitt.S02E05.480p.WEB-DL.Doble.mp4' }), admin);
   assert.equal(rel.status, 400, 'نام فایل/مسیر نسبی در لینک پخش رد می‌شود');
   assert.equal(r.status, 400, 'لینک پخش نامعتبر رد شود');
+  /* زیرنویس‌های همین نسخه (فیلد «لینک زیرنویس‌ها») — ذخیره/حذف/اعتبارسنجی */
+  r = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', fileId: f.id, url: 'https://t.me/c/1234567890/89', pl: 'https://cdn.example.com/play/480.mp4', subs: 'https://cdn.example.com/fa.srt | فارسی, https://cdn.example.com/en.vtt | English' }), admin);
+  assert.equal(r.status, 200);
+  saved = (await r.json()).item;
+  f = saved.variants.dub['480'].files[0];
+  assert.equal(f.subs.length, 2, 'زیرنویس‌های نسخه ذخیره شد');
+  assert.equal(f.subs[0].url, 'https://cdn.example.com/fa.srt');
+  assert.equal(f.subs[0].label, 'فارسی');
+  assert.equal(f.subs[1].label, 'English');
+  const badSub = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', fileId: f.id, url: 'https://t.me/c/1234567890/89', pl: 'https://cdn.example.com/play/480.mp4', subs: 'https://cdn.example.com/fa.txt' }), admin);
+  assert.equal(badSub.status, 400, 'لینک زیرنویس فقط srt/vtt پذیرفته می‌شود');
+  r = await W.handleAdmin(store, u('/item/i_pltest/variant'), post('/item/i_pltest/variant', { track: 'dub', quality: '480', fileId: f.id, url: 'https://t.me/c/1234567890/89', pl: 'https://cdn.example.com/play/480.mp4', subs: '' }), admin);
+  saved = (await r.json()).item;
+  assert.ok(!saved.variants.dub['480'].files[0].subs, 'خالی‌کردن فیلد = حذف زیرنویس‌ها');
 }
 console.log('PASS: per-version play link saves through the same variant endpoint as title/file-link.');
 
@@ -370,6 +384,16 @@ const setSet = async patch => { const s = await store.get('set'); await store.se
   assert.equal(r.body.direct, 'https://cdn.example.com/m-720.mp4', 'پخش مستقیم اضطراری (پیش‌فرض روشن) لینک خام را فقط به خودِ پلیر می‌دهد');
   assert.ok(!JSON.stringify(Object.assign({}, r.body, { direct: '' })).includes('cdn.example.com'), 'بدون فیلد direct، API پخش هرگز لینک مبدأ را نشان نمی‌دهد');
   assert.ok(r.body.options.dub.length === 2 && r.body.options.sub.length === 0);
+  /* زیرنویسِ «همین نسخه» (f.subs) + زیرنویس کیسه — بدون تکرار و با توکن /t/ */
+  movie.variants.dub['480'] = { source: null, sizeBytes: null, files: [{ id: 'f_sub1', title: 'KIMO | 480p', source: { chatId: '-100', msgId: '7' }, pl: 'https://cdn.example.com/m-480.mp4', subs: [{ url: 'https://cdn.example.com/v1.srt', label: 'English' }, { url: 'https://cdn.example.com/v1.srt', label: 'تکراری' }] }] };
+  await W.saveItemRecord(store, movie);
+  const r2 = await call(W.apiStreamOpen, userTok, { itemId: movie.id, track: 'dub', quality: '480' });
+  assert.equal(r2.status, 200, JSON.stringify(r2.body));
+  assert.equal(r2.body.cur.quality, '480');
+  assert.equal(r2.body.subs.length, 2, 'زیرنویس نسخه + زیرنویس کیسه بدون تکرار (m.fa.srt تکراری حذف شد)');
+  assert.equal(r2.body.subs[0].label, 'English', 'زیرنویسِ نسخه اول می‌آید');
+  assert.equal(r2.body.subs[1].label, 'فارسی', 'زیرنویس کیسه بعد از آن');
+  assert.ok(r2.body.subs.every(function (s) { return /^https:\/\/site\.test\/sv\/t\//.test(s.src); }), 'زیرنویس‌ها فقط از مسیر /t/ با توکن می‌آیند');
   /* لبهٔ داخلی Worker (/sv) همان توکن را با رمز ذخیره‌شده باز می‌کند */
   const set = await W.getSettings(store);
   assert.ok(set.streamSecret && set.streamSecret.length >= 32);
@@ -815,6 +839,38 @@ console.log('PASS: ad platform outage falls back to house ads with a 30s backoff
   const fr3 = K.mkvSplitLacing(laced3, 0, laced3.length, 3);
   assert.equal(fr3.length, 2, 'fixed lacing دو قاب');
   assert.deepEqual([...fr3[0]], [1, 2, 3]);
+
+  /* زیرنویس داخلی: ترک‌های S_TEXT/UTF8 و S_TEXT/ASS با BlockDuration */
+  const tNameId = ui8([0x53, 0x6E]), groupId = ui8([0xA0]), gBlockId = ui8([0xA1]), gDurId = ui8([0x9B]);
+  const subTrackUtf8 = trackEntry(3, 0x11, 'S_TEXT/UTF8', ui8([]), el(tNameId, str('English')));
+  const subTrackAss = trackEntry(4, 0x11, 'S_TEXT/ASS', ui8([]), el(tNameId, str('فارسی')));
+  const subFrame1 = asc('Hello world');
+  const subFrame2 = asc('Dialogue: 0,0:00:05.00,0:00:07.50,Default,,0,0,0,,{\\an8}Second\\Nline');
+  const subCluster = el(ID.cluster, cat(
+    el(ID.clTime, uint(100, 1)),
+    el(ID.block, blockOf(1, 0, true, vidFrames[0])),
+    el(groupId, cat(el(gBlockId, blockOf(3, 0, false, subFrame1)), el(gDurId, uint(2500, 2)))),
+    el(groupId, cat(el(gBlockId, blockOf(4, 50, false, subFrame2)), el(gDurId, uint(2500, 2))))));
+  const tracksEl2 = el(ID.tracks, cat(videoTrack, audioTrack, subTrackUtf8, subTrackAss));
+  const file2 = cat(ebmlHdr, el(ID.seg, cat(infoEl, tracksEl2, subCluster)));
+  const got2 = { tracks: null, samples: 0 };
+  const st2 = K.mkvCreate({
+    tracks: (tr) => { got2.tracks = tr; },
+    sample: () => { got2.samples++; },
+    clusterEnd: () => { }
+  });
+  for (let i = 0; i < file2.length; i += 5) K.mkvFeed(st2, file2.subarray(i, Math.min(file2.length, i + 5)));
+  K.mkvFeed(st2, null);
+  const sub3 = st2.subs[3], sub4 = st2.subs[4];
+  assert.ok(sub3 && sub3.cues.length === 1, 'زیرنویس داخلی UTF8 استخراج شد');
+  assert.equal(sub3.cues[0].s, 100, 'زمان شروع از کلاستر + rel');
+  assert.equal(sub3.cues[0].e, 2600, 'پایان = شروع + BlockDuration × TimecodeScale');
+  assert.equal(sub3.cues[0].t, 'Hello world');
+  assert.equal(sub3.name, 'English', 'نام ترک زیرنویس خوانده شد');
+  assert.ok(sub4 && sub4.cues.length === 1, 'زیرنویس ASS هم استخراج شد');
+  assert.equal(sub4.cues[0].t, 'Second\nline', 'تگ‌های ASS حذف و \\N به خط جدید تبدیل شد');
+  assert.equal(got2.tracks.filter(t => t.subFmt && t.subFmt !== 'bitmap').length, 2, 'دو ترک زیرنویس متنی شناخته شد');
+  assert.equal(got2.samples, 1, 'نمونه‌های ویدئو به handler می‌روند؛ قاب‌های زیرنویس نه');
 }
 {
   /* فرمت با query string (لینک‌های ?hash=) درست تشخیص داده شود */
