@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 const W = await import('data:text/javascript;base64,' + Buffer.from(source + `
 export { parseStreamLines, applyStreamEntries, streamLinesOf, streamBagLinesOf, streamPlayUrl, streamFmtOf, streamsOf, publicStreamMap, publicVariantMap, pickStream, streamOptionsOf, streamTokenMake, streamTokenOpen, streamIpPrefix, setVariantFilePl, upsertVariantFile,
-  streamBindHash, streamEdgeHandle, decodeSubtitleBytes, apiStreamOpen, apiStreamSrc, apiItem, Store, saveUser, saveItemRecord, createTgUser, makeToken,
+  streamBindHash, streamEdgeHandle, decodeSubtitleBytes, apiStreamOpen, apiStreamSrc, apiItem, Store, saveUser, saveItemRecord, createTgUser, makeToken, streamParseMkvTracks, streamParseMp4Tracks, streamProbeTracks,
   bustSettings, getSettings, contentBotAction, buildPlayerJs, handleAssets, APP_HTML, MVX_PLAYER_MODULE, handleAdmin, bustItem, decorateItemStreams, bustAds };`).toString('base64'));
 const edgeMod = await import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(new URL('../scripts/stream-edge-worker.js', import.meta.url), 'utf8')).toString('base64'));
 const edge = edgeMod.default;
@@ -888,6 +888,146 @@ console.log('PASS: ad platform outage falls back to house ads with a 30s backoff
   assert.ok(mod.includes('mkvGoPlay();'), 'پخشِ mkv باید از mkvGoPlay سطحِ ماژول استفاده کند');
 }
 console.log('PASS: MKV demux (EBML جریانی، خوشه‌ها، lacing، Cues) + fMP4 mux (ftyp/moov/avcC/esds، trun data_offset، mdat دست‌نخورده) — پخش داخل‌صفحهٔ mkv؛ نردبان بومی←demux و fmt با query قفل شد.');
+
+/* ── ۱۴. فهرست ترک‌های داخل فایل (مثل VLC): پارسر MKV/MP4 + probe ── */
+{
+  const ui8 = (arr) => new Uint8Array(arr);
+  const cat = (...parts) => {
+    let n = 0; for (const p of parts) n += p.length;
+    const out = new Uint8Array(n); let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  };
+  const asc = (s) => ui8([...s].map(c => c.charCodeAt(0)));
+  const uint = (n, len) => { const b = new Array(len).fill(0); for (let i = len - 1; i >= 0; i--) { b[i] = n & 255; n = Math.floor(n / 256); } return ui8(b); };
+  const str = (s) => cat(asc(s), ui8([0]));
+  const sz = (n) => {
+    for (let len = 1; len <= 8; len++) {
+      const max = Math.pow(2, 7 * len) - 2;
+      if (n <= max) {
+        const b = new Array(len).fill(0);
+        let v = n;
+        for (let i = len - 1; i >= 0; i--) { b[i] = v & 255; v = Math.floor(v / 256); }
+        b[0] |= (0x100 >> len) & 255;
+        return ui8(b);
+      }
+    }
+    throw new Error('size too big');
+  };
+  const el = (id, payload) => cat(id, sz(payload.length), payload);
+
+  /* ── MKV: Segment با اندازهٔ نامعلوم + Tracks (۲ صدا، ۲ زیرنویس) ── */
+  const ebmlHdr = el(ui8([0x1A, 0x45, 0xDF, 0xA3]), ui8([0x1A, 0x45, 0xDF, 0xA3, 0x01, 0xFF]));
+  const entry = (no, type, codec, name, lang) => el(ui8([0xAE]), cat(
+    el(ui8([0xD7]), uint(no, 1)), el(ui8([0x83]), uint(type, 1)), el(ui8([0x86]), str(codec)),
+    name ? el(ui8([0x53, 0x6E]), str(name)) : ui8([]),
+    lang ? el(ui8([0x22, 0xB5, 0x9C]), str(lang)) : ui8([])));
+  const tracksEl = el(ui8([0x16, 0x54, 0xAE, 0x6B]), cat(
+    entry(1, 1, 'V_MPEG4/ISO/AVC', '', ''),
+    entry(2, 2, 'A_AAC', '::Www.King-Movie.Net::', 'per'),
+    entry(3, 2, 'A_EAC3', '', 'eng'),
+    entry(4, 0x11, 'S_TEXT/UTF8', '', 'eng'),
+    entry(5, 0x11, 'S_HDMV/PGS', '', 'fas')));
+  const infoEl = el(ui8([0x15, 0x49, 0xA9, 0x66]), el(ui8([0x2A, 0xD7, 0xB1]), uint(1000000, 3)));
+  const segUnknown = cat(ui8([0x18, 0x53, 0x80, 0x67]), ui8([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]), infoEl, tracksEl);
+  const mkvFile = cat(ebmlHdr, segUnknown);
+  const mg = W.streamParseMkvTracks(mkvFile);
+  assert.equal(mg.video, 1);
+  assert.equal(mg.audio.length, 2, 'MKV: دو ترک صدا');
+  assert.equal(mg.audio[0].name, '::Www.King-Movie.Net::');
+  assert.equal(mg.audio[1].codec, 'A_EAC3');
+  assert.equal(mg.subs.length, 1, 'زیرنویس تصویری (PGS) نادیده گرفته می‌شود');
+  assert.equal(mg.subs[0].fmt, 'srt');
+  /* Segment با اندازهٔ مشخص هم خوانده شود */
+  const segKnown = el(ui8([0x18, 0x53, 0x80, 0x67]), cat(infoEl, tracksEl));
+  const mg2 = W.streamParseMkvTracks(cat(ebmlHdr, segKnown));
+  assert.equal(mg2.audio.length, 2, 'Segment با اندازهٔ مشخص: دو صدا');
+  assert.equal(mg2.subs.length, 1, 'Segment با اندازهٔ مشخص: یک زیرنویس');
+
+  /* ── MP4: moov با ۲ صدا + ۱ زیرنویس tx3g ── */
+  const box = (type, payload) => cat(uint(payload.length + 8, 4), asc(type), payload);
+  const langPack = (s) => uint((((s.charCodeAt(0) - 0x60) & 31) << 10) | (((s.charCodeAt(1) - 0x60) & 31) << 5) | ((s.charCodeAt(2) - 0x60) & 31), 2);
+  const trakOf = (id, handler, codec, name, lang) => {
+    const tkhd = box('tkhd', cat(uint(0, 4), uint(0, 4), uint(0, 4), uint(id, 4), uint(0, 4), uint(0, 4)));
+    const mdhd = box('mdhd', cat(uint(0, 4), uint(0, 4), uint(0, 4), uint(48000, 4), uint(0, 4), langPack(lang), uint(0, 2)));
+    const hdlr = box('hdlr', cat(uint(0, 4), uint(0, 4), asc(handler), ui8([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), str(name)));
+    const sent = box(codec, ui8([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+    const stsd = box('stsd', cat(uint(0, 4), uint(1, 4), sent));
+    const stbl = box('stbl', stsd);
+    const minf = box('minf', stbl);
+    const mdia = box('mdia', cat(mdhd, hdlr, minf));
+    return box('trak', cat(tkhd, mdia));
+  };
+  const mp4File = cat(box('ftyp', cat(asc('isom'), uint(0, 4))), box('moov', cat(
+    trakOf(1, 'vide', 'avc1', '', ''),
+    trakOf(2, 'soun', 'mp4a', '::Www.King-Movie.Net::', 'fas'),
+    trakOf(3, 'soun', 'mp4a', '', 'eng'),
+    trakOf(4, 'text', 'tx3g', 'فارسی', 'fas'))));
+  const pg = W.streamParseMp4Tracks(mp4File);
+  assert.equal(pg.audio.length, 2, 'MP4: دو ترک صدا');
+  assert.equal(pg.audio[0].name, '::Www.King-Movie.Net::');
+  assert.equal(pg.audio[0].lang, 'fas');
+  assert.equal(pg.audio[1].lang, 'eng');
+  assert.equal(pg.subs.length, 1, 'MP4: یک زیرنویس داخلی (tx3g)');
+  assert.equal(pg.subs[0].fmt, 'tx3g');
+  assert.equal(pg.video, 1);
+  /* moov در ته فایل — با درخواست Range دُم خوانده می‌شود */
+  const tailFile = cat(box('mdat', uint(0, 200)), box('moov', trakOf(7, 'soun', 'mp4a', '', 'eng')));
+
+  /* ── probe: fetch با Range — سر MP4 پیدا نشد، دُم پیدا شد ── */
+  const realFetch = globalThis.fetch;
+  try {
+    let ranges = [];
+    const headNoMoov = cat(box('ftyp', cat(asc('isom'), uint(0, 4))), uint(0, 300));
+    globalThis.fetch = async (u, opts) => {
+      const rg = (opts.headers || {}).range || '';
+      ranges.push(rg);
+      if (rg.startsWith('bytes=0-')) return new Response(headNoMoov, { status: 206 });
+      if (rg.startsWith('bytes=-')) return new Response(tailFile, { status: 206 });
+      return new Response('', { status: 416 });
+    };
+    const probed = await W.streamProbeTracks('https://origin.test/moov-at-end.mp4');
+    assert.ok(probed && probed.audio.length === 1, 'probe: moov در ته فایل از دُم پیدا شد');
+    assert.ok(ranges.some(r => r.startsWith('bytes=-')), 'probe: برای moov در ته، دُم فایل خوانده شد');
+    globalThis.fetch = async (u, opts) => {
+      const rg = ((opts && opts.headers) || {}).range || '';
+      if (rg.startsWith('bytes=0-')) return new Response(mkvFile, { status: 206 });
+      return new Response('', { status: 416 });
+    };
+    const probedHead = await W.streamProbeTracks('https://origin.test/m.mkv');
+    assert.ok(probedHead && probedHead.audio.length === 2 && probedHead.subs.length === 1, 'probe: MKV از سر فایل');
+    globalThis.fetch = async () => { throw new Error('net down'); };
+    assert.equal(await W.streamProbeTracks('https://origin.test/x.mp4'), null, 'شکست شبکه بی‌صدا null می‌دهد');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  /* پاسخ open باید فهرست ترک‌ها را بیاورد (tracks) — بدون هیچ لینکی */
+  const st2 = new W.Store(null, {});
+  W.bustSettings(st2);
+  await st2.set('set', { secret: 'sec-probe-1234567890', publicUrl: 'https://site.test', streamEnabled: true, streamPublic: true, plAdPre: false, plAdSwitch: false });
+  const u2 = await W.createTgUser(st2, { tgId: '9001' }); u2.role = 'free'; await W.saveUser(st2, u2);
+  const tok2 = await W.makeToken(st2, u2);
+  const itm = { id: 'i_trk', type: 'movie', title: 'فیلم ترک', access: 'free', variants: { sub: {}, dub: {} }, episodes: [] };
+  W.applyStreamEntries(itm, W.parseStreamLines('720 دوبله https://origin.test/m.mkv', { type: 'movie' }).entries);
+  await W.saveItemRecord(st2, itm);
+  const realFetch2 = globalThis.fetch;
+  try {
+    globalThis.fetch = async (u, opts) => {
+      const rg = ((opts && opts.headers) || {}).range || '';
+      if (rg.startsWith('bytes=0-')) return new Response(mkvFile, { status: 206 });
+      return new Response('', { status: 416 });
+    };
+    const r = await W.apiStreamOpen(st2, { itemId: 'i_trk' }, new Request('https://site.test/api/x', { method: 'POST', headers: { authorization: 'Bearer ' + tok2, 'cf-connecting-ip': '1.2.3.4', 'user-agent': CHROME, origin: 'https://site.test' } }), { waitUntil() { } });
+    const body = await r.json();
+    assert.ok(body.tracks && body.tracks.audio.length === 2, 'open: فهرست ترک‌های فایل در پاسخ می‌آید');
+    assert.ok(body.tracks.subs.length === 1);
+    assert.ok(!JSON.stringify(body.tracks).includes('origin.test'), 'فهرست ترک‌ها بدون هیچ لینک/آدرسی است');
+  } finally {
+    globalThis.fetch = realFetch2;
+  }
+}
+console.log('PASS: in-file track listing (VLC-style) — MKV/MP4 parsers + open-time probe with ranges; metadata only, no URLs.');
 
 console.log('PASS: player banners fall back to house ads (wide overlay + pause), watermark is the numeric Telegram id (username only as fallback), admins see player ads for testing while real subscribers stay ad-free.');
 // تایمر ارسال دسته‌ای رویدادها (waitUntil ۲۰ ثانیه‌ای) را در Node منتظر نمی‌مانیم.

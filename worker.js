@@ -2195,6 +2195,194 @@ function streamFmtOf(url) {
   if (/\.mkv$/.test(path)) return 'mkv';
   return 'auto';
 }
+/* ── فهرست ترک‌های داخل فایل (مثل VLC): MKV از عنصر Tracks در ابتدای فایل،
+   MP4 از جعبهٔ moov (سر یا ته). فقط فراداده برمی‌گردد؛ هیچ بایتی به کاربر نمی‌رسد. ── */
+function ebmlVint(buf, pos, keep) {
+  if (pos >= buf.length) return null;
+  const first = buf[pos];
+  if (!first) return null;
+  let len = 1;
+  while (len <= 8 && !(first & (0x80 >> (len - 1)))) len++;
+  if (len > 8 || pos + len > buf.length) return null;
+  let v = keep ? first : (first & (0xff >> len));
+  let allOnes = !keep && !(v ^ (0xff >> len));
+  for (let i = 1; i < len; i++) { v = v * 256 + buf[pos + i]; if (!keep && buf[pos + i] !== 255) allOnes = false; }
+  if (allOnes) return { v: -1, hlen: len }; /* اندازهٔ نامعلوم */
+  return { v: v, hlen: len };
+}
+function ebmlElem(buf, pos) {
+  const id = ebmlVint(buf, pos, true);
+  if (!id) return null;
+  const size = ebmlVint(buf, pos + id.hlen, false);
+  if (!size) return null;
+  return { id: id.v, size: size.v, hlen: id.hlen + size.hlen };
+}
+function ebmlStr(buf, pos, len) {
+  let s = '';
+  for (let i = 0; i < len; i++) s += String.fromCharCode(buf[pos + i]);
+  s = s.replace(/\x00+$/, '');
+  try { return decodeURIComponent(escape(s)); } catch (e) { return s; }
+}
+function ebmlUint(buf, pos, len) {
+  let v = 0;
+  for (let i = 0; i < len && pos + i < buf.length; i++) v = v * 256 + buf[pos + i];
+  return v;
+}
+function subLangName(lg) {
+  lg = String(lg || '').toLowerCase();
+  if (lg.indexOf('fa') === 0) return 'فارسی';
+  if (lg.indexOf('en') === 0) return 'انگلیسی';
+  if (lg.indexOf('ar') === 0) return 'عربی';
+  if (lg.indexOf('tr') === 0) return 'ترکی';
+  if (!lg) return '';
+  return lg.toUpperCase();
+}
+function streamParseMkvTracks(buf) {
+  const out = { audio: [], subs: [], video: 0 };
+  let pos = 0;
+  let guard = 0;
+  while (pos < buf.length && guard++ < 400) {
+    const e = ebmlElem(buf, pos);
+    if (!e) break;
+    const p = pos + e.hlen;
+    if (e.id === 0x1654AE6B && e.size >= 0) {
+      let tp = p, te = Math.min(p + e.size, buf.length);
+      while (tp < te) {
+        const en = ebmlElem(buf, tp);
+        if (!en || en.size < 0 || tp + en.hlen + en.size > te) break;
+        if (en.id === 0xAE) {
+          const t = { no: 0, type: 0, codec: '', name: '', lang: '' };
+          let q = tp + en.hlen, qe = q + en.size;
+          while (q < qe) {
+            const c = ebmlElem(buf, q);
+            if (!c || c.size < 0 || q + c.hlen + c.size > qe) break;
+            const dp = q + c.hlen;
+            if (c.id === 0xD7) t.no = ebmlUint(buf, dp, c.size);
+            else if (c.id === 0x83) t.type = ebmlUint(buf, dp, c.size);
+            else if (c.id === 0x86) t.codec = ebmlStr(buf, dp, Math.min(c.size, 80));
+            else if (c.id === 0x536E) t.name = ebmlStr(buf, dp, Math.min(c.size, 120));
+            else if (c.id === 0x22B59C) t.lang = ebmlStr(buf, dp, Math.min(c.size, 16));
+            q += c.hlen + c.size;
+          }
+          if (t.type === 1) out.video++;
+          else if (t.type === 2) out.audio.push({ no: t.no, name: t.name, lang: t.lang, codec: t.codec });
+          else if (t.type === 0x11) {
+            const fmt = t.codec.indexOf('S_TEXT/UTF8') === 0 ? 'srt' : (t.codec.indexOf('S_TEXT/WEBVTT') === 0 ? 'vtt' : ((t.codec.indexOf('S_TEXT/ASS') === 0 || t.codec.indexOf('S_TEXT/SSA') === 0) ? 'ass' : 'bitmap'));
+            if (fmt !== 'bitmap') out.subs.push({ no: t.no, name: t.name, lang: t.lang, fmt: fmt });
+          }
+        }
+        tp += en.hlen + en.size;
+      }
+      return out;
+    }
+    if (e.id === 0x18538067) { pos = p; continue; } /* فرورفتن در Segment (با یا بی اندازه) */
+    if (e.size < 0) break;
+    if (p + e.size > buf.length) break;
+    pos = p + e.size;
+  }
+  return out;
+}
+function mp4Box(buf, pos, end) {
+  if (pos + 8 > end) return null;
+  const size = (buf[pos] * 0x1000000) + (buf[pos + 1] << 16) + (buf[pos + 2] << 8) + buf[pos + 3];
+  const type = String.fromCharCode(buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]);
+  return { size: size, type: type, hlen: 8 };
+}
+function mp4Walk(buf, pos, end, type, cb) {
+  let guard = 0;
+  while (pos + 8 <= end && guard++ < 4000) {
+    const b = mp4Box(buf, pos, end);
+    if (!b) break;
+    const size = b.size === 1 && pos + 16 <= end
+      ? Math.round(ebmlUint(buf, pos + 8, 8)) : b.size;
+    const hdr = b.size === 1 ? 16 : 8;
+    const boxEnd = Math.min(pos + (size || (end - pos)), end);
+    if (b.type === type) cb(pos + hdr, boxEnd, b);
+    pos += (size > 0 ? size : (end - pos));
+  }
+}
+function mp4Lang(buf, pos) {
+  const v = (buf[pos] << 8) | buf[pos + 1];
+  if (!v) return '';
+  let s = '';
+  for (let i = 2; i >= 0; i--) s += String.fromCharCode(((v >> (i * 5)) & 31) + 0x60);
+  return s;
+}
+function streamParseMp4Tracks(buf) {
+  const out = { audio: [], subs: [], video: 0 };
+  let moovEnd = 0, moovAt = -1;
+  mp4Walk(buf, 0, buf.length, 'moov', (s, e) => { moovAt = s; moovEnd = e; });
+  if (moovAt < 0) return out;
+  mp4Walk(buf, moovAt, moovEnd, 'trak', (ts, te) => {
+    const t = { id: 0, handler: '', name: '', lang: '', codec: '' };
+    mp4Walk(buf, ts, te, 'tkhd', (s) => {
+      const ver = buf[s];
+      t.id = ebmlUint(buf, s + (ver === 1 ? 20 : 12), 4);
+    });
+    mp4Walk(buf, ts, te, 'mdia', (ms, me) => {
+      mp4Walk(buf, ms, me, 'mdhd', (s) => {
+        const ver = buf[s];
+        t.lang = mp4Lang(buf, s + (ver === 1 ? 32 : 20));
+      });
+      mp4Walk(buf, ms, me, 'hdlr', (s) => {
+        t.handler = String.fromCharCode(buf[s + 8], buf[s + 9], buf[s + 10], buf[s + 11]);
+        let nm = '';
+        for (let i = s + 24; i < me && buf[i]; i++) nm += String.fromCharCode(buf[i]);
+        try { nm = decodeURIComponent(escape(nm)); } catch (e) { }
+        t.name = nm.replace(/[\u0000-\u001f]/g, '').trim();
+      });
+      mp4Walk(buf, ms, me, 'stbl', (bs, be) => {
+        mp4Walk(buf, bs, be, 'stsd', (s, e) => {
+          if (s + 16 <= e) t.codec = String.fromCharCode(buf[s + 12], buf[s + 13], buf[s + 14], buf[s + 15]);
+        });
+      });
+    });
+    if (t.handler === 'soun') out.audio.push({ no: t.id, name: t.name, lang: t.lang, codec: t.codec });
+    else if (t.handler === 'vide') out.video++;
+    else if (t.handler === 'text' || t.handler === 'sbtl' || t.handler === 'subp' || t.codec === 'tx3g' || t.codec === 'wvtt') {
+      out.subs.push({ no: t.id, name: t.name, lang: t.lang, fmt: t.codec === 'wvtt' ? 'vtt' : (t.codec || 'tx3g') });
+    }
+  });
+  return out;
+}
+/* خواندنِ سریعِ سر/ته فایل برای فهرست ترک‌ها؛ شکست = null (بی‌صدا) */
+async function streamProbeTracks(url) {
+  const read = async function (range) {
+    const r = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'range': range,
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'accept': '*/*'
+      },
+      signal: AbortSignal.timeout(600)
+    });
+    if (!r || !r.ok) return null;
+    return new Uint8Array(await r.arrayBuffer());
+  };
+  try {
+    const head = await read('bytes=0-262143');
+    if (!head || head.length < 16) return null;
+    const isMkv = head[0] === 0x1A && head[1] === 0x45 && head[2] === 0xDF && head[3] === 0xA3;
+    const isMp4 = String.fromCharCode(head[4], head[5], head[6], head[7]) === 'ftyp';
+    if (isMkv) {
+      const got = streamParseMkvTracks(head);
+      return (got.audio.length || got.subs.length || got.video) ? got : null;
+    }
+    if (isMp4) {
+      let got = streamParseMp4Tracks(head);
+      if (!got.audio.length && !got.subs.length && !got.video) {
+        const tail = await read('bytes=-262144');
+        if (tail && tail.length) {
+          const g2 = streamParseMp4Tracks(tail);
+          if (g2.audio.length || g2.subs.length || g2.video) got = g2;
+        }
+      }
+      return (got.audio.length || got.subs.length || got.video) ? got : null;
+    }
+    return null;
+  } catch (e) { return null; }
+}
 function streamIsSubtitleUrl(url) {
   try { return /\.(srt|vtt)$/i.test(new URL(url).pathname); } catch (e) { return false; }
 }
@@ -2956,8 +3144,10 @@ async function streamBuild(store, set, user, item, picked, sid, request, avoid) 
   for (const t of (picked.stream.subs || [])) await addSub(t, 'fs_' + (++sidx));
   for (const t of (picked.bag.streamSubs || [])) await addSub(t, 't_' + (++sidx));
   const ep = streamEpisodeInfo(item, picked.bag);
+  /* فهرست ترک‌های داخل فایل (صدا/زیرنویس) مثل VLC — فقط فراداده؛ شکست بی‌صدا */
+  const trackInfo = await streamProbeTracks(picked.stream.url);
   return {
-    ok: true, sid: sid, src: src, fmt: fmt, exp: exp * 1000, edge: edge.id,
+    ok: true, sid: sid, src: src, fmt: fmt, exp: exp * 1000, edge: edge.id, tracks: trackInfo,
     direct: set.streamDirectPlay !== false ? picked.stream.url : '',
     item: { id: item.id, title: item.title, type: item.type, poster: posterUrlFor({ posterOverride: item.posterOverride || '', posterSrc: (item.source && item.source.tmeUrl) || '', galleryPoster: galleryPosterOf(item) }) },
     ep: ep,
@@ -9533,11 +9723,11 @@ function MVX_PLAYER_MODULE(W) {
           '<span class="mvp-time">۰:۰۰ / ۰:۰۰</span><span class="mvp-sp"></span>' +
           '<button type="button" class="mvp-btn" data-a="next" title="قسمت بعد (N)" hidden>' + I.next + '</button>' +
           '<button type="button" class="mvp-btn" data-a="eps" title="قسمت‌ها" hidden>' + I.list + '</button>' +
-          '<button type="button" class="mvp-btn" data-a="cc" title="زیرنویس (C)" hidden>' + I.cc + '</button>' +
+          '<button type="button" class="mvp-btn" data-a="cc" title="ترک‌های صدا و زیرنویس (C)">' + I.cc + '</button>' +
           '<button type="button" class="mvp-btn" data-a="set" title="کیفیت، نسخه و تنظیمات">' + I.gear + '</button>' +
           '<button type="button" class="mvp-btn" data-a="fs" title="تمام‌صفحه (F)">' + I.fs + '</button>' +
         '</div></div>' +
-      '<div class="mvp-panel" data-p="set"></div><div class="mvp-panel" data-p="eps"></div>' +
+      '<div class="mvp-panel" data-p="set"></div><div class="mvp-panel" data-p="eps"></div><div class="mvp-panel" data-p="trk"></div>' +
       '<div class="mvp-banner"><span class="mvp-adtag">تبلیغ</span><button type="button" class="mvp-bx" aria-label="بستن تبلیغ">✕</button><img alt="تبلیغ"></div>' +
       '<div class="mvp-pad"><div class="im"><span class="mvp-adtag">تبلیغ</span><img alt="تبلیغ"></div><button type="button" class="go">▶ ادامهٔ پخش</button></div>' +
       '<div class="mvp-resume"><span class="tx"></span><button type="button" class="pri" data-r="yes">ادامه</button><button type="button" data-r="no">از اول</button></div>' +
@@ -9567,7 +9757,7 @@ function MVX_PLAYER_MODULE(W) {
     var ep = info.ep;
     q('[data-a="next"]', P.root).hidden = !(ep && ep.next);
     q('[data-a="eps"]', P.root).hidden = !(ep && ep.list && ep.list.length);
-    q('[data-a="cc"]', P.root).hidden = !(info.subs && info.subs.length);
+    q('[data-a="cc"]', P.root).hidden = false;
   }
   function qLabel(qk) { return ({ '480': '480p', '720': '720p', '1080': '1080p', '4k': '4K' })[qk] || String(qk || ''); }
 
@@ -9825,7 +10015,11 @@ function MVX_PLAYER_MODULE(W) {
     else text = text.replace(/\r/g, '').replace(/\n+$/, '');
     if (!text) return;
     var durMs = (bdur && bdur > 0) ? bdur * st.scaleMs : 0;
-    s.cues.push({ s: tMs, e: tMs + (durMs > 0 ? durMs : 4000), t: text });
+    var cues = s.cues;
+    var lo = 0, hi = cues.length;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (cues[mid].s < tMs) lo = mid + 1; else hi = mid; }
+    if (cues[lo] && cues[lo].s === tMs && cues[lo].t === text) return;
+    cues.splice(lo, 0, { s: tMs, e: tMs + (durMs > 0 ? durMs : 4000), t: text });
   }
   function mkvCreate(h) {
     return {
@@ -10095,6 +10289,67 @@ function MVX_PLAYER_MODULE(W) {
       if (b && b.length && v && b.end(b.length - 1) > v.currentTime + 90) m.sb.remove(0, Math.max(0, v.currentTime - 30));
     } catch (e) { }
   }
+  function trkLangName(lg) {
+    lg = String(lg || '').toLowerCase();
+    if (lg.indexOf('fa') === 0) return 'فارسی';
+    if (lg.indexOf('en') === 0) return 'انگلیسی';
+    if (lg.indexOf('ar') === 0) return 'عربی';
+    if (lg.indexOf('tr') === 0) return 'ترکی';
+    return lg ? lg.toUpperCase() : '';
+  }
+  function trackLabelOf(tr, idx, word) {
+    var nm = String(tr.name || '').replace(/[\u0000-\u001f]/g, '').trim();
+    var lang = trkLangName(tr.lang);
+    var base = nm || (word + ' ' + (idx + 1));
+    return lang ? base + ' - [' + lang + ']' : base;
+  }
+  /* تعویض ترک صدای داخل فایل (MKV در حالت پخش داخل‌صفحه) — مثل VLC */
+  function mkvSwitchAudio(no) {
+    if (!P || !P.mkv || !P.mkv.tracks) {
+      toast('تغییر ترک صدا فقط در پخش داخل‌صفحهٔ فایل ممکن است');
+      return;
+    }
+    var m = P.mkv;
+    var auds = m.audioList || [];
+    var pick = null, i;
+    for (i = 0; i < auds.length; i++) if (auds[i].no === no) pick = auds[i];
+    if (no && pick && !pick.ok) { toast('کدک این ترک صدا (' + (pick.codec || 'نامشخص') + ') در مرورگر پشتیبانی نمی‌شود'); return; }
+    P.mkvAudioPref = no || 0;
+    for (var k in m.tracks) { if (m.tracks[k] && m.tracks[k].kind === 'audio') delete m.tracks[k]; }
+    if (!no) {
+      m.audioOff = true;
+      renderTrk();
+      toast('صدا غیرفعال شد');
+      return;
+    }
+    m.audioOff = false;
+    var rate = pick ? (Math.round(pick.rate) || 48000) : 48000;
+    if (pick && rate !== (m.audioRate || 48000)) {
+      /* نرخ متفاوت = ساختار init فرق می‌کند؛ از همین ثانیه دوباره شروع می‌شود */
+      P.mkvSeek = P.video.currentTime;
+      startMkv();
+      renderTrk();
+      toast('صدا: ' + trackLabelOf(pick, 0, 'ترک'));
+      return;
+    }
+    if (pick) {
+      m.tracks[pick.no] = { id: 2, no: pick.no, kind: 'audio', timescale: rate, ch: pick.ch || 2, extra: pick.priv };
+      m.audioSel = pick.no;
+    }
+    m.aFrames = undefined;
+    var t = P.video.currentTime * 1000;
+    var all = (m.clusters || []).concat(m.cues || []).sort(function (a, c) { return a.t - c.t; });
+    var best = null;
+    for (var j = 0; j < all.length; j++) if (all[j].t <= t + 1 && (!best || all[j].t > best.t)) best = all[j];
+    m.skipUntil = 0;
+    m.queue = [];
+    try { if (m.reader) m.reader.cancel(); } catch (e) { }
+    try { if (m.sb) m.sb.abort(); } catch (e) { }
+    m.ended = false;
+    runMkvFetch(m, best ? best.off : 0);
+    renderTrk();
+    toast('صدا: ' + (pick ? trackLabelOf(pick, 0, 'ترک') : ''));
+  }
   function mkvOnSeek() {
     var m = P && P.mkv;
     if (!m || !m.tracks || !m.sb) return;
@@ -10124,10 +10379,32 @@ function MVX_PLAYER_MODULE(W) {
     var st = mkvCreate({
       tracks: function (trs) {
         var vid = null, aud = null;
+        /* فهرست همهٔ ترک‌های صدا (مثل VLC) + انتخابِ ترجیحی کاربر */
+        var auds = [];
         for (var i = 0; i < trs.length; i++) {
           if (trs[i].type === 1 && !vid) vid = trs[i];
-          if (trs[i].type === 2 && !aud) aud = trs[i];
+          if (trs[i].type === 2) auds.push(trs[i]);
         }
+        var audList = [];
+        for (var ai = 0; ai < auds.length; ai++) {
+          audList.push({
+            no: auds[ai].no, name: auds[ai].name || '', lang: auds[ai].lang || '',
+            codec: auds[ai].codec, rate: auds[ai].rate, ch: auds[ai].ch, priv: auds[ai].priv,
+            ok: /^A_AAC/.test(auds[ai].codec)
+          });
+        }
+        var pref = P ? P.mkvAudioPref : 0;
+        for (var aj = 0; aj < auds.length; aj++) {
+          if (pref && auds[aj].no === pref && /^A_AAC/.test(auds[aj].codec)) { aud = auds[aj]; break; }
+        }
+        if (!aud) {
+          for (var ak = 0; ak < auds.length; ak++) {
+            if (/^A_AAC/.test(auds[ak].codec)) { aud = auds[ak]; break; }
+          }
+        }
+        m.audioList = audList;
+        m.audioSel = aud ? aud.no : 0;
+        m.audioRate = (aud && aud.rate) ? Math.round(aud.rate) : 48000;
         if (!vid || !/^V_MPEG4\/ISO\/AVC/.test(vid.codec)) {
           return mkvFailStep('codec');
         }
@@ -10210,7 +10487,9 @@ function MVX_PLAYER_MODULE(W) {
       }
     });
     st.base = from || 0;
+    var prevSt = m.st;
     m.st = st;
+    if (prevSt && prevSt.subs) st.subs = prevSt.subs;
     var headers = { accept: '*/*' };
     if (from) headers.range = 'bytes=' + from + '-';
     var opts = { headers: headers, credentials: 'omit' };
@@ -10578,6 +10857,7 @@ function MVX_PLAYER_MODULE(W) {
   }
   function setupSubs(info) {
     P.subs = info.subs || [];
+    P.trackInfo = info.tracks || null;
     var want = P.subPref !== undefined ? P.subPref : info.subDefault;
     if (want && !P.subs.some(function (s) { return s.id === want; })) want = P.subs.length && P.subPref ? P.subs[0].id : '';
     selectSub(want || '', true);
@@ -10593,7 +10873,12 @@ function MVX_PLAYER_MODULE(W) {
     if (!sub) return;
     if (sub.embedded != null) {
       var est = P.mkv && P.mkv.st && P.mkv.st.subs && P.mkv.st.subs[sub.embedded];
-      P.cues = est ? est.cues : [];
+      if (!est) {
+        if (!silent) toast('این زیرنویس داخل فایل است و در این حالت پخش قابل روشن‌کردن نیست');
+        P.subOn = ''; P.cues = []; renderSub(true); renderTrk();
+        return;
+      }
+      P.cues = est.cues;
       if (!silent) toast('زیرنویس: ' + sub.label);
       return;
     }
@@ -10619,6 +10904,43 @@ function MVX_PLAYER_MODULE(W) {
   }
 
   /* ── تنظیمات: نسخه، کیفیت، زیرنویس، سرعت، نسبت تصویر ── */
+  function renderTrk() {
+    var panel = q('[data-p="trk"]', P.root);
+    if (!panel) return;
+    var demuxAud = (P.mkv && P.mkv.audioList) ? P.mkv.audioList : null;
+    var probeAud = (P.trackInfo && P.trackInfo.audio) ? P.trackInfo.audio : [];
+    var auds = demuxAud || probeAud;
+    var switchable = !!demuxAud;
+    var curAudio = (P.mkv && P.mkv.audioOff) ? 0 : ((P.mkv && P.mkv.audioSel) || (P.mkvAudioPref || 0));
+    var html = '<div class="mvp-ph">☰ ترک‌های فایل (صدا و زیرنویس)<button type="button" class="mvp-btn" data-x="1">' + I.close + '</button></div>';
+    html += '<div class="mvp-sec"><h6>🔊 صدا</h6><div class="mvp-opts">';
+    if (switchable) html += '<button type="button" class="mvp-opt' + (!curAudio ? ' on' : '') + '" data-aud="0">غیرفعال</button>';
+    if (!auds.length) {
+      html += '<span style="font-size:12px;color:var(--tx3)">فهرست ترک‌های داخل فایل در دسترس نیست.</span>';
+    }
+    auds.forEach(function (t, i) {
+      var lab = trackLabelOf(t, i, 'ترک');
+      var on = switchable && t.no === curAudio;
+      if (switchable) html += '<button type="button" class="mvp-opt' + (on ? ' on' : '') + (!t.ok ? ' lock' : '') + '" data-aud="' + t.no + '">' + esc(lab) + (t.ok ? '' : ' ⚠') + '</button>';
+      else html += '<button type="button" class="mvp-opt' + (i === 0 ? ' on' : '') + '" disabled title="برای تعویض، پخش داخل‌صفحه فعال شود">' + esc(lab) + '</button>';
+    });
+    if (!switchable && auds.length > 1) html += '<span style="font-size:11.5px;color:var(--tx3)">تغییر ترک صدای داخل فایل در این حالت پخش پشتیبانی نمی‌شود؛ صدای پیش‌فرض پخش می‌شود.</span>';
+    html += '</div></div>';
+    var subs = (P.subs || []).slice();
+    var known = {};
+    subs.forEach(function (s) { known[s.id] = 1; });
+    (P.trackInfo && P.trackInfo.subs ? P.trackInfo.subs : []).forEach(function (ts, i) {
+      var id = 'emb_' + ts.no;
+      if (!known[id]) subs.push({ id: id, label: trackLabelOf(ts, i, 'زیرنویس'), embedded: ts.no, src: '', listed: true });
+    });
+    html += '<div class="mvp-sec"><h6>💬 زیرنویس</h6><div class="mvp-opts"><button type="button" class="mvp-opt' + (!P.subOn ? ' on' : '') + '" data-sub="">غیرفعال</button>' +
+      subs.map(function (s) {
+        var usable = !s.listed;
+        return '<button type="button" class="mvp-opt' + (s.id === P.subOn ? ' on' : '') + '" data-sub="' + esc(usable ? s.id : '') + '"' + (usable ? '' : ' disabled title="در این حالت پخش قابل روشن‌کردن نیست"') + '>' + esc(s.label) + '</button>';
+      }).join('') + '</div></div>';
+    html += '<div class="mvp-sec"><h6>تنظیمات زیرنویس</h6><div class="mvp-opts"><button type="button" class="mvp-opt" data-x="1" data-open-set="1">اندازه، پس‌زمینه و هم‌زمانی ⚙</button></div></div>';
+    panel.innerHTML = html;
+  }
   function renderPanel() {
     var info = P.info || {};
     var opts = info.options || { sub: [], dub: [] };
@@ -10669,6 +10991,7 @@ function MVX_PLAYER_MODULE(W) {
   }
   function openPanel(name) {
     closePanels();
+    if (name === 'trk') renderTrk();
     var p = q('[data-p="' + name + '"]', P.root);
     if (!p || !p.innerHTML) return;
     p.classList.add('on');
@@ -10903,7 +11226,9 @@ function MVX_PLAYER_MODULE(W) {
       if (a === 'set') return P.panel === 'set' ? closePanels() : openPanel('set');
       if (a === 'eps') return P.panel === 'eps' ? closePanels() : openPanel('eps');
       if (a === 'next') { var n = P.info && P.info.ep && P.info.ep.next; if (n) gotoEp(n.id); return; }
-      if (a === 'cc') { P.subPref = P.subOn ? '' : ((P.subs[0] || {}).id || ''); selectSub(P.subPref); renderPanel(); return; }
+      if (a === 'cc') { renderTrk(); return P.panel === 'trk' ? closePanels() : openPanel('trk'); }
+      if (b.hasAttribute('data-open-set')) { renderPanel(); return openPanel('set'); }
+      if (b.hasAttribute('data-aud')) { return mkvSwitchAudio(Number(b.getAttribute('data-aud')) || 0); }
       if (b.hasAttribute('data-x')) return closePanels();
       if (b.hasAttribute('data-track')) {
         var t = b.getAttribute('data-track');
