@@ -2346,8 +2346,12 @@ function streamParseMp4Tracks(buf) {
   return out;
 }
 /* خواندنِ سریعِ سر/ته فایل برای فهرست ترک‌ها؛ شکست = null (بی‌صدا) */
-async function streamProbeTracks(url) {
-  const read = async function (range) {
+const streamProbeCache = new Map(); /* url → { t, val } — فراداده، ۱۰ دقیقه */
+function streamProbeTracks(url) {
+  const cached = streamProbeCache.get(url);
+  if (cached && Date.now() - cached.t < 600000) return Promise.resolve(cached.val);
+  if (streamProbeCache.size > 300) streamProbeCache.clear();
+  const read = async function (range, cap) {
     const r = await fetch(url, {
       method: 'GET',
       headers: {
@@ -2355,33 +2359,66 @@ async function streamProbeTracks(url) {
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
         'accept': '*/*'
       },
-      signal: AbortSignal.timeout(600)
+      signal: AbortSignal.timeout(2500)
     });
     if (!r || !r.ok) return null;
-    return new Uint8Array(await r.arrayBuffer());
+    const max = cap || 262144;
+    if (!r.body || !r.body.getReader) {
+      const all = new Uint8Array(await r.arrayBuffer());
+      return all.length > max ? all.subarray(0, max) : all;
+    }
+    /* فقط سقفِ لازم را می‌خوانیم؛ اگر مبدأ Range را نادیده گرفت کل فایل بافر نمی‌شود */
+    const rd = r.body.getReader();
+    const chunks = [];
+    let got = 0;
+    while (got < max) {
+      const part = await rd.read();
+      if (part.done) break;
+      const u = part.value || new Uint8Array(0);
+      chunks.push(u);
+      got += u.length;
+    }
+    try { rd.cancel(); } catch (e) { }
+    const out = new Uint8Array(Math.min(got, max));
+    let o = 0;
+    for (const c of chunks) {
+      const room = out.length - o;
+      if (room <= 0) break;
+      out.set(c.length > room ? c.subarray(0, room) : c, o);
+      o += Math.min(c.length, room);
+    }
+    return out;
   };
-  try {
-    const head = await read('bytes=0-262143');
-    if (!head || head.length < 16) return null;
-    const isMkv = head[0] === 0x1A && head[1] === 0x45 && head[2] === 0xDF && head[3] === 0xA3;
-    const isMp4 = String.fromCharCode(head[4], head[5], head[6], head[7]) === 'ftyp';
-    if (isMkv) {
-      const got = streamParseMkvTracks(head);
-      return (got.audio.length || got.subs.length || got.video) ? got : null;
-    }
-    if (isMp4) {
-      let got = streamParseMp4Tracks(head);
-      if (!got.audio.length && !got.subs.length && !got.video) {
-        const tail = await read('bytes=-262144');
-        if (tail && tail.length) {
-          const g2 = streamParseMp4Tracks(tail);
-          if (g2.audio.length || g2.subs.length || g2.video) got = g2;
-        }
+  const run = (async function () {
+    try {
+      const head = await read('bytes=0-262143', 262144);
+      if (!head || head.length < 16) return null;
+      const isMkv = head[0] === 0x1A && head[1] === 0x45 && head[2] === 0xDF && head[3] === 0xA3;
+      const isMp4 = String.fromCharCode(head[4], head[5], head[6], head[7]) === 'ftyp';
+      if (isMkv) {
+        const got = streamParseMkvTracks(head);
+        if (got.audio.length || got.subs.length || got.video) { got.container = 'mkv'; return got; }
+        return null;
       }
-      return (got.audio.length || got.subs.length || got.video) ? got : null;
-    }
-    return null;
-  } catch (e) { return null; }
+      if (isMp4) {
+        let got = streamParseMp4Tracks(head);
+        if (!got.audio.length && !got.subs.length && !got.video) {
+          const tail = await read('bytes=-262144', 262144);
+          if (tail && tail.length) {
+            const g2 = streamParseMp4Tracks(tail);
+            if (g2.audio.length || g2.subs.length || g2.video) got = g2;
+          }
+        }
+        if (got.audio.length || got.subs.length || got.video) { got.container = 'mp4'; return got; }
+        return null;
+      }
+      return null;
+    } catch (e) { return null; }
+  })();
+  return run.then(function (val) {
+    streamProbeCache.set(url, { t: Date.now(), val: val });
+    return val;
+  });
 }
 function streamIsSubtitleUrl(url) {
   try { return /\.(srt|vtt)$/i.test(new URL(url).pathname); } catch (e) { return false; }
@@ -3146,8 +3183,12 @@ async function streamBuild(store, set, user, item, picked, sid, request, avoid) 
   const ep = streamEpisodeInfo(item, picked.bag);
   /* فهرست ترک‌های داخل فایل (صدا/زیرنویس) مثل VLC — فقط فراداده؛ شکست بی‌صدا */
   const trackInfo = await streamProbeTracks(picked.stream.url);
+  /* کانتینر واقعی فایل از magic بر fmt مقدم است (لینک بدون پسوند/پسوند غلط)؛
+     webm و hls دست‌نخورده می‌مانند */
+  let fmtOut = fmt;
+  if (trackInfo && trackInfo.container && fmt !== 'webm' && fmt !== 'hls') fmtOut = trackInfo.container;
   return {
-    ok: true, sid: sid, src: src, fmt: fmt, exp: exp * 1000, edge: edge.id, tracks: trackInfo,
+    ok: true, sid: sid, src: src, fmt: fmtOut, exp: exp * 1000, edge: edge.id, tracks: trackInfo,
     direct: set.streamDirectPlay !== false ? picked.stream.url : '',
     item: { id: item.id, title: item.title, type: item.type, poster: posterUrlFor({ posterOverride: item.posterOverride || '', posterSrc: (item.source && item.source.tmeUrl) || '', galleryPoster: galleryPosterOf(item) }) },
     ep: ep,
@@ -10405,6 +10446,7 @@ function MVX_PLAYER_MODULE(W) {
         m.audioList = audList;
         m.audioSel = aud ? aud.no : 0;
         m.audioRate = (aud && aud.rate) ? Math.round(aud.rate) : 48000;
+        if (P && P.panel === 'trk') renderTrk();
         if (!vid || !/^V_MPEG4\/ISO\/AVC/.test(vid.codec)) {
           return mkvFailStep('codec');
         }
@@ -10447,6 +10489,7 @@ function MVX_PLAYER_MODULE(W) {
           P.embSubs = emb;
           P.subs = (P.subs || []).concat(emb);
           renderPanel();
+          if (P.panel === 'trk') renderTrk();
           if (!P.subOn && P.subPref === undefined && P.info && P.info.cur && P.info.cur.track === 'sub') selectSub(emb[0].id, true);
         }
       },
@@ -10907,10 +10950,10 @@ function MVX_PLAYER_MODULE(W) {
   function renderTrk() {
     var panel = q('[data-p="trk"]', P.root);
     if (!panel) return;
-    var demuxAud = (P.mkv && P.mkv.audioList) ? P.mkv.audioList : null;
-    var probeAud = (P.trackInfo && P.trackInfo.audio) ? P.trackInfo.audio : [];
+    var demuxAud = (P.mkv && P.mkv.audioList && P.mkv.audioList.length) ? P.mkv.audioList : null;
+    var probeAud = (P.trackInfo && P.trackInfo.audio && P.trackInfo.audio.length) ? P.trackInfo.audio : [];
     var auds = demuxAud || probeAud;
-    var switchable = !!demuxAud;
+    var switchable = !!(demuxAud && demuxAud.length);
     var curAudio = (P.mkv && P.mkv.audioOff) ? 0 : ((P.mkv && P.mkv.audioSel) || (P.mkvAudioPref || 0));
     var html = '<div class="mvp-ph">☰ ترک‌های فایل (صدا و زیرنویس)<button type="button" class="mvp-btn" data-x="1">' + I.close + '</button></div>';
     html += '<div class="mvp-sec"><h6>🔊 صدا</h6><div class="mvp-opts">';

@@ -1002,14 +1002,41 @@ console.log('PASS: MKV demux (EBML جریانی، خوشه‌ها، lacing، Cue
     globalThis.fetch = realFetch;
   }
 
-  /* پاسخ open باید فهرست ترک‌ها را بیاورد (tracks) — بدون هیچ لینکی */
+  /* مبدأیی که Range را نادیده می‌گیرد (۲۰۰ با بدنهٔ بزرگ): فقط سقف لازم خوانده می‌شود */
+  {
+    const realF = globalThis.fetch;
+    try {
+      const big = cat(mkvFile, uint(0, 2000000));
+      globalThis.fetch = async () => new Response(big, { status: 200 });
+      const g = await W.streamProbeTracks('https://origin.test/no-range-honor.bin');
+      assert.ok(g && g.audio.length === 2 && g.container === 'mkv', 'پاسخ ۲۰۰ بدون Range هم خوانده می‌شود (سقف‌دار)');
+    } finally {
+      globalThis.fetch = realF;
+    }
+  }
+  /* کش فراداده: درخوانی تکراریِ همان URL فقط یک fetch می‌زند */
+  {
+    const realF = globalThis.fetch;
+    let calls = 0;
+    try {
+      globalThis.fetch = async () => { calls++; return new Response(mkvFile, { status: 206 }); };
+      await W.streamProbeTracks('https://origin.test/cache-me.mkv');
+      await W.streamProbeTracks('https://origin.test/cache-me.mkv');
+      assert.equal(calls, 1, 'probe دوم از کش می‌آید');
+    } finally {
+      globalThis.fetch = realF;
+    }
+  }
+  /* پاسخ open: لینکِ بدون پسوندِ MKV باید fmt=mkv بگیرد (مسیر دموکسر) + فهرست ترک‌ها بدون هیچ لینکی */
   const st2 = new W.Store(null, {});
   W.bustSettings(st2);
   await st2.set('set', { secret: 'sec-probe-1234567890', publicUrl: 'https://site.test', streamEnabled: true, streamPublic: true, plAdPre: false, plAdSwitch: false });
   const u2 = await W.createTgUser(st2, { tgId: '9001' }); u2.role = 'free'; await W.saveUser(st2, u2);
   const tok2 = await W.makeToken(st2, u2);
+  const openReq = (itemId) => new Request('https://site.test/api/x', { method: 'POST', headers: { authorization: 'Bearer ' + tok2, 'cf-connecting-ip': '1.2.3.4', 'user-agent': CHROME, origin: 'https://site.test' } });
   const itm = { id: 'i_trk', type: 'movie', title: 'فیلم ترک', access: 'free', variants: { sub: {}, dub: {} }, episodes: [] };
-  W.applyStreamEntries(itm, W.parseStreamLines('720 دوبله https://origin.test/m.mkv', { type: 'movie' }).entries);
+  W.applyStreamEntries(itm, W.parseStreamLines('720 دوبله https://origin.test/tnoext-900', { type: 'movie' }).entries);
+  W.applyStreamEntries(itm, W.parseStreamLines('360 زیرنویس https://origin.test/wkeep-360.webm', { type: 'movie' }).entries);
   await W.saveItemRecord(st2, itm);
   const realFetch2 = globalThis.fetch;
   try {
@@ -1018,11 +1045,15 @@ console.log('PASS: MKV demux (EBML جریانی، خوشه‌ها، lacing، Cue
       if (rg.startsWith('bytes=0-')) return new Response(mkvFile, { status: 206 });
       return new Response('', { status: 416 });
     };
-    const r = await W.apiStreamOpen(st2, { itemId: 'i_trk' }, new Request('https://site.test/api/x', { method: 'POST', headers: { authorization: 'Bearer ' + tok2, 'cf-connecting-ip': '1.2.3.4', 'user-agent': CHROME, origin: 'https://site.test' } }), { waitUntil() { } });
+    const r = await W.apiStreamOpen(st2, { itemId: 'i_trk', quality: '720' }, openReq('i_trk'), { waitUntil() { } });
     const body = await r.json();
+    assert.equal(body.fmt, 'mkv', 'لینک بدون پسوند با محتوای MKV باید به مسیر دموکسر برود');
     assert.ok(body.tracks && body.tracks.audio.length === 2, 'open: فهرست ترک‌های فایل در پاسخ می‌آید');
     assert.ok(body.tracks.subs.length === 1);
     assert.ok(!JSON.stringify(body.tracks).includes('origin.test'), 'فهرست ترک‌ها بدون هیچ لینک/آدرسی است');
+    const rw = await W.apiStreamOpen(st2, { itemId: 'i_trk', quality: '360' }, openReq('i_trk'), { waitUntil() { } });
+    const bw = await rw.json();
+    assert.equal(bw.fmt, 'webm', 'فرمت webm با magic مشترک EBML نباید به mkv تغییر کند');
   } finally {
     globalThis.fetch = realFetch2;
   }
