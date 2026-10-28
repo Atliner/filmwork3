@@ -2184,6 +2184,8 @@ function adGateInfo(set) {
 
 const STREAM_MAX_PER_BAG = 24;
 const STREAM_SUBS_MAX = 6;
+/* سقف هر درخواست بایتی موتور داخلی از مسیر /api/stream/bytes (بدون لبه) */
+const STREAM_BYTES_MAX = 6 * 1024 * 1024;
 const STREAM_FMTS = ['mp4', 'hls', 'webm', 'mkv', 'auto'];
 
 function streamFmtOf(url) {
@@ -3407,6 +3409,74 @@ async function apiStreamSrc(store, body, request, ctx) {
   const adFree = adFreeUser(user);
   if (!adFree) info.banners = await pickPlayerBanners(store, set, user, item, ctx, request, body.seen);
   return json(Object.assign(info, { noAds: adFree, adCfg: adFree ? null : streamAdConfig(set) }));
+}
+
+/* ── بایت‌های موتور داخلی از خودِ همین Worker (بدون گذر از لبه) ──
+   موتور داخل‌صفحه فایل را با fetch می‌خواند؛ اگر لبه به هر دلیلی (نسخهٔ قدیمی،
+   هدرهای Sec-Fetch، قفل UA/IP، مسیر /sv بسته) درخواست را رد کند، همین مسیر
+   سرویس‌دهنده با همان توکن پخش کار را انجام می‌دهد: همان بایت‌ها، همان برش Range،
+   بدون هیچ لینک تازه‌ای در مرورگر. توکن باید از نوع «موتور داخلی» (d=1) باشد، پس
+   این مسیر به‌عنوان پراکسی دانلود عمومی قابل استفاده نیست. */
+function streamByteDeny(reason) {
+  return new Response('forbidden: ' + reason, { status: reason === 'expired' ? 410 : 403, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-mvx-deny': reason } });
+}
+async function apiStreamBytes(store, request, url) {
+  const set = await getSettings(store);
+  if (!set.streamEnabled) return new Response('streaming disabled', { status: 403, headers: { 'cache-control': 'no-store', 'x-mvx-deny': 'off' } });
+  let target = null;
+  try { target = new URL(String(url.searchParams.get('u') || ''), url.origin); } catch (e) { return new Response('bad url', { status: 400 }); }
+  const mm = /\/(v|h)\/([A-Za-z0-9_-]{24,4000})(?:\/|$)/.exec(target.pathname);
+  if (!mm || mm[1] !== 'v') return new Response('bad path', { status: 400 });
+  const secrets = [];
+  try { const own = await streamOwnSecret(store, set); if (own) secrets.push(own); } catch (e) { }
+  for (const e of streamEdgeList(set)) if (secrets.indexOf(e.secret) < 0) secrets.push(e.secret);
+  let tok = null;
+  for (const sec of secrets) {
+    const t = await streamTokenOpen(sec, mm[2]);
+    if (t && t.v === 1 && t.k === 'v') { tok = t; break; }
+  }
+  if (!tok) return streamByteDeny('token');
+  if (!(Number(tok.e) > Date.now() / 1000)) return streamByteDeny('expired');
+  if (tok.d !== 1) return streamByteDeny('engine-only');
+  if (!memRate('sb:' + String(tok.s || tok.u || 'x'), 600, 60000)) return new Response('slow down', { status: 429, headers: { 'cache-control': 'no-store', 'x-mvx-deny': 'rate' } });
+  if (!/^https:\/\//.test(String(tok.u || ''))) return new Response('bad origin', { status: 400 });
+  const a = Math.max(0, parseInt(url.searchParams.get('a'), 10) || 0);
+  /* full=1 یعنی جریان باز (MKV که سرتاسر خوانده می‌شود)، وگرنه پنجرهٔ محدود */
+  const full = url.searchParams.get('full') === '1';
+  let b = parseInt(url.searchParams.get('b'), 10);
+  if (!isFinite(b) || b < a) b = full ? null : a + STREAM_BYTES_MAX - 1;
+  if (b !== null && b - a + 1 > STREAM_BYTES_MAX) b = a + STREAM_BYTES_MAX - 1;
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) { } }, 15000) : 0;
+  let up;
+  try {
+    up = await fetch(tok.u, { headers: { 'range': 'bytes=' + a + '-' + (b === null ? '' : b), 'user-agent': request.headers.get('user-agent') || 'Mozilla/5.0', 'accept': '*/*' }, redirect: 'follow', signal: ctrl ? ctrl.signal : undefined });
+    if (timer) clearTimeout(timer);
+  } catch (e) {
+    if (timer) clearTimeout(timer);
+    return new Response('upstream unreachable', { status: 502, headers: { 'cache-control': 'no-store', 'x-mvx-deny': 'upstream' } });
+  }
+  if (up.status >= 400 && up.status !== 416) return new Response('upstream ' + up.status, { status: 502, headers: { 'cache-control': 'no-store', 'x-mvx-deny': 'upstream' } });
+  const h = new Headers({ 'cache-control': 'private, no-store, no-transform', 'content-disposition': 'inline', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'accept-ranges': 'bytes', 'vary': 'Origin' });
+  h.set('content-type', streamMime(tok.f, up.headers.get('content-type')));
+  h.set('access-control-allow-origin', request.headers.get('origin') || '*');
+  if (up.status === 206) {
+    const cr = up.headers.get('content-range'), cl = up.headers.get('content-length');
+    if (cr) h.set('content-range', cr);
+    if (cl) h.set('content-length', cl);
+    return new Response(request.method === 'HEAD' ? null : up.body, { status: 206, headers: h });
+  }
+  /* مبدأ Range را نادیده گرفت: خودمان برش می‌دهیم */
+  const known = up.headers.get('content-length');
+  const total = known && /^\d+$/.test(known) ? Number(known) : 0;
+  if (total && a >= total) { h.set('content-range', 'bytes */' + total); return new Response(null, { status: 416, headers: h }); }
+  const end = b === null ? null : (total ? Math.min(b, total - 1) : b);
+  h.set('content-range', 'bytes ' + a + '-' + (end === null ? '' : end) + '/' + (total || '*'));
+  if (end !== null) h.set('content-length', String(end - a + 1));
+  if (request.method === 'HEAD') return new Response(null, { status: 206, headers: h });
+  const sliced = a === 0 ? up.body : streamRangeSlice(up, a, end, total);
+  if (!sliced) return new Response(up.body, { status: 200, headers: h });
+  return new Response(sliced, { status: 206, headers: h });
 }
 
 /* ═══════════════════════ شبکهٔ تبلیغات خودکار (اتصال به ads.js) ═══════════════════════
@@ -9579,6 +9649,8 @@ async function handleApi(request, url, store, ctx) {
   /* پخش آنلاین و تبلیغات خودکار */
   if (p === 'stream/open' && m === 'POST') return await apiStreamOpen(store, await readBody(request, 16 * 1024), request, ctx);
   if (p === 'stream/src' && m === 'POST') return await apiStreamSrc(store, await readBody(request, 16 * 1024), request, ctx);
+  /* بایت‌های موتور داخلی وقتی لبه در دسترس/به‌روز نیست (GET، توکن پخش لازم است) */
+  if (p === 'stream/bytes' && m === 'GET') return await apiStreamBytes(store, request, url);
   if (p === 'ad/click' && m === 'POST') return await apiAdTokenClick(store, await readBody(request, 8 * 1024), request, ctx);
   if (p === 'ad/evs' && m === 'POST') return await apiAdEvents(store, await readBody(request, 32 * 1024), request, ctx);
   mm = p.match(/^ad\/([a-z0-9_]{2,32})\/click$/);
@@ -10727,7 +10799,27 @@ function MVX_PLAYER_MODULE(W) {
     var headers = { accept: '*/*' };
     if (from) headers.range = 'bytes=' + from + '-';
     var opts = { headers: headers, credentials: 'omit' };
-    var chain = W.fetch(m.src, opts).then(function (res) {
+    /* ابتدا لبه؛ اگر درخواست را رد کرد (نسخهٔ قدیمی/هدرها/قفل UA) یا Range را
+       نادیده گرفت، همان جریان از مسیر /api/stream/bytes خودِ سایت می‌آید. */
+    function openStream () {
+      if (m.proxyOnly) return doFetch(byteProxyUrl(m.src, from || 0, '', true), opts);
+      return W.fetch(m.src, opts).then(function (res) {
+        /* بدنه از ابتدای فایل آمده ولی ما از آفست from می‌خواهیم → مسیر پشتیبان */
+        if (res && res.ok && from && res.status === 200) {
+          try { if (res.body && res.body.cancel) res.body.cancel(); } catch (e) { }
+          return openProxy(res.status + '/200');
+        }
+        if (!res || !res.ok) return openProxy('http ' + (res ? res.status : 0) + (res ? ('/' + (res.headers.get('x-mvx-deny') || '')) : ''));
+        return res;
+      }, function () { return m.proxyOnly ? Promise.reject(new Error('proxy down')) : openProxy('net'); });
+    }
+    function openProxy (why) {
+      m.proxyOnly = true;
+      m.proxyWhy = why;
+      logEngine('mkv', 'edge denied → byte proxy (' + why + ')');
+      return doFetch(byteProxyUrl(m.src, from || 0, '', true), opts);
+    }
+    var chain = openStream().then(function (res) {
       if (!res || !res.ok) { m.why = 'http'; throw new Error('http ' + (res ? res.status : 0)); }
       if (!res.body || !res.body.getReader) { m.why = m.src === (P.info && P.info.direct) ? 'cors' : 'net'; throw new Error('no stream'); }
       m.reader = res.body.getReader();
@@ -11233,25 +11325,50 @@ function MVX_PLAYER_MODULE(W) {
   }
   function mp4MseOk (mime) { return mseOk(mime); }
   function mp4IsFa (t) { return trkIsFa(t); }
+  /* آدرس پشتیبان: همان بایت‌ها از مسیر /api/stream/bytes (بدون گذر از لبه) */
+  function byteProxyUrl (src, a, b, full) {
+    return '/api/stream/bytes?u=' + encodeURIComponent(String(src)) + '&a=' + a + '&b=' + b + (full ? '&full=1' : '');
+  }
+  function mp4RangeParse (res, a) {
+    if (!res || (!res.ok && res.status !== 416)) {
+      var e = new Error('mp4-http-' + (res ? res.status : 0));
+      e.deny = res ? (res.headers.get('x-mvx-deny') || '') : '';
+      throw e;
+    }
+    var cr = res.headers.get('content-range') || '', total = 0;
+    var mm = /\/\s*(\d+)\s*$/.exec(cr);
+    if (mm) total = Number(mm[1]);
+    /* مبدأی که ۲۰۰ کل فایل را می‌دهد content-range ندارد؛ طول بدنه = کل فایل */
+    if (!total && res.status === 200) {
+      var cl = res.headers.get('content-length') || '';
+      if (/^\d+$/.test(cl)) total = Number(cl);
+    }
+    return res.arrayBuffer().then(function (ab) {
+      return { buf: new Uint8Array(ab), status: res.status, total: total, at: a };
+    });
+  }
   function mp4RangeFetch (src, a, b) {
-    return W.fetch(src, { headers: { 'range': 'bytes=' + a + '-' + b, 'accept': '*/*' }, credentials: 'omit' }).then(function (res) {
-      if (!res || (!res.ok && res.status !== 416)) throw new Error('mp4-http-' + (res ? res.status : 0));
-      var cr = res.headers.get('content-range') || '', total = 0;
-      var mm = /\/\s*(\d+)\s*$/.exec(cr);
-      if (mm) total = Number(mm[1]);
-      /* مبدأی که ۲۰۰ کل فایل را می‌دهد content-range ندارد؛ طول بدنه = کل فایل */
-      if (!total && res.status === 200) {
-        var cl = res.headers.get('content-length') || '';
-        if (/^\d+$/.test(cl)) total = Number(cl);
-      }
-      return res.arrayBuffer().then(function (ab) {
-        return { buf: new Uint8Array(ab), status: res.status, total: total, at: a };
-      });
+    return W.fetch(src, { headers: { 'range': 'bytes=' + a + '-' + b, 'accept': '*/*' }, credentials: 'omit' }).then(function (res) { return mp4RangeParse(res, a); });
+  }
+  function mp4ProxyFetch (src, a, b) {
+    return doFetch(byteProxyUrl(src, a, b), { credentials: 'omit' }).then(function (res) { return mp4RangeParse(res, a); });
+  }
+  /* یک بار مستقیم از لبه؛ اگر لبه درخواست را رد کرد، بقیهٔ کار از مسیر پشتیبان
+     (خودِ همین Worker) می‌رود تا موتور داخلی هیچ‌وقت به‌خاطر لبه خاموش نشود. */
+  function mp4Fetch (m, a, b) {
+    if (m && m.proxyOnly) return mp4ProxyFetch(m.src, a, b);
+    return mp4RangeFetch(m ? m.src : '', a, b).catch(function (e) {
+      var msg = String((e && e.message) || '');
+      if (!m || !/mp4-http-(401|403|404|410|429|5\d\d)/.test(msg)) throw e;
+      m.proxyOnly = true;
+      m.proxyWhy = msg + (e && e.deny ? ('/' + e.deny) : '');
+      logEngine('mp4', 'edge denied → byte proxy (' + m.proxyWhy + ')');
+      return mp4ProxyFetch(m.src, a, b);
     });
   }
   function mp4LoadIndex (m) {
     var src = m.src;
-    return mp4RangeFetch(src, 0, MP4_HEAD - 1).then(function (r) {
+    return mp4Fetch(m, 0, MP4_HEAD - 1).then(function (r) {
       m.total = r.total || 0;
       var list = mp4Scan(r.buf), i, moov = null;
       for (i = 0; i < list.length; i++) if (list[i].type === 'moov') moov = list[i];
@@ -11261,7 +11378,7 @@ function MVX_PLAYER_MODULE(W) {
       }
       if (moov && moov.partial && moov.size > 0) {
         /* moov بزرگ‌تر از سرِ خوانده‌شده: فقط همان جعبه را می‌گیریم */
-        return mp4RangeFetch(src, moov.at, moov.at + moov.size - 1).then(function (r2) {
+        return mp4Fetch(m, moov.at, moov.at + moov.size - 1).then(function (r2) {
           var rel = { body: moov.hdr, end: moov.size };
           var idx2 = mp4IndexParse(r2.buf, rel, m.total);
           if (idx2) return idx2;
@@ -11273,14 +11390,14 @@ function MVX_PLAYER_MODULE(W) {
       var mdEnd = 0;
       for (i = 0; i < list.length; i++) if (list[i].type === 'mdat' && list[i].size > 0) mdEnd = list[i].at + list[i].size;
       if (mdEnd > 0 && (!m.total || mdEnd < m.total)) {
-        return mp4RangeFetch(src, mdEnd, Math.min(mdEnd + 65535, (m.total || mdEnd + 65536) - 1)).then(function (r4) {
+        return mp4Fetch(m, mdEnd, Math.min(mdEnd + 65535, (m.total || mdEnd + 65536) - 1)).then(function (r4) {
           if (r4.status !== 206) throw new Error('mp4-range');
           var lst = mp4Scan(r4.buf);
           for (var j = 0; j < lst.length; j++) {
             if (lst[j].type !== 'moov' || !(lst[j].size > 16)) continue;
             if (lst[j].size > 12 * 1024 * 1024) break;
             var abs = mdEnd + lst[j].at, hdr = lst[j].hdr, size = lst[j].size;
-            return mp4RangeFetch(src, abs, abs + size - 1).then(function (r5) {
+            return mp4Fetch(m, abs, abs + size - 1).then(function (r5) {
               var idx4 = mp4IndexParse(r5.buf, { body: hdr, end: r5.buf.length }, m.total);
               if (!idx4) throw new Error('mp4-moov');
               return idx4;
@@ -11291,7 +11408,7 @@ function MVX_PLAYER_MODULE(W) {
       }
       if (!m.total) throw new Error('mp4-norange');
       var tailLen = Math.min(m.total, MP4_TAIL);
-      return mp4RangeFetch(src, m.total - tailLen, m.total - 1).then(function (r3) {
+      return mp4Fetch(m, m.total - tailLen, m.total - 1).then(function (r3) {
         var found = mp4FindMoovIn(r3.buf);
         if (!found || found.partial) throw new Error('mp4-moov');
         var idx3 = mp4IndexParse(r3.buf, found, m.total);
@@ -11449,7 +11566,7 @@ function MVX_PLAYER_MODULE(W) {
     if (m.total) end = Math.min(end, m.total - 1);
     m.first = false;
     m.reading = true;
-    mp4RangeFetch(m.src, start, end).then(function (r) {
+    mp4Fetch(m, start, end).then(function (r) {
       m.reading = false;
       if (!P || P.mp4 !== m || m.failed) return;
       if (r.status !== 206 && start > 0) {

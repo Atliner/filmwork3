@@ -7,7 +7,7 @@ import fs from 'node:fs';
 
 const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 const W = await import('data:text/javascript;base64,' + Buffer.from(source + `
-export { streamTokenMake, streamEdgeHandle, MVX_PLAYER_MODULE };`).toString('base64'));
+export { streamTokenMake, streamEdgeHandle, apiStreamBytes, Store, bustSettings, getSettings, streamOwnSecret, MVX_PLAYER_MODULE };`).toString('base64'));
 const edgeMod = await import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(new URL('../scripts/stream-edge-worker.js', import.meta.url), 'utf8')).toString('base64'));
 
 /* ── ساخت MP4: ftyp + mdat + moov (یک ویدئو + دو صدا + یک tx3g) ── */
@@ -203,9 +203,20 @@ const fakeVideo = () => ({
 });
 
 const SECRET = 'k'.repeat(40);
+/* store واقعی برای مسیر پشتیبان /api/stream/bytes (همان Secret لبه) */
+const kvData = new Map();
+const fakeKV = {
+  get: async (k, o) => { const v = kvData.get(k); if (v == null) return null; return (o === 'json' || (o && o.type === 'json')) ? JSON.parse(v) : v; },
+  put: async (k, v) => { kvData.set(k, v); }, delete: async (k) => { kvData.delete(k); },
+  list: async ({ prefix = '' } = {}) => ({ keys: [...kvData.keys()].filter((x) => x.startsWith(prefix)).map((name) => ({ name })), list_complete: true })
+};
+const byteEnv = { KV: fakeKV };
+const byteStore = new W.Store(fakeKV, byteEnv);
+await byteStore.set('set', { secret: 'site-secret-123', siteName: 'T', publicUrl: 'https://site.test', streamEnabled: true, streamPublic: true, streamSecret: SECRET });
+W.bustSettings(byteStore);
 const ORIGIN = 'https://origin.test/movie.mp4';
 
-async function runEngine(honorRange, kind) {
+async function runEngine(honorRange, kind, denyEdge) {
   const isMkv = kind === 'mkv';
   const ORIGIN_URL = isMkv ? 'https://origin.test/movie.mkv' : ORIGIN;
   const BODY = isMkv ? MKVFILE : FILE;
@@ -218,7 +229,21 @@ async function runEngine(honorRange, kind) {
      واقعاً به origin برسد و تست به‌جای سنجش منطق، در شبکه گیر می‌کند */
   const fetchImpl = async (url, opts) => {
     const u = String(url && url.url ? url.url : url);
+    if (u.indexOf('/api/stream/bytes') > -1) {
+      /* مسیر پشتیبان: همان تابع واقعی سرور */
+      const abs = new URL(u, 'https://site.test');
+      const req = new Request(abs, { headers: { 'user-agent': 'Mozilla/5.0 Chrome/124.0', referer: 'https://site.test/p/x' } });
+      const rr = await W.apiStreamBytes(byteStore, req, abs);
+      out.set('bytes', (out.get('bytes') || '') + rr.status + '/' + (rr.headers.get('x-mvx-deny') || '-') + ';');
+      return rr;
+    }
     if (u.indexOf('origin.test') > -1) return origin(u, opts);
+    if (denyEdge) out.set('urls', (out.get('urls') || '') + u.slice(0, 60) + ' | ');
+    if (denyEdge && (u.indexOf('/sv/') > -1)) {
+      /* لبهٔ قدیمی/ردکننده: همان ۴۰۳ واقعی */
+      out.set('edgeDenied', '1');
+      return new Response('forbidden: dest', { status: 403, headers: { 'x-mvx-deny': 'dest' } });
+    }
     if (u.indexOf('/sv/') === 0 || u.indexOf('/sv/') > -1) {
       const req = new Request('https://site.test' + u.replace(/^https?:\/\/[^/]+/, ''),
         { headers: Object.assign({ 'sec-fetch-dest': 'empty', 'user-agent': 'Mozilla/5.0 Chrome/124.0', referer: 'https://site.test/p/x' }, (opts && opts.headers) || {}) });
@@ -303,3 +328,13 @@ console.log('PASS: origin that ignores Range (mp4 + mkv) — the edge slices the
   assert.ok(r.rangeOk && !r.rangeBad, 'پاسخ لبه content-range = bytes a-b/total دارد (' + (r.rangeOk || r.rangeBad) + ')');
 }
 console.log('PASS: sliced response is protocol-correct (206 + Content-Range + Content-Length).');
+
+/* ۴) لبه درخواست موتور را رد می‌کند (نسخهٔ قدیمی/هدرها): پلیر باید خودکار از مسیر
+   پشتیبان /api/stream/bytes همان بایت‌ها را بگیرد و پخش ادامه پیدا کند. */
+for (const kind of ['mp4', 'mkv']) {
+  const r = await runEngine(true, kind, true);
+  assert.ok(r.out.get('edgeDenied'), 'درخواست اول به لبه رفت و رد شد');
+  assert.ok(!r.P.mp4Why && !r.P.mkvWhy, 'موتور با مسیر پشتیبان شروع شد (دلیل: ' + (r.P.mkvWhy || r.P.mp4Why) + ')');
+  assert.ok(r.appends.length > 1, 'قطعه‌ها از مسیر پشتیبان رسیدند (' + r.appends.length + ') — proxy=' + (r.P.mp4 && r.P.mp4.proxyWhy) + ' mkvProxy=' + (r.P.mkv && r.P.mkv.proxyWhy) + ' logs=' + r.logs.join(' | ') + ' deny=' + r.out.get('deny') + ' urls=' + r.out.get('urls') + ' bytes=' + r.out.get('bytes') + ' state=' + JSON.stringify({ mp4: !!r.P.mp4, why: r.P.engDetail, idx: !!(r.P.mp4Idx), mkv: r.P.mkv && { q: (r.P.mkv.queue || []).length, tr: !!r.P.mkv.tracks, sb: !!r.P.mkv.sb, ended: r.P.mkv.ended, pend: Object.keys(r.P.mkv.pend || {}) } }));
+}
+console.log('PASS: edge denied the engine request → automatic fallback to /api/stream/bytes, playback continues (mp4 + mkv).');
