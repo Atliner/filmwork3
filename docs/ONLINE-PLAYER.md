@@ -85,7 +85,14 @@ S01E05 زیرنویس https://cdn.example.com/silo.s01e05.fa.srt
 4. جهش (seek) با Range از نزدیک‌ترین خوشهٔ ثبت‌شده انجام می‌شود؛ بافر عقب هر از گاهی پاک می‌شود.
 5. هر شکستی به پلهٔ بعدی می‌رود: بومی-پراکسی ← بومی-مستقیم ← demux-پراکسی ← demux-مستقیم؛ پیام فقط وقتی همه تمام شد با دلیل دقیقِ آخرین تلاش (ساختار MKV / قطع دانلود / CORS مبدأ / پاسخ ناسالم مبدأ) نشان داده می‌شود.
 
-**پشتیبانی:** H.264 (`V_MPEG4/ISO/AVC`) + AAC (`A_AAC`) — همان چیزی که WEB-DLهای رایج دارند. اگر صدا AAC نباشد فقط تصویر با یک اعلان پخش می‌شود؛ اگر ویدئو HEVC/کدک دیگری باشد پلیر پیام روشن می‌دهد و می‌گوید نسخهٔ دیگری انتخاب یا دانلود کنید.
+**پشتیبانی (مثل VLC، هر کدکی که خودِ مرورگر/دستگاه پخش کند):**
+
+| نوع | کدک‌ها | شرط |
+|---|---|---|
+| ویدئو | H.264 (`V_MPEG4/ISO/AVC` / `avc1` / `avc3`) و H.265/HEVC (`V_MPEGH/ISO/HEVC` / `hvc1` / `hev1`) | HEVC فقط اگر دستگاه `hvc1` را در MediaSource پشتیبانی کند (اکثر گوشی‌های امروزی با رمزگشای سخت‌افزاری) |
+| صدا | AAC (`A_AAC`/`mp4a`)، Opus (`A_OPUS`/`Opus`)، AC-3 (`A_AC3`)، E-AC-3 (`A_EAC3`)، FLAC (`A_FLAC`) | هر کدام که `MediaSource.isTypeSupported` دستگاه بگوید بله |
+
+برای HEVC رشتهٔ کدک از داخل `hvcC` ساخته می‌شود (`hvc1.1.6.L93.B0`) و init با جعبهٔ `hvc1`/`hvcC`؛ برای Opus هم `dOps` از `OpusHead` ساخته می‌شود. اگر دستگاهی کدکی را نپذیرد، همان ترک در پنل ⚠ می‌گیرد و فقط تصویر پخش می‌شود؛ اگر ویدئو پخش نشود پلیر پیام روشن می‌دهد و نسخهٔ دیگر را پیشنهاد می‌کند.
 
 ### پخش MP4 با چند ترک صدا / زیرنویس داخلی (موتور داخلی)
 مرورگر MP4 را بومی پخش می‌کند، ولی در MP4 **همیشه فقط ترک صدای اول** را می‌خواند و زیرنویس داخلی (`tx3g`/`wvtt`) را نه نشان می‌دهد و نه اجازهٔ انتخاب می‌دهد. برای همین، اگر پراب نشان دهد فایل بیش از یک ترک صدا یا زیرنویس داخلی دارد (یا کاربر در پنل 💬 دکمهٔ «🔁 موتور داخلی» را بزند) پلیر همان مسیر MKV را برای MP4 هم می‌رود:
@@ -199,4 +206,4 @@ S01E05 زیرنویس https://cdn.example.com/silo.s01e05.fa.srt
 | `POST /api/admin/item/<id>/streams` | `{text}` جایگزینی کامل لینک‌های پخش یک اثر |
 | `GET/POST /api/admin/stream-edges` | فهرست/تست/افزودن/حذف/خاموش‌کردن لبه‌ها |
 
-تست‌ها: `node tests/streaming.mjs`، `node tests/player-mp4.mjs` (موتور MP4/MSE: جدول نمونه، چند ترک صدا، B-frame، زیرنویس tx3g/wvtt)، `node tests/player-engine.mjs` (موتور MP4 از ابتدا تا append)، `node tests/player-mkv-engine.mjs` (MKV: EBML → fMP4 → append، دو ترک صدا، زیرنویس داخلی) و `node tests/player-edge.mjs` (از کلیک تا لبه و مبدأ، با و بدون پشتیبانی Range، و مسیر پشتیبان وقتی لبه رد می‌کند)، `node tests/player-live.mjs` (مسیر واقعی `/api/stream/open` + `/sv` + `/api/stream/bytes` با هدرهای مرورگر) و `node tests/content-bot-streams.mjs`.
+تست‌ها: `node tests/streaming.mjs`، `node tests/player-mp4.mjs` (موتور MP4/MSE: جدول نمونه، چند ترک صدا، B-frame، زیرنویس tx3g/wvtt)، `node tests/player-engine.mjs` (موتور MP4 از ابتدا تا append)، `node tests/player-mkv-engine.mjs` (MKV: EBML → fMP4 → append، دو ترک صدا، زیرنویس داخلی) و `node tests/player-edge.mjs` (از کلیک تا لبه و مبدأ، با و بدون پشتیبانی Range، و مسیر پشتیبان وقتی لبه رد می‌کند)، `node tests/player-mkv-hevc.mjs` (HEVC + Opus تا append)، `node tests/player-live.mjs` (مسیر واقعی `/api/stream/open` + `/sv` + `/api/stream/bytes` با هدرهای مرورگر) و `node tests/content-bot-streams.mjs`.

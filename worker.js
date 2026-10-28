@@ -10476,10 +10476,22 @@ function MVX_PLAYER_MODULE(W) {
         : mkvFull('smhd', 0, 0, [u16(0), u16(0)]);
       var dinf = mkvBox('dinf', [mkvFull('dref', 0, 0, [u32(1), mkvFull('url ', 0, 1, [])])]);
       var entry;
+      var vfmt = t.fmt || 'avc', afmt = t.fmt || 'aac';
+      var visualHead = [new Uint8Array(6), u16(1), u16(0), u16(0), u32(0), u32(0), u32(0), u16(t.w || 0), u16(t.h || 0),
+        u32(0x00480000), u32(0x00480000), u32(0), u16(1), new Uint8Array(32), u16(0x0018), u16(0xffff)];
+      /* نمونهٔ صوتی مشترک: ۶ بایت رزرو + data_reference_index + نسخه/کانال/عمق/نرخ */
+      var audioHead = [new Uint8Array(6), u16(1), u16(0), u16(t.ch || 2), u16(16), u16(0), u16(0),
+        u32(Math.round((t.timescale || 48000) * 65536))];
       if (t.kind === 'video') {
-        entry = mkvBox('avc1', [new Uint8Array(6), u16(1), u16(0), u16(0), u32(0), u32(0), u32(0), u16(t.w || 0), u16(t.h || 0),
-          u32(0x00480000), u32(0x00480000), u32(0), u16(1), new Uint8Array(32), u16(0x0018), u16(0xffff),
-          mkvBox('avcC', [t.extra])]);
+        if (vfmt === 'hevc') entry = mkvBox('hvc1', visualHead.concat([mkvBox('hvcC', [t.extra || new Uint8Array(0)])]));
+        else entry = mkvBox('avc1', visualHead.concat([mkvBox('avcC', [t.extra])]));
+      } else if (afmt === 'opus') {
+        entry = mkvBox('Opus', audioHead.concat([mkvBox('dOps', [opusDOps(t.extra, t.ch || 2, t.timescale || 48000)])]));
+      } else if (afmt === 'ac3' || afmt === 'eac3') {
+        var dbox = afmt === 'ac3' ? 'dac3' : 'dec3';
+        entry = mkvBox(afmt === 'ac3' ? 'ac-3' : 'ec-3', audioHead.concat([mkvBox(dbox, [t.extra || new Uint8Array(afmt === 'ac3' ? [0x10, 0x3d, 0x40] : [0x0f, 0xff, 0x40])])]));
+      } else if (afmt === 'flac') {
+        entry = mkvBox('fLaC', audioHead.concat([mkvBox('dfLa', [new Uint8Array(4), t.extra || new Uint8Array(0)])]));
       } else {
         var asc = t.extra && t.extra.length ? t.extra : new Uint8Array([0x12, (t.ch > 2 ? 0x0f : 0x10) | 0x00]);
         if (!(t.extra && t.extra.length)) asc = new Uint8Array([0x10 | ((t.rate === 44100 ? 4 : 3) >> 1), ((t.rate === 44100 ? 4 : 3) & 1) << 7 | (t.ch & 15) << 3]);
@@ -10495,6 +10507,26 @@ function MVX_PLAYER_MODULE(W) {
       traks.push(mkvBox('trak', [tkhd, mkvBox('mdia', [mdhd, hdlr, minf])]));
     }
     return mkvBytes([ftyp, mkvBox('moov', [mvhd].concat(traks))]);
+  }
+  /* OpusHead (ماتروسکا) → dOps (ISO/IEC 14496-12 + Opus in ISOBMFF) */
+  function opusDOps (priv, ch, rate) {
+    /* dOps خام (از MP4) → همان؛ OpusHead (از MKV) → تبدیل */
+    var magic = 'OpusHead';
+    var isHead = !!priv && priv.length >= 19 && String.fromCharCode(priv[0], priv[1], priv[2], priv[3], priv[4], priv[5], priv[6], priv[7]) === magic;
+    if (priv && priv.length >= 11 && !isHead && priv[0] === 0) return priv;
+    var p = isHead ? priv : null;
+    var out = new Uint8Array(p ? (11 + Math.max(0, p.length - 19)) : 11);
+    out[0] = 0;
+    out[1] = p ? p[9] : ch;
+    var pre = p ? (p[10] | (p[11] << 8)) : 0;              /* preSkip در OpusHead کمی‌پایان است */
+    var inRate = p ? ((p[12] | (p[13] << 8) | (p[14] << 16) | (p[15] << 24)) >>> 0) : (rate || 48000);
+    var gain = p ? (p[16] | (p[17] << 8)) : 0;
+    out[2] = (pre >> 8) & 255; out[3] = pre & 255;
+    out[4] = (inRate >>> 24) & 255; out[5] = (inRate >>> 16) & 255; out[6] = (inRate >>> 8) & 255; out[7] = inRate & 255;
+    out[8] = (gain >> 8) & 255; out[9] = gain & 255;
+    out[10] = p ? p[18] : 0;                                /* channel mapping family */
+    if (p && p.length > 19) out.set(p.subarray(19), 11);
+    return out;
   }
   function mp4Fragment(track, samples, seq) {
     var tfhd = mkvFull('tfhd', 0, 0x020000, [u32(track.id)]);
@@ -10532,12 +10564,51 @@ function MVX_PLAYER_MODULE(W) {
     for (i = 0; i < samples.length; i++) parts.push(samples[i].data);
     return mkvBytes(parts);
   }
-  function mkvCodecString(tr) {
-    if (tr.kind === 'video' && tr.extra && tr.extra.length >= 4) {
-      var h = function (n) { return (n < 16 ? '0' : '') + n.toString(16); };
-      return 'avc1.' + h(tr.extra[1]) + h(tr.extra[2]) + h(tr.extra[3]);
+  /* رشتهٔ کدک HEVC از داخل hvcC (ISO 14496-15, پیوست E) — نمونه: hvc1.1.6.L93.B0 */
+  function hvcCodecString (priv, fcc) {
+    if (!priv || priv.length < 13) return '';
+    var space = (priv[1] >> 6) & 3, tier = (priv[1] >> 5) & 1, pidc = priv[1] & 31;
+    var flags = ((priv[2] * 0x1000000) + (priv[3] << 16) + (priv[4] << 8) + priv[5]) >>> 0;
+    var rev = 0, i;
+    for (i = 0; i < 32; i++) { rev = ((rev << 1) | ((flags >>> i) & 1)) >>> 0; }
+    /* ۴۸ بیتِ general_constraint_indicator_flags: بایت‌های صفرِ انتهایی حذف می‌شوند */
+    var cbytes = [], cend = 11;
+    while (cend >= 6 && !priv[cend]) cend--;
+    for (i = 6; i <= cend; i++) cbytes.push((priv[i] < 16 ? '0' : '') + priv[i].toString(16).toUpperCase());
+    var cons = cbytes.join('');
+    var out = (fcc || 'hvc1') + '.' + (['', 'A', 'B', 'C'][space] || '') + pidc + '.' + rev.toString(16) +
+      '.' + (tier ? 'H' : 'L') + priv[12];
+    if (cons) out += '.' + cons;
+    return out;
+  }
+  /* شناسهٔ فرمت داخلی از CodecID ماتروسکا (مثل VLC: هر کدکی که مرورگر پخش کند) */
+  function mkvFmtOf (codec) {
+    codec = String(codec || '');
+    if (codec.indexOf('V_MPEG4/ISO/AVC') === 0) return 'avc';
+    if (codec.indexOf('V_MPEGH/ISO/HEVC') === 0) return 'hevc';
+    if (codec.indexOf('A_AAC') === 0) return 'aac';
+    if (codec.indexOf('A_OPUS') === 0) return 'opus';
+    if (codec.indexOf('A_AC3') === 0) return 'ac3';
+    if (codec.indexOf('A_EAC3') === 0) return 'eac3';
+    if (codec.indexOf('A_FLAC') === 0) return 'flac';
+    return '';
+  }
+  function mkvCodecString (tr) {
+    var fmt = tr.fmt || (tr.kind === 'video' ? 'avc' : 'aac');
+    if (tr.kind === 'video') {
+      if (fmt === 'hevc') return hvcCodecString(tr.extra, 'hvc1') || '';
+      if (tr.extra && tr.extra.length >= 4) {
+        var h = function (n) { return (n < 16 ? '0' : '') + n.toString(16); };
+        return 'avc1.' + h(tr.extra[1]) + h(tr.extra[2]) + h(tr.extra[3]);
+      }
+      return '';
     }
-    return 'mp4a.40.2';
+    if (fmt === 'opus') return 'opus';
+    if (fmt === 'ac3') return 'ac-3';
+    if (fmt === 'eac3') return 'ec-3';
+    if (fmt === 'flac') return 'flac';
+    var aot = (tr.extra && tr.extra.length) ? ((tr.extra[0] >> 3) & 31) : 2;
+    return 'mp4a.40.' + (aot || 2);
   }
   function mkvFail(title, body) {
     message(title, body, [['انتخاب کیفیت دیگر', function () { hideMsg(); openPanel('set'); }], ['بستن', close]]);
@@ -10625,7 +10696,7 @@ function MVX_PLAYER_MODULE(W) {
       return;
     }
     if (pick) {
-      m.tracks[pick.no] = { id: 2, no: pick.no, kind: 'audio', timescale: rate, ch: pick.ch || 2, extra: pick.priv };
+      m.tracks[pick.no] = { id: 2, no: pick.no, kind: 'audio', fmt: pick.fmt || 'aac', timescale: rate, ch: pick.ch || 2, extra: pick.priv };
       m.audioSel = pick.no;
     }
     m.aFrames = undefined;
@@ -10677,41 +10748,50 @@ function MVX_PLAYER_MODULE(W) {
           if (trs[i].type === 1 && !vid) vid = trs[i];
           if (trs[i].type === 2) auds.push(trs[i]);
         }
+        /* کدکی که مرورگر این دستگاه واقعاً می‌پذیرد (AAC/Opus/AC-3/E-AC-3/FLAC) */
+        var audOk = function (a) {
+          var f = mkvFmtOf(a.codec);
+          if (!f) return false;
+          var str = mkvCodecString({ kind: 'audio', fmt: f, extra: a.priv });
+          return !!str && mseOk('audio/mp4; codecs="' + str + '"');
+        };
         var audList = [];
         for (var ai = 0; ai < auds.length; ai++) {
           audList.push({
             no: auds[ai].no, name: auds[ai].name || '', lang: auds[ai].lang || '',
             codec: auds[ai].codec, rate: auds[ai].rate, ch: auds[ai].ch, priv: auds[ai].priv,
-            ok: /^A_AAC/.test(auds[ai].codec)
+            fmt: mkvFmtOf(auds[ai].codec), ok: audOk(auds[ai])
           });
         }
         var pref = P ? P.mkvAudioPref : 0;
         for (var aj = 0; aj < auds.length; aj++) {
-          if (pref && auds[aj].no === pref && /^A_AAC/.test(auds[aj].codec)) { aud = auds[aj]; break; }
+          if (pref && auds[aj].no === pref && audOk(auds[aj])) { aud = auds[aj]; break; }
         }
         if (!aud && !pref) {
           /* نسخهٔ دوبله → ترک فارسی؛ نسخهٔ زیرنویس → صدای اصلی */
           var wantFa = !(P && P.cur && P.cur.track === 'sub');
           for (var ak1 = 0; ak1 < auds.length; ak1++) {
-            if (/^A_AAC/.test(auds[ak1].codec) && trkIsFa(auds[ak1]) === wantFa) { aud = auds[ak1]; break; }
+            if (audOk(auds[ak1]) && trkIsFa(auds[ak1]) === wantFa) { aud = auds[ak1]; break; }
           }
         }
         if (!aud) {
           for (var ak = 0; ak < auds.length; ak++) {
-            if (/^A_AAC/.test(auds[ak].codec)) { aud = auds[ak]; break; }
+            if (audOk(auds[ak])) { aud = auds[ak]; break; }
           }
         }
         m.audioList = audList;
         m.audioSel = aud ? aud.no : 0;
         m.audioRate = (aud && aud.rate) ? Math.round(aud.rate) : 48000;
         if (P && P.panel === 'trk') renderTrk();
-        if (!vid || !/^V_MPEG4\/ISO\/AVC/.test(vid.codec)) {
+        var vfmt = mkvFmtOf(vid && vid.codec);
+        if (!vid || (vfmt !== 'avc' && vfmt !== 'hevc')) {
           return mkvFailStep('codec');
         }
-        var tlist = [{ id: 1, no: vid.no, kind: 'video', timescale: 1000, w: vid.w, h: vid.h, extra: vid.priv || new Uint8Array([1, 0x4d, 0x40, 0x28, 0xff, 0xe1, 0, 0]) }];
+        var tlist = [{ id: 1, no: vid.no, kind: 'video', fmt: vfmt, timescale: 1000, w: vid.w, h: vid.h,
+          extra: vid.priv || (vfmt === 'hevc' ? new Uint8Array(0) : new Uint8Array([1, 0x4d, 0x40, 0x28, 0xff, 0xe1, 0, 0])) }];
         var dropAudio = false;
-        if (aud && /^A_AAC/.test(aud.codec)) {
-          tlist.push({ id: 2, no: aud.no, kind: 'audio', timescale: Math.round(aud.rate) || 48000, ch: aud.ch, extra: aud.priv });
+        if (aud && mkvFmtOf(aud.codec)) {
+          tlist.push({ id: 2, no: aud.no, kind: 'audio', fmt: mkvFmtOf(aud.codec), timescale: Math.round(aud.rate) || 48000, ch: aud.ch, extra: aud.priv });
         } else if (aud) dropAudio = true;
         var type = 'video/mp4; codecs="' + tlist.map(mkvCodecString).join(',') + '"';
         if (!mseCtor() || !mseOk(type)) {
@@ -11111,6 +11191,13 @@ function MVX_PLAYER_MODULE(W) {
         } else if (t.codec === 'ac-3' || t.codec === 'ec-3') {
           t.ch = mp4U16(b, eb + 16) || 2;
           t.rate = (mp4U32(b, eb + 24) >>> 16) || 48000;
+          var dbox2 = mp4FindBox(b, eb + 28, ee, t.codec === 'ac-3' ? 'dac3' : 'dec3');
+          if (dbox2) t.extra = b.slice(dbox2.body, dbox2.end);
+        } else if (t.codec === 'Opus' || t.codec === 'opus') {
+          t.ch = mp4U16(b, eb + 16) || 2;
+          t.rate = (mp4U32(b, eb + 24) >>> 16) || 48000;
+          var dops = mp4FindBox(b, eb + 28, ee, 'dOps');
+          if (dops) t.extra = b.slice(dops.body, dops.end);
         }
       } else if (box.type === 'stts') {
         var n1 = mp4U32(b, p + 4); t.stts = [];
@@ -11306,15 +11393,18 @@ function MVX_PLAYER_MODULE(W) {
         var h = function (n) { return (n < 16 ? '0' : '') + n.toString(16); };
         return (t.codec === 'avc3' ? 'avc3.' : 'avc1.') + h(t.extra[1]) + h(t.extra[2]) + h(t.extra[3]);
       }
-      /* ساخت init فقط avcC/H.264 را می‌سازد؛ HEVC را به پخش بومی می‌سپاریم
-         (وگرنه MediaSource یک init ناسازگار می‌گیرد) */
+      /* HEVC: init با hvc1/hvcC ساخته می‌شود (همان چیزی که VLC هم پخش می‌کند) */
+      if (t.codec === 'hvc1' || t.codec === 'hev1') return hvcCodecString(t.extra, t.codec);
       return '';
     }
     if (t.codec === 'mp4a') {
       var aot = (t.extra && t.extra.length) ? ((t.extra[0] >> 3) & 31) : 2;
       return 'mp4a.40.' + (aot || 2);
     }
-    /* AC-3/E-AC-3/Opus: esds ما فقط AAC می‌سازد → ترک غیرفعال (⚠ در پنل) */
+    if (t.codec === 'Opus' || t.codec === 'opus') return 'opus';
+    if (t.codec === 'ac-3') return 'ac-3';
+    if (t.codec === 'ec-3') return 'ec-3';
+    if (t.codec === 'fLaC' || t.codec === 'flac') return 'flac';
     return '';
   }
   /* روی iPhone/iPad تا iOS 17.1 هیچ MediaSource‌ای نیست و بعد از آن هم فقط
@@ -11469,9 +11559,18 @@ function MVX_PLAYER_MODULE(W) {
     if (!m.audioOff && m.audios.length && !m.audio) return false;
     /* اگر ترک انتخابی ترک اول نیست، یک‌بار به کاربر بگو کدام صدا پخش می‌شود */
     m.autoAudio = (pick && m.audios[0] && pick.id !== m.audios[0].id) ? trackLabelOf(pick, 0, 'ترک') : '';
-    var vdesc = { id: 1, kind: 'video', timescale: m.video.timescale, w: m.video.w, h: m.video.h, extra: m.video.extra };
+    var aFmtOf = function (a) {
+      if (!a) return 'aac';
+      if (a.codec === 'Opus' || a.codec === 'opus') return 'opus';
+      if (a.codec === 'ac-3') return 'ac3';
+      if (a.codec === 'ec-3') return 'eac3';
+      if (a.codec === 'fLaC' || a.codec === 'flac') return 'flac';
+      return 'aac';
+    };
+    var vdesc = { id: 1, kind: 'video', fmt: (m.video.codec === 'hvc1' || m.video.codec === 'hev1') ? 'hevc' : 'avc',
+      timescale: m.video.timescale, w: m.video.w, h: m.video.h, extra: m.video.extra };
     var desc = [vdesc], codes = [mp4CodecOf(m.video)];
-    if (m.audio) { desc.push({ id: 2, kind: 'audio', timescale: m.audio.timescale, ch: m.audio.ch, rate: m.audio.rate, extra: m.audio.extra }); codes.push(mp4CodecOf(m.audio)); }
+    if (m.audio) { desc.push({ id: 2, kind: 'audio', fmt: aFmtOf(m.audio), timescale: m.audio.timescale, ch: m.audio.ch, rate: m.audio.rate, extra: m.audio.extra }); codes.push(mp4CodecOf(m.audio)); }
     m.type = 'video/mp4; codecs="' + codes.join(',') + '"';
     if (!mp4MseOk(m.type)) {
       /* صدا را حذف کنیم و فقط تصویر را امتحان کنیم (مثل رفتار MKV در کدک ناسازگار) */

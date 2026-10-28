@@ -160,6 +160,15 @@ assert.equal(audios[0].rate, 48000);
 assert.equal(audios[0].ch, 2);
 assert.deepEqual([...audios[0].extra], [...ASC], 'AudioSpecificConfig از esds بیرون کشیده شد');
 assert.equal(M.mp4CodecOf(audios[0]), 'mp4a.40.2');
+
+/* کدک‌های سنگین‌تر (مثل VLC): HEVC از hvcC، Opus/AC-3/E-AC-3 از نمونه‌های خودشان */
+const HVCC = new Uint8Array([1, 1, 0x60, 0, 0, 0, 0xB0, 0, 0, 0, 0, 0, 93]);
+assert.equal(M.mp4CodecOf({ kind: 'video', codec: 'hvc1', extra: HVCC }), 'hvc1.1.6.L93.B0', 'رشتهٔ HEVC از hvcC');
+assert.equal(M.mp4CodecOf({ kind: 'video', codec: 'hev1', extra: HVCC }), 'hev1.1.6.L93.B0', 'hev1 هم پشتیبانی می‌شود');
+assert.equal(M.mp4CodecOf({ kind: 'audio', codec: 'Opus', extra: new Uint8Array([0, 2, 0x01, 0x38, 0, 0, 0xbb, 0x80, 0, 0, 0]) }), 'opus', 'صدای Opus');
+assert.equal(M.mp4CodecOf({ kind: 'audio', codec: 'ac-3' }), 'ac-3', 'صدای AC-3');
+assert.equal(M.mp4CodecOf({ kind: 'audio', codec: 'ec-3' }), 'ec-3', 'صدای E-AC-3');
+assert.equal(M.mp4CodecOf({ kind: 'video', codec: 'vp09' }), '', 'کدک ناشناخته رشتهٔ خالی می‌دهد');
 assert.equal(audios[0].shift, 1024, 'edit list: priming حذف می‌شود');
 assert.equal(audios[1].lang, 'fas');
 assert.equal(audios[1].name, 'فارسی', 'نام ترک صدا از hdlr');
