@@ -138,9 +138,13 @@ async function streamEdgeChecks(request, secret, tok, kind) {
   if (tok.a && tok.a !== await streamBindHash(secret, 'ua', ua)) return 'ua';
   const dest = request.headers.get('sec-fetch-dest');
   if (dest) {
-    /* mkv needs a JS demuxer: the page itself fetches the bytes (dest empty) */
+    /* پخش داخل‌صفحه (MKV و حالا MP4 با چند ترک صدا/زیرنویس داخلی) یعنی خودِ صفحه
+       بایت‌ها را با fetch می‌خواند و مرورگر dest=empty می‌فرستد؛ دانلودمنیجرها
+       این هدرها را ندارند و همچنان با همان بررسی UA/referer بیرون می‌مانند. */
+    /* empty = خواندن بایت‌ها با fetch توسط خودِ صفحه؛ فقط برای نسخه‌هایی که
+       موتور داخلی (MKV یا MP4 چندترک) لازم دارند و در توکن علامت خورده‌اند. */
     const ok = kind === 'v'
-      ? ['video', 'audio', 'media'].concat(tok.f === 'mkv' ? ['empty'] : [])
+      ? ['video', 'audio', 'media'].concat((tok.f === 'mkv' || tok.d === 1) ? ['empty'] : [])
       : ['video', 'audio', 'media', 'empty'];
     if (ok.indexOf(dest) < 0) return 'dest';
   } else if (streamModernBrowserUa(ua)) {

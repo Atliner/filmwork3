@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 const source=fs.readFileSync(new URL('../worker.js',import.meta.url),'utf8');
-const app=await import('data:text/javascript;base64,'+Buffer.from(source+'\nexport {Store,RemoteShard,shardHash};').toString('base64'));
+const app=await import('data:text/javascript;base64,'+Buffer.from(source+'\nexport {Store,RemoteShard,shardHash,handleShards,bustSettings};').toString('base64'));
 const SECRET='0123456789abcdef0123456789abcdef';
 function database() {
   const sql=new DatabaseSync(':memory:');
@@ -173,4 +173,52 @@ try {
     globalThis.fetch = realFetch2;
   }
 }
-console.log('PASS: D1 federation (deterministic hash routing, it:/sub: only, local fallback on shard failure, HMAC rejection, health circuit-breaker) + secret-with-newline tolerance (bad-signature root cause).');
+/* ── پنل «شاردها»: گزارش وضعیت واقعی (باگ «اتصال: قطع» بعد از افزودن) ── */
+{
+  B.down = false;
+  const rfSave = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.startsWith('https://shard-a.test/')) return A.handle(u, init);
+    if (u.startsWith('https://shard-b.test/')) return B.handle(u, init);
+    if (u.startsWith('https://shard-c.test/')) throw new Error('network down: shard-c');
+    return rfSave(url, init);
+  };
+  try {
+  /* این بلوک به تنظیماتِ دست‌نخورده نیاز دارد؛ بلوک‌های قبلی 'set' را بازنویسی کرده‌اند */
+  kv.values.set('set', JSON.stringify({
+    secret: 'shard-test-secret',
+    shards: [{ id: 'a', url: 'https://shard-a.test', secret: SECRET }, { id: 'b', url: 'https://shard-b.test', secret: SECRET }],
+  }));
+  const store = new app.Store(kv, env);
+  app.bustSettings(store);
+  const get = () => app.handleShards(store, new Request('https://site.test/api/admin/shards'), 'GET').then(r => r.json());
+  let r = await get();
+  assert.equal(r.shards.length, 2, 'هر دو شارد گزارش می‌شوند');
+  assert.equal(r.shards[0].ok, true, 'شارد سالم «قطع» نشان داده نمی‌شود: ' + JSON.stringify(r.shards[0]));
+  assert.equal(r.shards[0].error, '');
+  assert.equal(typeof r.shards[0].count, 'number', 'تعداد رکورد زنده برمی‌گردد');
+  assert.ok(r.shards[0].latency >= 0);
+  assert.match(r.shards[0].note, /نسخه/, 'شارد بدون v=2 یادداشت ارتقا می‌گیرد');
+  /* شارد خاموش: خطا گزارش می‌شود، نه استثنا و نه حلقهٔ بی‌پایان */
+  B.down = true;
+  r = await get();
+  const b = r.shards.find(x => x.id === 'b');
+  assert.equal(b.ok, false);
+  assert.ok(b.error, 'دلیل قطع بودن نوشته می‌شود');
+  B.down = false;
+  /* افزودن با بررسی اتصال: شارد خاموش ذخیره نمی‌شود */
+  const add = (body) => app.handleShards(store, new Request('https://site.test/api/admin/shards', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }), 'POST');
+  let rejErr = null;
+  try { await add({ action: 'add', id: 'shard-c', url: 'https://shard-c.test', secret: SECRET }); } catch (e) { rejErr = e; }
+  assert.ok(rejErr, 'شارد بی‌پاسخ اضافه نمی‌شود: بدون خطا ذخیره شد');
+  assert.match(String(rejErr.message), /پاسخ نداد/, 'پیام خطای افزودن: ' + String(rejErr.message).slice(0, 120));
+  const forced = await (await add({ action: 'add', id: 'shard-c', url: 'https://shard-c.test', secret: SECRET, force: true })).json();
+  assert.match(forced.warning, /بررسی/, 'افزودن اجباری هشدار می‌دهد');
+  assert.ok(forced.shards.some(x => x.id === 'shard-c'));
+  const removed = await (await add({ action: 'remove', id: 'shard-c' })).json();
+  assert.ok(!removed.shards.some(x => x.id === 'shard-c'), 'حذف شارد');
+  } finally { globalThis.fetch = rfSave; }
+}
+
+console.log('PASS: D1 federation (deterministic hash routing, it:/sub: only, local fallback on shard failure, HMAC rejection, health circuit-breaker) + secret-with-newline tolerance (bad-signature root cause) + shard panel live status (ok/count/latency/note, health-gated add, forced add warning, remove).');

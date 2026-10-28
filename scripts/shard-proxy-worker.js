@@ -122,7 +122,16 @@ export default {
       const db = await openDb(env);
       if (!db) return j({ error: 'no-d1-binding' }, 500);
 
-      if (p === '/health') return j({ ok: true, v: 2, time: Date.now() });
+      if (p === '/health') {
+        /* count = تعداد رکوردهای زندهٔ همین شارد (برای نمایش در پنل سایت) */
+        let count = null;
+        try {
+          const row = await db.prepare('SELECT COUNT(*) AS n FROM filmwork_records WHERE expires_at IS NULL OR expires_at > ?')
+            .bind(Math.floor(Date.now() / 1000)).first();
+          count = row ? Number(row.n) || 0 : 0;
+        } catch (e) { count = null; }
+        return j({ ok: true, v: 2, count: count, time: Date.now() });
+      }
       if (p === '/get') {
         const k = url.searchParams.get('k') || '';
         if (!allowedKey(k)) return j({ error: 'key-not-allowed' }, 400);
