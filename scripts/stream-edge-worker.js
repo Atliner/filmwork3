@@ -162,6 +162,40 @@ function streamMime(fmt, upstreamType) {
   if (fmt === 'mkv') return 'video/x-matroska';
   return upstreamType || 'video/mp4';
 }
+function streamRangeParse (header) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header || ''));
+  if (!m) return null;
+  return { a: m[1] === '' ? null : Number(m[1]), b: m[2] === '' ? null : Number(m[2]) };
+}
+function streamRangeSlice (up, a, b, total) {
+  const reader = up && up.body && up.body.getReader ? up.body.getReader() : null;
+  if (!reader) return null;
+  const skip = a > 0 ? a : 0;
+  const take = b == null ? Infinity : Math.max(0, b - skip + 1);
+  let skipped = 0, sent = 0;
+  const stop = function (ctrl) { try { reader.cancel(); } catch (e) { } try { ctrl.close(); } catch (e) { } };
+  return new ReadableStream({
+    async pull (ctrl) {
+      try {
+        for (;;) {
+          const r = await reader.read();
+          if (!r || r.done) return stop(ctrl);
+          let chunk = r.value;
+          if (skipped < skip) {
+            const need = skip - skipped;
+            if (chunk.length <= need) { skipped += chunk.length; continue; }
+            chunk = chunk.subarray(need); skipped = skip;
+          }
+          if (take !== Infinity && sent + chunk.length > take) chunk = chunk.subarray(0, take - sent);
+          if (chunk.length) { ctrl.enqueue(chunk); sent += chunk.length; }
+          if (sent >= take) return stop(ctrl);
+          if (chunk.length) return;
+        }
+      } catch (e) { try { ctrl.error(e); } catch (x) { } }
+    },
+    cancel () { try { reader.cancel(); } catch (e) { } }
+  });
+}
 async function streamEdgeProgressive(request, tok, opts) {
   const headers = { 'user-agent': request.headers.get('user-agent') || 'Mozilla/5.0', 'accept': '*/*' };
   const range = request.headers.get('range');
@@ -185,6 +219,30 @@ async function streamEdgeProgressive(request, tok, opts) {
   h.set('content-disposition', 'inline');
   h.set('x-content-type-options', 'nosniff');
   h.set('referrer-policy', 'no-referrer');
+  /* مبدأ Range را نادیده گرفت → خودمان برش می‌دهیم تا پلیر ۲۰۶ بگیرد */
+  const rq = range ? streamRangeParse(range) : null;
+  if (rq && up.status === 200) {
+    const known = up.headers.get('content-length');
+    const total = known && /^\d+$/.test(known) ? Number(known) : 0;
+    let a = rq.a;
+    if (a === null) a = (rq.b !== null && total) ? Math.max(0, total - rq.b) : 0;
+    let b = rq.b;
+    if (b === null) b = total ? total - 1 : null;
+    if (total && a >= total) {
+      h.set('content-range', 'bytes */' + total);
+      return new Response(null, { status: 416, headers: h });
+    }
+    if (b !== null && total && b > total - 1) b = total - 1;
+    if (b !== null && b < a) return new Response(null, { status: 416, headers: h });
+    h.set('content-range', 'bytes ' + a + '-' + (b === null ? '' : b) + '/' + (total || '*'));
+    if (b !== null) h.set('content-length', String(b - a + 1));
+    if (request.method === 'HEAD') return new Response(null, { status: 206, headers: h });
+    /* از ابتدای فایل و تا انتها → نیازی به برش نیست، همان بدنه با ۲۰۶ */
+    if (a === 0 && (b === null || (total && b >= total - 1))) return new Response(up.body, { status: 206, headers: h });
+    const sliced = streamRangeSlice(up, a, b, total);
+    if (!sliced) return new Response(up.body, { status: 200, headers: h });
+    return new Response(sliced, { status: 206, headers: h });
+  }
   return new Response(request.method === 'HEAD' ? null : up.body, { status: up.status, headers: h });
 }
 async function streamEdgeHls(request, tok, tokenStr, rest, base, secret) {
