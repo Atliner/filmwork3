@@ -10802,7 +10802,7 @@ function MVX_PLAYER_MODULE(W) {
     /* ابتدا لبه؛ اگر درخواست را رد کرد (نسخهٔ قدیمی/هدرها/قفل UA) یا Range را
        نادیده گرفت، همان جریان از مسیر /api/stream/bytes خودِ سایت می‌آید. */
     function openStream () {
-      if (m.proxyOnly) return doFetch(byteProxyUrl(m.src, from || 0, '', true), opts);
+      if (m.proxyOnly || ENGINE_PROXY) return doFetch(byteProxyUrl(m.src, from || 0, '', true), opts);
       return W.fetch(m.src, opts).then(function (res) {
         /* بدنه از ابتدای فایل آمده ولی ما از آفست from می‌خواهیم → مسیر پشتیبان */
         if (res && res.ok && from && res.status === 200) {
@@ -10816,6 +10816,7 @@ function MVX_PLAYER_MODULE(W) {
     function openProxy (why) {
       m.proxyOnly = true;
       m.proxyWhy = why;
+      ENGINE_PROXY = true;
       logEngine('mkv', 'edge denied → byte proxy (' + why + ')');
       return doFetch(byteProxyUrl(m.src, from || 0, '', true), opts);
     }
@@ -11353,18 +11354,41 @@ function MVX_PLAYER_MODULE(W) {
   function mp4ProxyFetch (src, a, b) {
     return doFetch(byteProxyUrl(src, a, b), { credentials: 'omit' }).then(function (res) { return mp4RangeParse(res, a); });
   }
+  /* اگر یک بار لبه درخواست موتور را رد کرد، تا پایان همین پخش دیگر سراغش نمی‌رویم
+     (تعویض صدا/زیرنویس هم یک رفت‌وبرگشت اضافه به لبه نداشته باشد). */
+  var ENGINE_PROXY = false;
   /* یک بار مستقیم از لبه؛ اگر لبه درخواست را رد کرد، بقیهٔ کار از مسیر پشتیبان
      (خودِ همین Worker) می‌رود تا موتور داخلی هیچ‌وقت به‌خاطر لبه خاموش نشود. */
   function mp4Fetch (m, a, b) {
-    if (m && m.proxyOnly) return mp4ProxyFetch(m.src, a, b);
+    if (m && m.useDirect) return mp4RangeFetch(P.info.direct, a, b);
+    if ((m && m.proxyOnly) || ENGINE_PROXY) return mp4ProxyFetch(m.src, a, b).catch(function (e) {
+      return mp4DirectTry(m, e, a, b);
+    });
     return mp4RangeFetch(m ? m.src : '', a, b).catch(function (e) {
       var msg = String((e && e.message) || '');
       if (!m || !/mp4-http-(401|403|404|410|429|5\d\d)/.test(msg)) throw e;
       m.proxyOnly = true;
       m.proxyWhy = msg + (e && e.deny ? ('/' + e.deny) : '');
+      ENGINE_PROXY = true;
       logEngine('mp4', 'edge denied → byte proxy (' + m.proxyWhy + ')');
-      return mp4ProxyFetch(m.src, a, b);
+      return mp4ProxyFetch(m.src, a, b).catch(function (e2) { return mp4DirectTry(m, e2, a, b); });
     });
+  }
+  /* آخرین راه: بعضی مبدأها فقط به مرورگر کاربر جواب می‌دهند (سرور/Cloudflare را
+     می‌بندند). فقط وقتی Range از سمت مرورگر هم درست کار کند (۲۰۶ با content-range)
+     از لینک مستقیم استفاده می‌کنیم؛ وگرنه همان خطای قبلی بالا می‌رود. */
+  function mp4DirectTry (m, err, a, b) {
+    var d = P && P.info && P.info.direct;
+    if (!m || !d || m.directTried) return Promise.reject(err);
+    if (!/mp4-http-(403|404|410|5\d\d)|no-fetch|Failed/.test(String((err && err.message) || ''))) return Promise.reject(err);
+    m.directTried = true;
+    return W.fetch(d, { headers: { 'range': 'bytes=0-1' }, credentials: 'omit' }).then(function (res) {
+      if (!res || res.status !== 206) return Promise.reject(err);
+      m.useDirect = true;
+      P.engDetail = 'پخش مستقیم از مبدأ (سرور بسته است)';
+      logEngine('mp4', 'upstream blocked → direct origin');
+      return mp4RangeFetch(d, a, b);
+    }, function () { return Promise.reject(err); });
   }
   function mp4LoadIndex (m) {
     var src = m.src;
@@ -11916,6 +11940,7 @@ function MVX_PLAYER_MODULE(W) {
   function forceNativePlay () {
     if (!P || !P.info || !P.info.src) return;
     var at = P.video.currentTime || 0;
+    ENGINE_PROXY = false;
     P.forceNative = true;
     P.forceDemux = false;
     P.pendingSeek = at > 1 ? at : 0;
