@@ -143,9 +143,11 @@ async function streamEdgeChecks(request, secret, tok, kind) {
        این هدرها را ندارند و همچنان با همان بررسی UA/referer بیرون می‌مانند. */
     /* empty = خواندن بایت‌ها با fetch توسط خودِ صفحه؛ فقط برای نسخه‌هایی که
        موتور داخلی (MKV یا MP4 چندترک) لازم دارند و در توکن علامت خورده‌اند. */
+    /* «track» = خودِ مرورگر برای <track src> می‌فرستد (زیرنویس سروری)؛ فقط
+       برای فایل‌هایی که در توکن پرچم پردازش (d=1) دارند مجاز است. */
     const ok = kind === 'v'
-      ? ['video', 'audio', 'media'].concat((tok.f === 'mkv' || tok.d === 1) ? ['empty'] : [])
-      : ['video', 'audio', 'media', 'empty'];
+      ? ['video', 'audio', 'media'].concat((tok.f === 'mkv' || tok.d === 1) ? ['empty', 'track'] : [])
+      : ['video', 'audio', 'media', 'empty', 'track'];
     if (ok.indexOf(dest) < 0) return 'dest';
   } else if (streamModernBrowserUa(ua)) {
     /* WebView/older browsers may omit Fetch Metadata entirely — allow when the

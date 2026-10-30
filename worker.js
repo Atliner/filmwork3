@@ -2347,15 +2347,21 @@ function streamMp4Layout(buf) {
 }
 function streamMp4MoovInfo(buf) { return streamMp4Layout(buf).moov; }
 function streamParseMp4Tracks(buf, moov) {
-  const out = { audio: [], subs: [], video: 0 };
+  const out = { audio: [], subs: [], video: 0, videoTracks: [] };
   if (!moov) moov = streamMp4MoovInfo(buf);
   if (!moov || moov.body >= moov.end) return out;
   const moovAt = moov.body, moovEnd = moov.end;
   mp4Walk(buf, moovAt, moovEnd, 'trak', (ts, te) => {
-    const t = { id: 0, handler: '', name: '', lang: '', codec: '' };
+    const t = { id: 0, handler: '', name: '', lang: '', codec: '', w: 0, h: 0 };
     mp4Walk(buf, ts, te, 'tkhd', (s) => {
       const ver = buf[s];
       t.id = ebmlUint(buf, s + (ver === 1 ? 20 : 12), 4);
+      /* پهنا/ارتفاع در tkhd به‌صورت ۱۶.۱۶ ثابت است */
+      const wh = s + (ver === 1 ? 88 : 76);
+      if (wh + 8 <= te) {
+        t.w = Math.round(ebmlUint(buf, wh, 4) / 65536);
+        t.h = Math.round(ebmlUint(buf, wh + 4, 4) / 65536);
+      }
     });
     mp4Walk(buf, ts, te, 'mdia', (ms, me) => {
       mp4Walk(buf, ms, me, 'mdhd', (s) => {
@@ -2376,9 +2382,12 @@ function streamParseMp4Tracks(buf, moov) {
       });
     });
     if (t.handler === 'soun') out.audio.push({ no: t.id, name: t.name, lang: t.lang, codec: t.codec });
-    else if (t.handler === 'vide') out.video++;
+    else if (t.handler === 'vide') {
+      out.video++;
+      out.videoTracks.push({ no: t.id, codec: t.codec, w: t.w, h: t.h, lang: t.lang });
+    }
     else if (t.handler === 'text' || t.handler === 'sbtl' || t.handler === 'subp' || t.codec === 'tx3g' || t.codec === 'wvtt') {
-      out.subs.push({ no: t.id, name: t.name, lang: t.lang, fmt: t.codec === 'wvtt' ? 'vtt' : (t.codec || 'tx3g') });
+      out.subs.push({ no: t.id, name: t.name, lang: t.lang, codec: t.codec, fmt: t.codec === 'wvtt' ? 'vtt' : (t.codec || 'tx3g') });
     }
   });
   return out;
@@ -2931,9 +2940,11 @@ async function streamEdgeChecks(request, secret, tok, kind) {
        این هدرها را ندارند و همچنان با همان بررسی UA/referer بیرون می‌مانند. */
     /* empty = خواندن بایت‌ها با fetch توسط خودِ صفحه؛ فقط برای نسخه‌هایی که
        موتور داخلی (MKV یا MP4 چندترک) لازم دارند و در توکن علامت خورده‌اند. */
+    /* «track» = خودِ مرورگر برای <track src> می‌فرستد (زیرنویس سروری)؛ فقط
+       برای فایل‌هایی که در توکن پرچم پردازش (d=1) دارند مجاز است. */
     const ok = kind === 'v'
-      ? ['video', 'audio', 'media'].concat((tok.f === 'mkv' || tok.d === 1) ? ['empty'] : [])
-      : ['video', 'audio', 'media', 'empty'];
+      ? ['video', 'audio', 'media'].concat((tok.f === 'mkv' || tok.d === 1) ? ['empty', 'track'] : [])
+      : ['video', 'audio', 'media', 'empty', 'track'];
     if (ok.indexOf(dest) < 0) return 'dest';
   } else if (streamModernBrowserUa(ua)) {
     /* WebView/older browsers may omit Fetch Metadata entirely — allow when the
@@ -3323,8 +3334,19 @@ async function streamBuild(store, set, user, item, picked, sid, request, avoid, 
   for (const t of (picked.stream.subs || [])) await addSub(t, 'fs_' + (++sidx));
   for (const t of (picked.bag.streamSubs || [])) await addSub(t, 't_' + (++sidx));
   const ep = streamEpisodeInfo(item, picked.bag);
+  /* ── پردازش رسانه روی سرور ──
+     برای فایل‌هایی که پردازش لازم دارند (MKV یا MP4 چندترک) سه آدرس آماده
+     فرستاده می‌شود؛ خودِ آدرس مبدأ فقط داخل توکن است و در صفحه نمی‌آید:
+       media.tracks → فهرست ترک‌های صدا/زیرنویس (JSON)
+       media.sub    → پیشوند آدرس زیرنویس داخلی (WebVTT): media.sub + شمارهٔ ترک
+       media.remux  → جریان fMP4 قابل پخش (MKV) با پارامترهای audio/start */
+  const media = demux ? {
+    tracks: '/api/stream/tracks?t=' + tok,
+    sub: '/api/stream/sub?t=' + tok + '&track=',
+    remux: fmtOut === 'mkv' ? '/api/stream/remux?t=' + tok : '',
+  } : null;
   return {
-    ok: true, sid: sid, src: src, fmt: fmtOut, exp: exp * 1000, edge: edge.id, tracks: trackInfo, demux: demux,
+    ok: true, sid: sid, src: src, fmt: fmtOut, exp: exp * 1000, edge: edge.id, tracks: trackInfo, demux: demux, media: media,
     direct: set.streamDirectPlay !== false ? picked.stream.url : '',
     item: { id: item.id, title: item.title, type: item.type, poster: posterUrlFor({ posterOverride: item.posterOverride || '', posterSrc: (item.source && item.source.tmeUrl) || '', galleryPoster: galleryPosterOf(item) }) },
     ep: ep,
@@ -3477,6 +3499,1359 @@ async function apiStreamBytes(store, request, url) {
   const sliced = a === 0 ? up.body : streamRangeSlice(up, a, end, total);
   if (!sliced) return new Response(up.body, { status: 200, headers: h });
   return new Response(sliced, { status: 206, headers: h });
+}
+
+/* ═══════════════════════ پردازش رسانه روی سرور (Worker) ═══════════════════════
+   مرورگر MKV را پخش نمی‌کند و زیرنویس نرمِ داخل فایل (Softsub) را نه نشان
+   می‌دهد و نه استخراج می‌کند. پس این سه کار به خود Worker منتقل شده است:
+
+     GET /api/stream/tracks?t=<توکن>
+         چند کیلوبایت اول فایل (و در صورت نیاز جدول moov ته MP4) خوانده و
+         پارس می‌شود؛ فهرست ترک‌های صدا/زیرنویس/ویدئو به‌همراه آدرس آمادهٔ هر
+         زیرنویس و توانمندی remux به‌صورت JSON برمی‌گردد.
+
+     GET /api/stream/sub?t=<توکن>&track=<شماره>[&from=<ثانیه>]
+         همان ترک زیرنویس در لحظه از فایل اصلی استخراج و به WebVTT تبدیل
+         می‌شود (SRT/WEBVTT خام و خط‌های Dialogue در ASS/SSA). نتیجه در KV کش
+         می‌شود و اسکن فایل تکه‌تکه ادامه می‌یابد (هدرهای x-mvx-partial/from).
+
+     GET /api/stream/remux?t=<توکن>[&audio=<شماره>][&start=<ثانیه>]
+         جریان MKV همان‌جا demux و به fMP4 تکه‌تکه (ftyp+moov و بعد moof+mdat)
+         تبدیل می‌شود؛ <video> مرورگر بدون هیچ کتابخانه‌ای پخشش می‌کند.
+
+   همهٔ مسیرها با «توکن پخش» همان نشست کار می‌کنند: آدرس مبدأ فقط داخل توکن
+   (AES-GCM + قفل IP/مرورگر) است و هرگز به صفحه نمی‌رسد. توکن باید پرچم «موتور
+   داخلی» (d=1) داشته باشد؛ یعنی فقط برای فایل‌هایی که واقعاً پردازش لازم دارند
+   و همین مسیر به پراکسی عمومی تبدیل نمی‌شود. */
+
+const SRV_SUB_BYTES = 96 * 1024 * 1024;     /* سقف خواندن در هر بار استخراج زیرنویس */
+const SRV_SUB_MS = 20000;                   /* سقف زمان هر بار استخراج */
+const SRV_SUB_CUES = 9000;                  /* سقف تعداد کیوی هر فایل */
+const SRV_SUB_TTL = 6 * 3600;               /* عمر کش زیرنویس در KV */
+const SRV_SUB_MEM = 40;                     /* تعداد زیرنویس کش‌شده در حافظهٔ هر Isolate */
+const SRV_CUES_BYTES = 4 * 1024 * 1024;     /* سقف خواندن جدول Cues */
+const SRV_HEAD_BYTES = 2 * 1024 * 1024;     /* سقف خواندن سر فایل برای فراداده */
+const SRV_BLOCK_MAX = 32 * 1024 * 1024;     /* سقف یک بلوک (فریم) در رمزگشایی */
+const SRV_REMUX_BYTES = 1024 * 1024 * 1024; /* سقف هر پاسخ remux (پس از آن پایان) */
+const SRV_MP4_FETCH_MAX = 40;               /* سقف درخواست‌های بازه‌ای برای زیرنویس MP4 (سهمیهٔ subrequest) */
+const srvSubMem = new Map();
+
+function srvHdr(extra) {
+  const h = {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'private, no-store',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+    'vary': 'Origin',
+  };
+  if (extra) for (const k in extra) h[k] = extra[k];
+  return h;
+}
+function srvJson(obj, status, extra) {
+  return new Response(JSON.stringify(obj), { status: status || 200, headers: srvHdr(extra) });
+}
+function srvFail(status, code, error) {
+  return new Response(JSON.stringify({ ok: false, code: code, error: error || code }), {
+    status: status || 403,
+    headers: srvHdr({ 'x-mvx-deny': code }),
+  });
+}
+
+/* ── توکن پخش: همان توکنی که لبه/موتور داخلی استفاده می‌کند ── */
+async function srvTokenLoad(store, url, request) {
+  const set = await getSettings(store);
+  if (!set.streamEnabled) return { res: srvFail(403, 'off', 'پخش آنلاین غیرفعال است') };
+  const token = String(url.searchParams.get('t') || url.searchParams.get('tk') || '').trim();
+  if (!token || token.length < 24 || token.length > 4000 || !/^[A-Za-z0-9_-]+$/.test(token)) {
+    return { res: srvFail(400, 'token', 'توکن پخش لازم است') };
+  }
+  const secrets = [];
+  try { const own = await streamOwnSecret(store, set); if (own) secrets.push(own); } catch (e) { }
+  for (const e of streamEdgeList(set)) if (e.secret && secrets.indexOf(e.secret) < 0) secrets.push(e.secret);
+  let tok = null, secret = '';
+  for (const s of secrets) {
+    const t = await streamTokenOpen(s, token);
+    if (t && t.v === 1 && t.k === 'v') { tok = t; secret = s; break; }
+  }
+  if (!tok) return { res: srvFail(403, 'token', 'توکن پخش معتبر نیست') };
+  /* پرچم «موتور داخلی» پیش از هر بررسی دیگری: این مسیرها فقط برای فایل‌هایی
+     است که واقعاً پردازش لازم دارند، وگرنه به پراکسی عمومی تبدیل می‌شوند. */
+  if (tok.d !== 1) return { res: srvFail(403, 'engine-only', 'این فایل پردازش سروری لازم ندارد') };
+  const bad = await streamEdgeChecks(request, secret, tok, 'v');
+  if (bad) return { res: srvFail(bad === 'expired' ? 410 : 403, bad, 'این پخش دیگر معتبر نیست (' + bad + ')') };
+  if (!/^https:\/\//.test(String(tok.u || ''))) return { res: srvFail(400, 'url', 'آدرس مبدأ معتبر نیست') };
+  if (!memRate('srv:' + String(tok.s || tok.u || 'x'), 240, 60000)) return { res: srvFail(429, 'rate', 'درخواست‌ها زیاد است؛ کمی صبر کنید') };
+  return { tok: tok, secret: secret, set: set, token: token };
+}
+
+/* ── دریافت بازهٔ بایتی از مبدأ (Range) ── */
+async function srvOrigin(tok, request, a, b, timeoutMs, rawRange) {
+  const ua = request.headers.get('user-agent') || 'Mozilla/5.0';
+  const range = rawRange || ('bytes=' + Math.max(0, a) + '-' + (b == null ? '' : b));
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) { } }, Math.max(3000, timeoutMs || 15000)) : 0;
+  let r;
+  try {
+    r = await fetch(tok.u, { method: 'GET', headers: { 'user-agent': ua, 'accept': '*/*', 'range': range }, redirect: 'follow', signal: ctrl ? ctrl.signal : undefined });
+  } catch (e) {
+    if (timer) clearTimeout(timer);
+    return null;
+  }
+  if (timer) clearTimeout(timer);
+  if (!r || r.status >= 400) {
+    try { if (r && r.body) await r.body.cancel(); } catch (e) { }
+    return null;
+  }
+  /* مبدأ هدر Range را نادیده گرفته و کل فایل را از صفر با ۲۰۰ فرستاده است */
+  let skip = 0;
+  if (r.status === 200 && a > 0 && !r.headers.get('content-range')) skip = a;
+  return { res: r, skip: skip };
+}
+async function srvOpenStream(tok, request, a, timeoutMs) {
+  const up = await srvOrigin(tok, request, a, null, timeoutMs || 30000);
+  if (!up) return null;
+  const rd = srvReader(up.res.body, up.skip ? 0 : a);
+  if (up.skip) { try { await rd.drop(up.skip); } catch (e) { } }
+  return rd;
+}
+
+/* ── خوانندهٔ جریانی بایت‌ها: vint/elem و پریدنِ بدون بافر کردن ── */
+function srvReader(body, startAt) {
+  const rd = body && body.getReader ? body.getReader() : null;
+  let buf = new Uint8Array(0);
+  let at = 0;
+  let eof = !rd;
+  let seen = Math.max(0, Number(startAt) || 0);
+  let closed = false;
+
+  async function pull() {
+    if (eof) return false;
+    let part;
+    try { part = await rd.read(); } catch (e) { eof = true; return false; }
+    if (!part || part.done) { eof = true; return false; }
+    const v = part.value || new Uint8Array(0);
+    if (!v.length) return true;
+    if (at > 0) { buf = buf.subarray(at); at = 0; }
+    if (buf.length) {
+      const nb = new Uint8Array(buf.length + v.length);
+      nb.set(buf, 0); nb.set(v, buf.length); buf = nb;
+    } else buf = v;
+    return true;
+  }
+  async function fill(min) {
+    while (buf.length - at < min && !eof) { if (!(await pull())) break; }
+    return buf.length - at;
+  }
+  const api = {
+    get offset() { return seen; },
+    get ended() { return eof && at >= buf.length; },
+    async take(n) {
+      const avail = await fill(n);
+      const use = Math.min(n, avail);
+      const out = buf.slice(at, at + use);
+      at += use; seen += use;
+      return out;
+    },
+    /* پریدنِ بدون نگه‌داشتنِ بایت‌ها در رمز (برای بلاک‌های ویدئو/صدای بی‌ربط) */
+    async drop(n) {
+      let left = n;
+      while (left > 0) {
+        const avail = buf.length - at;
+        if (avail > 0) { const use = Math.min(avail, left); at += use; seen += use; left -= use; continue; }
+        if (eof) break;
+        if (!(await pull())) break;
+      }
+      return n - left;
+    },
+    async vint(keep) {
+      if (!(await fill(1))) return null;
+      const first = buf[at];
+      if (!first) return null;
+      let len = 1;
+      while (len <= 8 && !(first & (0x80 >> (len - 1)))) len++;
+      if (len > 8) return null;
+      if ((await fill(len)) < len) return null;
+      let v = keep ? first : (first & (0xff >> len));
+      let allOnes = !keep && ((first & (0xff >> len)) === (0xff >> len));
+      for (let i = 1; i < len; i++) {
+        v = v * 256 + buf[at + i];
+        if (!keep && buf[at + i] !== 255) allOnes = false;
+      }
+      at += len; seen += len;
+      if (allOnes) return { v: -1, len: len };
+      return { v: v, len: len };
+    },
+    async elem() {
+      const id = await api.vint(true);
+      if (!id) return null;
+      const size = await api.vint(false);
+      if (!size) return null;
+      return { id: id.v, size: size.v, hlen: id.len + size.len };
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      try { if (rd) await rd.cancel(); } catch (e) { }
+    },
+  };
+  return api;
+}
+
+/* ── فرادادهٔ MKV از سر فایل: مقیاس زمان، مدت، ترک‌ها، آفست Cues ── */
+function srvFloat(buf, pos, len) {
+  try {
+    if (len === 4) return new DataView(buf.buffer, buf.byteOffset + pos, 4).getFloat32(0);
+    if (len === 8) return new DataView(buf.buffer, buf.byteOffset + pos, 8).getFloat64(0);
+  } catch (e) { }
+  return 0;
+}
+function srvSubFmt(codec) {
+  const c = String(codec || '');
+  if (c === 'S_TEXT/UTF8' || c === 'S_TEXT/ASCII') return 'srt';
+  if (c === 'S_TEXT/WEBVTT' || c === 'S_TEXT/UTF-8') return 'vtt';
+  if (c === 'S_TEXT/ASS' || c === 'S_TEXT/SSA' || c === 'S_TEXT/SSA2') return 'ass';
+  if (c === 'S_TEXT/USF' || c === 'S_TEXT/UTT') return 'text';
+  if (/^S_/.test(c)) return 'bitmap';
+  return '';
+}
+function srvMkvInfo(buf, pos, end, out) {
+  while (pos < end) {
+    const e = ebmlElem(buf, pos);
+    if (!e || e.size < 0 || pos + e.hlen + e.size > end) break;
+    const dp = pos + e.hlen;
+    if (e.id === 0x2AD7B1) out.tScaleNs = ebmlUint(buf, dp, e.size) || 1000000;
+    else if (e.id === 0x4489) out.durationMs = Math.round(srvFloat(buf, dp, e.size) * out.tScaleNs / 1e6);
+    pos += e.hlen + e.size;
+  }
+}
+function srvMkvSeekHead(buf, pos, end, out) {
+  while (pos < end) {
+    const e = ebmlElem(buf, pos);
+    if (!e || e.size < 0 || pos + e.hlen + e.size > end) break;
+    if (e.id === 0x4DBB) {
+      let p = pos + e.hlen, pe = p + e.size, id = 0, at = -1;
+      while (p < pe) {
+        const c = ebmlElem(buf, p);
+        if (!c || c.size < 0 || p + c.hlen + c.size > pe) break;
+        if (c.id === 0x53AB) id = ebmlUint(buf, p + c.hlen, c.size);
+        else if (c.id === 0x53AC) at = ebmlUint(buf, p + c.hlen, c.size);
+        p += c.hlen + c.size;
+      }
+      if (id === 0x1C53BB6B && at >= 0) out.cuesAt = out.segmentData + at;
+    }
+    pos += e.hlen + e.size;
+  }
+}
+function srvMkvTracks(buf, pos, end, out) {
+  while (pos < end) {
+    const e = ebmlElem(buf, pos);
+    if (!e || e.size < 0 || pos + e.hlen + e.size > end) break;
+    if (e.id === 0xAE) {
+      const t = { no: 0, type: 0, codec: '', priv: null, name: '', lang: '', w: 0, h: 0, rate: 48000, ch: 2, defaultNs: 0, subFmt: '' };
+      let p = pos + e.hlen, pe = p + e.size;
+      while (p < pe) {
+        const c = ebmlElem(buf, p);
+        if (!c || c.size < 0 || p + c.hlen + c.size > pe) break;
+        const dp = p + c.hlen;
+        if (c.id === 0xD7) t.no = ebmlUint(buf, dp, c.size);
+        else if (c.id === 0x83) t.type = ebmlUint(buf, dp, c.size);
+        else if (c.id === 0x86) t.codec = ebmlStr(buf, dp, c.size);
+        else if (c.id === 0x63A2) t.priv = buf.slice(dp, dp + c.size);
+        else if (c.id === 0x536E) t.name = ebmlStr(buf, dp, c.size);
+        else if (c.id === 0x22B59C) t.lang = ebmlStr(buf, dp, c.size);
+        else if (c.id === 0x22B59D && !t.lang) t.lang = ebmlStr(buf, dp, c.size);
+        else if (c.id === 0x23E383) t.defaultNs = ebmlUint(buf, dp, c.size);
+        else if (c.id === 0xE0) {
+          let vp = dp, ve = dp + c.size;
+          while (vp < ve) {
+            const vc = ebmlElem(buf, vp);
+            if (!vc || vc.size < 0 || vp + vc.hlen + vc.size > ve) break;
+            if (vc.id === 0xB0) t.w = ebmlUint(buf, vp + vc.hlen, vc.size);
+            else if (vc.id === 0xBA) t.h = ebmlUint(buf, vp + vc.hlen, vc.size);
+            vp += vc.hlen + vc.size;
+          }
+        } else if (c.id === 0xE1) {
+          let ap = dp, ae = dp + c.size;
+          while (ap < ae) {
+            const ac = ebmlElem(buf, ap);
+            if (!ac || ac.size < 0 || ap + ac.hlen + ac.size > ae) break;
+            if (ac.id === 0xB5) t.rate = Math.round(srvFloat(buf, ap + ac.hlen, ac.size)) || 48000;
+            else if (ac.id === 0x9F) t.ch = ebmlUint(buf, ap + ac.hlen, ac.size) || 2;
+            ap += ac.hlen + ac.size;
+          }
+        }
+        p += c.hlen + c.size;
+      }
+      t.subFmt = srvSubFmt(t.codec);
+      if (t.no) out.tracks.push(t);
+    }
+    pos += e.hlen + e.size;
+  }
+}
+function srvMkvHeader(buf) {
+  const out = { ok: false, tScaleNs: 1000000, durationMs: 0, segmentData: 0, cuesAt: 0, tracks: [] };
+  if (!(buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3)) return out;
+  let pos = 0, guard = 0;
+  while (pos + 4 <= buf.length && guard++ < 64) {
+    const e = ebmlElem(buf, pos);
+    if (!e) break;
+    if (e.id === 0x18538067) { out.segmentData = pos + e.hlen; break; }
+    if (e.size < 0 || pos + e.hlen + e.size > buf.length) break;
+    pos += e.hlen + e.size;
+  }
+  if (!out.segmentData) return out;
+  out.ok = true;
+  pos = out.segmentData;
+  guard = 0;
+  while (pos + 4 <= buf.length && guard++ < 512) {
+    const e = ebmlElem(buf, pos);
+    if (!e) break;
+    const p = pos + e.hlen;
+    const end = e.size < 0 ? buf.length : Math.min(p + e.size, buf.length);
+    if (e.id === 0x1549A966) srvMkvInfo(buf, p, end, out);
+    else if (e.id === 0x1654AE6B) srvMkvTracks(buf, p, end, out);
+    else if (e.id === 0x114D9B74) srvMkvSeekHead(buf, p, end, out);
+    else if (e.id === 0x1C53BB6B) { out.cuesAt = pos; break; }
+    if (e.size < 0 || p + e.size > buf.length) break;
+    pos = p + e.size;
+  }
+  return out;
+}
+async function srvMkvHead(tok, request) {
+  const up = await srvOrigin(tok, request, 0, SRV_HEAD_BYTES - 1, 12000);
+  if (!up) return null;
+  let head;
+  try { head = new Uint8Array(await up.res.arrayBuffer()); } catch (e) { return null; }
+  if (!head.length) return null;
+  const hdr = srvMkvHeader(head);
+  if (!hdr.ok) return null;
+  if (!hdr.tracks.length) {
+    /* Tracks بزرگ‌تر از سرِ خوانده‌شده بود؛ بازهٔ بزرگ‌تری خوانده می‌شود */
+    const up2 = await srvOrigin(tok, request, 0, 16 * 1024 * 1024 - 1, 15000);
+    if (up2) {
+      try {
+        const again = srvMkvHeader(new Uint8Array(await up2.res.arrayBuffer()));
+        if (again.tracks.length) return again;
+      } catch (e) { }
+    }
+  }
+  return hdr;
+}
+
+/* ── جدول Cues: آفست هر خوشه و زمانش (برای جهش سریع بدون خواندن کل فایل) ── */
+async function srvMkvCues(tok, request, hdr) {
+  if (!hdr || !hdr.cuesAt) return [];
+  const up = await srvOrigin(tok, request, hdr.cuesAt, hdr.cuesAt + SRV_CUES_BYTES - 1, 15000);
+  if (!up) return [];
+  let buf;
+  try { buf = new Uint8Array(await up.res.arrayBuffer()); } catch (e) { return []; }
+  const out = [];
+  /* بافر ممکن است از سرِ خودِ عنصر Cues شروع شود یا از عنصرهای قبل از آن؛
+     هر دو حالت پوشش داده می‌شود (به داخل Cues هم فرومی‌رویم). */
+  let pos = 0, guard = 0;
+  while (pos + 4 <= buf.length && guard++ < 10000) {
+    const e = ebmlElem(buf, pos);
+    if (!e) break;
+    if (e.id === 0x1C53BB6B) { pos += e.hlen; break; }
+    if (e.size < 0 || pos + e.hlen + e.size > buf.length) break;
+    pos += e.hlen + e.size;
+  }
+  guard = 0;
+  while (pos + 4 <= buf.length && guard++ < 100000) {
+    const e = ebmlElem(buf, pos);
+    if (!e) break;
+    if (e.id === 0xBB) {
+      let p = pos + e.hlen, pe = Math.min(p + e.size, buf.length), time = -1, at = -1;
+      while (p < pe) {
+        const c = ebmlElem(buf, p);
+        if (!c || c.size < 0 || p + c.hlen + c.size > pe) break;
+        if (c.id === 0xB3) time = ebmlUint(buf, p + c.hlen, c.size);
+        else if (c.id === 0xB7) {
+          let q = p + c.hlen, qe = p + c.hlen + c.size;
+          while (q < qe) {
+            const d = ebmlElem(buf, q);
+            if (!d || d.size < 0 || q + d.hlen + d.size > qe) break;
+            if (d.id === 0xF1 && at < 0) at = ebmlUint(buf, q + d.hlen, d.size);
+            q += d.hlen + d.size;
+          }
+        }
+        p += c.hlen + c.size;
+      }
+      if (time >= 0 && at >= 0) out.push({ t: Math.round(time * hdr.tScaleNs / 1e6), at: hdr.segmentData + at });
+    }
+    if (e.size < 0 || pos + e.hlen + e.size > buf.length) break;
+    pos += e.hlen + e.size;
+  }
+  out.sort(function (a, b) { return a.t - b.t; });
+  return out;
+}
+function srvClusterAt(cues, ms) {
+  if (!cues || !cues.length) return null;
+  let best = null;
+  for (let i = 0; i < cues.length; i++) { if (cues[i].t <= ms) best = cues[i]; else break; }
+  return best || cues[0];
+}
+
+/* ── بلاک MKV: شمارهٔ ترک، زمان نسبی، کلید، فریم‌ها ── */
+function srvSplitFrames(buf, pos, end, lacing) {
+  const frames = [];
+  let i;
+  if (lacing === 0) { if (end > pos) frames.push(buf.subarray(pos, end)); return frames; }
+  if (lacing === 1) { /* Xiph */
+    if (pos >= end) return frames;
+    const count = buf[pos];
+    let p = pos + 1;
+    const sizes = [];
+    for (i = 0; i < count; i++) {
+      let sz = 0, b;
+      do { if (p >= end) return frames; b = buf[p++]; sz += b; } while (b === 255);
+      sizes.push(sz);
+    }
+    let sum = 0;
+    for (i = 0; i < count; i++) sum += sizes[i];
+    sizes.push(Math.max(0, end - p - sum));
+    let off = p;
+    for (i = 0; i <= count; i++) { frames.push(buf.subarray(off, off + sizes[i])); off += sizes[i]; }
+    return frames;
+  }
+  if (lacing === 2) { /* EBML */
+    if (pos >= end) return frames;
+    const count = buf[pos];
+    let p = pos + 1, acc = 0;
+    const sizes = [];
+    const v0 = ebmlVint(buf, p, false);
+    if (!v0) return frames;
+    p += v0.hlen; acc = v0.v; sizes.push(acc);
+    for (i = 1; i < count; i++) {
+      const vd = ebmlVint(buf, p, false);
+      if (!vd) return frames;
+      p += vd.hlen;
+      let d = vd.v;
+      if (d >= Math.pow(2, 7 * vd.hlen - 1)) d -= Math.pow(2, 7 * vd.hlen);
+      acc += d; sizes.push(acc);
+    }
+    let sum = 0;
+    for (i = 0; i < count; i++) sum += sizes[i];
+    sizes.push(Math.max(0, end - p - sum));
+    let off = p;
+    for (i = 0; i <= count; i++) { if (off + sizes[i] > end) break; frames.push(buf.subarray(off, off + sizes[i])); off += sizes[i]; }
+    return frames;
+  }
+  /* Fixed-size lacing */
+  if (pos >= end) return frames;
+  const c = buf[pos];
+  const each = Math.floor((end - pos - 1) / (c + 1));
+  for (i = 0; i <= c; i++) frames.push(buf.subarray(pos + 1 + i * each, pos + 1 + (i + 1) * each));
+  return frames;
+}
+function srvMkvBlock(data) {
+  if (!data || !data.length) return null;
+  const tv = ebmlVint(data, 0, false);
+  if (!tv || tv.v <= 0) return null;
+  let p = tv.hlen;
+  if (p + 3 > data.length) return null;
+  let rel = (data[p] << 8) | data[p + 1];
+  if (rel > 32767) rel -= 65536;
+  const flags = data[p + 2];
+  p += 3;
+  return { track: tv.v, rel: rel, key: !!(flags & 0x80), frames: srvSplitFrames(data, p, data.length, (flags >> 1) & 3) };
+}
+
+const SRV_LEVEL1 = { 0x1F43B675: 1, 0x1549A966: 1, 0x1654AE6B: 1, 0x1C53BB6B: 1, 0x1043A770: 1, 0x1254C367: 1, 0x1941A469: 1, 0x114D9B74: 1 };
+
+function srvEmitBlock(payload, clusterTime, durTicks, cfg, tScaleNs, group) {
+  const blk = srvMkvBlock(payload);
+  if (!blk || !blk.frames.length) return;
+  if (cfg.want && !cfg.want(blk.track)) return;
+  const tMs = Math.round((clusterTime + blk.rel) * tScaleNs / 1e6);
+  const durMs = durTicks > 0 ? Math.round(durTicks * tScaleNs / 1e6) : 0;
+  if (cfg.onBlock) cfg.onBlock({ track: blk.track, time: tMs, durMs: durMs, key: blk.key, frames: blk.frames, group: !!group });
+}
+
+/* ── پیمایش جریانی MKV ──
+   cfg = { inside, oneCluster, want(no), onBlock(block), onCluster(offset),
+           maxBytes, ms, tScaleNs }                                           */
+async function srvMkvWalk(rd, cfg) {
+  const maxBytes = cfg.maxBytes || SRV_SUB_BYTES;
+  const deadline = Date.now() + (cfg.ms || SRV_SUB_MS);
+  const startAt = rd.offset;
+  const tScaleNs = cfg.tScaleNs || 1000000;
+  let blocks = 0;
+  let done = false;
+  let budget = false;
+  let pending = null;
+
+  function overBudget() {
+    if (rd.offset - startAt >= maxBytes) { budget = true; return true; }
+    if (Date.now() > deadline) { budget = true; return true; }
+    if (blocks > 500000) { budget = true; return true; }
+    return false;
+  }
+  async function nextElem() {
+    if (pending) { const e = pending; pending = null; return e; }
+    return await rd.elem();
+  }
+  if (!cfg.inside) {
+    let guard = 0;
+    while (guard++ < 64) {
+      const e = await rd.elem();
+      if (!e) return { done: true, budget: false, at: rd.offset };
+      if (e.id === 0x18538067) break;
+      if (e.size > 0) await rd.drop(e.size);
+    }
+  }
+  while (!overBudget()) {
+    const e = await nextElem();
+    if (!e) { done = true; break; }
+    const p = rd.offset;
+    const known = e.size >= 0;
+    if (e.id !== 0x1F43B675) {
+      if (known) await rd.drop(e.size);
+      else {
+        const nx = await rd.elem();
+        if (!nx) { done = true; break; }
+        if (SRV_LEVEL1[nx.id]) pending = nx; else if (nx.size > 0) await rd.drop(nx.size);
+      }
+      continue;
+    }
+    /* ── خوشه ── */
+    if (cfg.onCluster) cfg.onCluster(p);
+    let clusterTime = 0;
+    const clEnd = known ? p + e.size : -1;
+    while (!overBudget()) {
+      if (clEnd >= 0 && rd.offset >= clEnd) break;
+      const c = await nextElem();
+      if (!c) { done = true; break; }
+      if (SRV_LEVEL1[c.id]) { pending = c; break; }
+      if (c.id === 0xE7) {
+        const d = await rd.take(c.size);
+        clusterTime = 0;
+        for (let i = 0; i < d.length; i++) clusterTime = clusterTime * 256 + d[i];
+        continue;
+      }
+      if (c.id === 0xA3) { /* SimpleBlock */
+        blocks++;
+        await srvMkvSimple(rd, c.size, clusterTime, cfg, tScaleNs);
+        continue;
+      }
+      if (c.id === 0xA0) { /* BlockGroup (mkvmerge زیرنویس را این‌جا می‌گذارد) */
+        blocks++;
+        if (c.size > 0 && c.size <= SRV_BLOCK_MAX) {
+          const data = await rd.take(c.size);
+          let q = 0, dur = 0, blk = null;
+          while (q < data.length) {
+            const g = ebmlElem(data, q);
+            if (!g || g.size < 0 || q + g.hlen + g.size > data.length) break;
+            if (g.id === 0xA1 && !blk) blk = data.subarray(q + g.hlen, q + g.hlen + g.size);
+            else if (g.id === 0x9B) dur = ebmlUint(data, q + g.hlen, g.size);
+            q += g.hlen + g.size;
+          }
+          if (blk) srvEmitBlock(blk, clusterTime, dur, cfg, tScaleNs, true);
+        } else if (c.size > 0) await rd.drop(c.size);
+        continue;
+      }
+      if (c.size > 0) await rd.drop(c.size);
+    }
+    if (done) break;
+    if (cfg.oneCluster) return { done: false, budget: budget, at: rd.offset };
+  }
+  return { done: done && !budget, budget: budget, at: rd.offset };
+}
+async function srvMkvSimple(rd, size, clusterTime, cfg, tScaleNs) {
+  if (!(size > 0) || size > SRV_BLOCK_MAX) { if (size > 0) await rd.drop(size); return; }
+  const head = await rd.take(Math.min(size, 16));
+  const need = size - head.length;
+  const look = srvMkvBlock(head);
+  if (!look) { if (need > 0) await rd.drop(need); return; }
+  const want = cfg.want ? !!cfg.want(look.track) : false;
+  let payload = head;
+  if (need > 0) {
+    if (want) {
+      const rest = await rd.take(need);
+      payload = new Uint8Array(head.length + rest.length);
+      payload.set(head, 0); payload.set(rest, head.length);
+    } else { await rd.drop(need); return; }
+  }
+  if (!want) return;
+  srvEmitBlock(payload, clusterTime, 0, cfg, tScaleNs, false);
+}
+
+/* ── تبدیل متن زیرنویس داخلی به متن مناسب WebVTT ── */
+function srvAssText(text) {
+  let s = String(text || '');
+  const i = s.indexOf('Dialogue:');
+  if (i >= 0) {
+    const rest = s.slice(i + 9);
+    const parts = rest.split(',');
+    s = parts.length > 9 ? parts.slice(9).join(',') : (parts.length > 8 ? parts.slice(8).join(',') : rest);
+  }
+  s = s.replace(/\{[^}]*\}/g, '').replace(/\\N/gi, '\n').replace(/\\h/g, ' ');
+  return s.replace(/[ \t]+$/gm, '').replace(/^\s+|\s+$/g, '');
+}
+function srvCueText(fmt, bytes) {
+  let text = '';
+  try { text = new TextDecoder('utf-8').decode(bytes); } catch (e) { text = ''; }
+  text = text.replace(/\uFEFF/g, '').replace(/\r\n?/g, '\n');
+  if (fmt === 'ass') text = srvAssText(text);
+  else if (fmt === 'vtt' && /^WEBVTT/i.test(text)) text = text.replace(/^WEBVTT[^\n]*\n/, '');
+  text = text.replace(/^\s*\d+\s*\n/, '');   /* شمارهٔ کیوی SRT */
+  text = text.replace(/-->/g, '→');           /* --> در متن کیو مجاز نیست */
+  return text.replace(/\n{3,}/g, '\n\n').replace(/^\s+|\s+$/g, '');
+}
+function srvVttTime(ms) {
+  const t = Math.max(0, Math.round(ms));
+  const h = Math.floor(t / 3600000), m = Math.floor((t % 3600000) / 60000), s = Math.floor((t % 60000) / 1000), f = t % 1000;
+  return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s + '.' + (f < 100 ? (f < 10 ? '00' : '0') : '') + f;
+}
+function srvCuesToVtt(cues) {
+  const list = cues.slice().sort(function (a, b) { return a.s - b.s || a.e - b.e; });
+  let out = 'WEBVTT\n\n';
+  for (const c of list) {
+    const text = String(c.t || '').trim();
+    if (!text || !(c.e > c.s)) continue;
+    out += srvVttTime(c.s) + ' --> ' + srvVttTime(c.e) + '\n' + text + '\n\n';
+  }
+  return out;
+}
+function srvCuePush(cues, s, e, text) {
+  if (!text || cues.length >= SRV_SUB_CUES) return false;
+  for (let i = cues.length - 1; i >= 0 && i > cues.length - 6; i--) if (cues[i].s === s && cues[i].t === text) return false;
+  let lo = 0, hi = cues.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (cues[mid].s < s) lo = mid + 1; else hi = mid; }
+  cues.splice(lo, 0, { s: s, e: e, t: text });
+  return true;
+}
+
+/* ── کش زیرنویس (حافظه + KV) ── */
+async function srvSubKey(tok, track) {
+  const raw = String(tok.u || '') + '|' + track;
+  try {
+    const d = await crypto.subtle.digest('SHA-256', enc.encode('mvx-srv-sub|' + raw));
+    return 'svtt:' + Array.from(new Uint8Array(d).slice(0, 12)).map(function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+  } catch (e) {
+    return 'svtt:' + raw.length + ':' + raw.slice(-48).replace(/[^a-z0-9]/gi, '');
+  }
+}
+function srvSubMemGet(key) {
+  const v = srvSubMem.get(key);
+  if (!v) return null;
+  if (Date.now() - v.at > SRV_SUB_TTL * 1000) { srvSubMem.delete(key); return null; }
+  return v;
+}
+function srvSubMemSet(key, val) {
+  val.at = Date.now();
+  srvSubMem.set(key, val);
+  while (srvSubMem.size > SRV_SUB_MEM) srvSubMem.delete(srvSubMem.keys().next().value);
+}
+async function srvSubCacheGet(store, key) {
+  const mem = srvSubMemGet(key);
+  if (mem) return mem;
+  let rec = null;
+  try { rec = await store.get(key); } catch (e) { rec = null; }
+  if (!rec || !Array.isArray(rec.cues)) return null;
+  const val = { cues: rec.cues, done: !!rec.done, resumeAt: Number(rec.resumeAt) || 0, from: Number(rec.from) || 0, at: Number(rec.at) || Date.now() };
+  srvSubMemSet(key, val);
+  return val;
+}
+async function srvSubCachePut(store, key, val) {
+  srvSubMemSet(key, val);
+  if (JSON.stringify(val.cues).length > 3 * 1024 * 1024) return;
+  const rec = { cues: val.cues, done: !!val.done, resumeAt: val.resumeAt || 0, from: val.from || 0, at: Date.now() };
+  try { await store.set(key, rec, SRV_SUB_TTL); } catch (e) { }
+}
+
+/* ── استخراج زیرنویس داخلی MKV ── */
+async function srvMkvSubs(ctx) {
+  const { tok, request, store, key, hdr, track, fromSec } = ctx;
+  const trk = hdr.tracks.filter(function (t) { return t.no === track; })[0];
+  if (!trk) return { error: srvFail(404, 'track', 'این ترک زیرنویس در فایل نیست') };
+  if (!trk.subFmt || trk.subFmt === 'bitmap') return { error: srvFail(415, 'bitmap', 'این زیرنویس تصویری است (مثل PGS) و به WebVTT تبدیل نمی‌شود') };
+  if (trk.subFmt === 'text') return { error: srvFail(415, 'format', 'قالب این زیرنویس پشتیبانی نمی‌شود') };
+
+  const cached = await srvSubCacheGet(store, key);
+  const fromMs = Math.max(0, Math.round((Number(fromSec) || 0) * 1000));
+  let cues = cached && Array.isArray(cached.cues) ? cached.cues.slice() : [];
+  const lastCue = cues.length ? cues[cues.length - 1].e : 0;
+
+  if (cached && cached.done) return { vtt: srvCuesToVtt(cues), partial: false, from: 0, track: track, cues: cues.length };
+  /* همان بازه قبلاً خوانده شده و اسکن قبلی به بن‌بست نخورده است */
+  if (cached && cues.length && !cached.resumeAt && fromMs <= lastCue) {
+    return { vtt: srvCuesToVtt(cues), partial: true, from: 0, track: track, cues: cues.length };
+  }
+
+  let startAt = 0;
+  let scannedFrom = 0;
+  if (cached && cached.resumeAt > 0 && cached.cues && cached.cues.length) { startAt = cached.resumeAt; scannedFrom = cached.from || 0; }
+  else if (fromMs > 0) {
+    const idx = await srvMkvCues(tok, request, hdr);
+    const cl = srvClusterAt(idx, fromMs);
+    if (cl) { startAt = cl.at; scannedFrom = cl.t; }
+  }
+  if (!startAt) { cues = []; scannedFrom = 0; }
+
+  const rd = await srvOpenStream(tok, request, startAt, 25000);
+  if (!rd) return { error: srvFail(502, 'upstream', 'مبدأ فایل پاسخ نداد') };
+  let lastCluster = startAt;
+  const walk = await srvMkvWalk(rd, {
+    inside: startAt > 0,
+    tScaleNs: hdr.tScaleNs,
+    maxBytes: SRV_SUB_BYTES,
+    ms: SRV_SUB_MS,
+    want: function (no) { return no === track; },
+    onCluster: function (at) { lastCluster = at; },
+    onBlock: function (b) {
+      for (const frame of b.frames) {
+        if (!frame.length) continue;
+        const text = srvCueText(trk.subFmt, frame);
+        if (!text) continue;
+        const dur = b.durMs > 0 ? b.durMs : 0;
+        srvCuePush(cues, Math.max(0, b.time), b.time + (dur || 2000), text);
+      }
+    },
+  });
+  try { await rd.close(); } catch (e) { }
+
+  cues.sort(function (a, b) { return a.s - b.s; });
+  /* کیوی بدون BlockDuration: تا شروع کیوی بعدی (نه بیشتر از ۷ ثانیه) */
+  for (let i = 0; i < cues.length; i++) {
+    if (!(cues[i].e > cues[i].s + 1)) cues[i].e = cues[i].s + 2000;
+    const nx = cues[i + 1];
+    if (nx && cues[i].e > nx.s) cues[i].e = Math.max(cues[i].s + 400, nx.s - 1);
+    if (cues[i].e > cues[i].s + 7000) cues[i].e = cues[i].s + 7000;
+  }
+  const partial = !walk.done;
+  const out = { cues: cues, done: !partial, resumeAt: partial ? Math.max(lastCluster, startAt + 1) : 0, from: scannedFrom };
+  await srvSubCachePut(store, key, out);
+  return { vtt: srvCuesToVtt(cues), partial: partial, from: scannedFrom, track: track, cues: cues.length };
+}
+
+/* ── استخراج زیرنویس داخلی MP4 (tx3g / wvtt) ── */
+function srvMp4Boxes(buf, start, end) {
+  const out = [];
+  let pos = start, guard = 0;
+  while (pos + 8 <= end && guard++ < 8000) {
+    let size = (buf[pos] * 0x1000000) + (buf[pos + 1] << 16) + (buf[pos + 2] << 8) + buf[pos + 3];
+    const type = String.fromCharCode(buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]);
+    let hdr = 8;
+    if (size === 1 && pos + 16 <= end) { size = ebmlUint(buf, pos + 8, 8); hdr = 16; }
+    if (size === 0) size = end - pos;
+    if (size < hdr || pos + size > end) break;
+    out.push({ type: type, start: pos, body: pos + hdr, end: pos + size, size: size });
+    pos += size;
+  }
+  return out;
+}
+function srvMp4Find(buf, start, end, type) {
+  return srvMp4Boxes(buf, start, end).filter(function (b) { return b.type === type; })[0] || null;
+}
+function srvMp4Tx3gText(data) {
+  if (!data || data.length < 2) return '';
+  const len = (data[0] << 8) | data[1];
+  let s = '';
+  try { s = new TextDecoder('utf-8').decode(data.subarray(2, Math.min(data.length, 2 + len))); } catch (e) { s = ''; }
+  return s.replace(/<[^>]+>/g, '').replace(/\r/g, '').trim();
+}
+function srvMp4VttText(data) {
+  let p = 0;
+  while (p + 8 <= data.length) {
+    const size = (data[p] * 0x1000000) + (data[p + 1] << 16) + (data[p + 2] << 8) + data[p + 3];
+    const type = String.fromCharCode(data[p + 4], data[p + 5], data[p + 6], data[p + 7]);
+    if (size < 8 || p + size > data.length) break;
+    if (type === 'vttc') {
+      let q = p + 8, out = '';
+      while (q + 8 <= p + size) {
+        const s2 = (data[q] * 0x1000000) + (data[q + 1] << 16) + (data[q + 2] << 8) + data[q + 3];
+        const t2 = String.fromCharCode(data[q + 4], data[q + 5], data[q + 6], data[q + 7]);
+        if (s2 < 8 || q + s2 > p + size) break;
+        if (t2 === 'payl') { try { out += new TextDecoder('utf-8').decode(data.subarray(q + 8, q + s2)); } catch (e) { } }
+        q += s2;
+      }
+      if (out) return out.replace(/\r/g, '').trim();
+    }
+    p += size;
+  }
+  return '';
+}
+async function srvMp4Subs(ctx) {
+  const { tok, request, store, key, track } = ctx;
+  const cached = await srvSubCacheGet(store, key);
+  if (cached && cached.done) return { vtt: srvCuesToVtt(cached.cues), partial: false, from: 0, track: track, cues: cached.cues.length };
+
+  /* moov: معمولاً سر فایل؛ اگر نبود، پنجرهٔ ته فایل */
+  let moovBuf = null, moov = null;
+  const up = await srvOrigin(tok, request, 0, SRV_HEAD_BYTES - 1, 15000);
+  if (up) {
+    try {
+      const head = new Uint8Array(await up.res.arrayBuffer());
+      const box = srvMp4Find(head, 0, head.length, 'moov');
+      if (box) { moovBuf = head; moov = box; }
+    } catch (e) { }
+  }
+  if (!moov) {
+    const up2 = await srvOrigin(tok, request, 0, null, 15000, 'bytes=-' + (8 * 1024 * 1024));
+    if (!up2) return { error: srvFail(502, 'moov', 'سر/ته فایل خوانده نشد') };
+    let tail;
+    try { tail = new Uint8Array(await up2.res.arrayBuffer()); } catch (e) { return { error: srvFail(502, 'moov', 'ته فایل خوانده نشد') }; }
+    const box = srvMp4Find(tail, 0, tail.length, 'moov');
+    if (box) { moovBuf = tail; moov = box; }
+  }
+  if (!moov) return { error: srvFail(415, 'moov', 'جدول نمونه‌های MP4 پیدا نشد') };
+
+  const tracks = [];
+  for (const trak of srvMp4Boxes(moovBuf, moov.body, moov.end)) {
+    if (trak.type !== 'trak') continue;
+    const tkhd = srvMp4Find(moovBuf, trak.body, trak.end, 'tkhd');
+    const mdia = srvMp4Find(moovBuf, trak.body, trak.end, 'mdia');
+    if (!tkhd || !mdia) continue;
+    const id = ebmlUint(moovBuf, tkhd.body + (moovBuf[tkhd.body] === 1 ? 20 : 12), 4);
+    const mdhd = srvMp4Find(moovBuf, mdia.body, mdia.end, 'mdhd');
+    const hdlr = srvMp4Find(moovBuf, mdia.body, mdia.end, 'hdlr');
+    const minf = srvMp4Find(moovBuf, mdia.body, mdia.end, 'minf');
+    const stbl = minf ? srvMp4Find(moovBuf, minf.body, minf.end, 'stbl') : null;
+    if (!mdhd || !hdlr || !stbl) continue;
+    const timescale = ebmlUint(moovBuf, mdhd.body + (moovBuf[mdhd.body] === 1 ? 20 : 12), 4) || 1000;
+    const handler = String.fromCharCode(moovBuf[hdlr.body + 8], moovBuf[hdlr.body + 9], moovBuf[hdlr.body + 10], moovBuf[hdlr.body + 11]);
+    if (handler !== 'text' && handler !== 'sbtl' && handler !== 'subp') continue;
+    const stsd = srvMp4Find(moovBuf, stbl.body, stbl.end, 'stsd');
+    let codec = '';
+    if (stsd) {
+      const entryAt = stsd.body + 8;
+      if (entryAt + 8 <= stsd.end) codec = String.fromCharCode(moovBuf[entryAt + 4], moovBuf[entryAt + 5], moovBuf[entryAt + 6], moovBuf[entryAt + 7]);
+    }
+    tracks.push({ id: id, codec: codec, timescale: timescale, stbl: stbl });
+  }
+  let trk = tracks.filter(function (t) { return t.id === track; })[0];
+  if (!trk && tracks.length === 1) trk = tracks[0];
+  if (!trk) return { error: srvFail(404, 'track', 'این ترک زیرنویس در فایل نیست') };
+  if (trk.codec !== 'tx3g' && trk.codec !== 'wvtt' && trk.codec !== 'text') {
+    return { error: srvFail(415, 'bitmap', 'این زیرنویس تصویری است (مثل PGS) و به WebVTT تبدیل نمی‌شود') };
+  }
+
+  const b = moovBuf;
+  const get = function (type) { return srvMp4Find(b, trk.stbl.body, trk.stbl.end, type); };
+  const stts = get('stts'), stsc = get('stsc'), stsz = get('stsz'), stco = get('stco'), co = get('co64');
+  if (!stts || !stsc || !stsz || (!stco && !co)) return { error: srvFail(415, 'samples', 'جدول نمونه‌های این زیرنویس خوانده نشد') };
+  const fixed = ebmlUint(b, stsz.body + 4, 4);
+  const count = Math.min(200000, ebmlUint(b, stsz.body + 8, 4));
+  const sizes = [];
+  for (let i = 0; i < count; i++) sizes.push(fixed || ebmlUint(b, stsz.body + 12 + i * 4, 4));
+  const times = [];
+  const sttsN = Math.min(200000, ebmlUint(b, stts.body + 4, 4));
+  let tAcc = 0;
+  for (let i = 0; i < sttsN; i++) {
+    const c = ebmlUint(b, stts.body + 8 + i * 8, 4), d = ebmlUint(b, stts.body + 12 + i * 8, 4);
+    for (let k = 0; k < c && times.length < count + 1; k++) { times.push(tAcc); tAcc += d; }
+  }
+  /* زمان پایان آخرین نمونه (پایان کل جدول) برای مدت کیوی آخر */
+  if (times.length < count + 1) times.push(tAcc);
+  const offsets = [];
+  if (co) {
+    const n = Math.min(200000, ebmlUint(b, co.body + 4, 4));
+    for (let i = 0; i < n; i++) offsets.push(ebmlUint(b, co.body + 8 + i * 8, 8));
+  } else {
+    const n = Math.min(200000, ebmlUint(b, stco.body + 4, 4));
+    for (let i = 0; i < n; i++) offsets.push(ebmlUint(b, stco.body + 8 + i * 4, 4));
+  }
+  const runs = [];
+  const stscN = Math.min(20000, ebmlUint(b, stsc.body + 4, 4));
+  for (let i = 0; i < stscN; i++) {
+    runs.push({ first: ebmlUint(b, stsc.body + 8 + i * 12, 4), per: ebmlUint(b, stsc.body + 12 + i * 12, 4) });
+  }
+  if (!runs.length || !offsets.length) return { error: srvFail(415, 'samples', 'این زیرنویس نمونه‌ای ندارد') };
+
+  const cues = cached && Array.isArray(cached.cues) ? cached.cues.slice() : [];
+  /* نمونه‌های زیرنویس به هم چسبیده‌اند؛ به‌جای یک درخواست برای هر chunk،
+     چند chunk پشت‌سرهم را در یک بازهٔ ۴ مگابایتی می‌خوانیم. این هم سهمیهٔ
+     subrequest اکانت رایگان Cloudflare (۵۰ درخواست در هر اجرا) را نگه می‌دارد
+     و هم تأخیر استخراج را چند برابر کم می‌کند. */
+  const BATCH = 4 * 1024 * 1024;
+  const perOf = function (ci) {
+    let per = runs[0].per;
+    for (const r of runs) if (r.first - 1 <= ci) per = r.per;
+    return Math.max(1, per);
+  };
+  let si = 0, ci = 0, fetches = 0;
+  while (ci < offsets.length && fetches < SRV_MP4_FETCH_MAX) {
+    const items = [];
+    let bStart = -1, bEnd = -1;
+    while (ci < offsets.length && items.length < 4000) {
+      const per = perOf(ci);
+      let len = 0;
+      for (let k = 0; k < per; k++) len += sizes[si + k] || 0;
+      if (!len) { si += per; ci++; continue; }
+      const off = offsets[ci];
+      if (items.length && off + len - bStart > BATCH) break;
+      items.push({ off: off, len: len, per: per, si: si });
+      if (bStart < 0 || off < bStart) bStart = off;
+      if (off + len > bEnd) bEnd = off + len;
+      si += per; ci++;
+    }
+    if (!items.length) break;
+    fetches++;
+    const cu = await srvOrigin(tok, request, bStart, bEnd - 1, 15000);
+    if (!cu) break;
+    let data;
+    try { data = new Uint8Array(await cu.res.arrayBuffer()); } catch (e) { break; }
+    /* مبدأای که Range را نادیده گرفته داده را از صفر فرستاده است */
+    if (cu.skip && data.length > cu.skip) data = data.subarray(cu.skip);
+    for (const it of items) {
+      let off = it.off - bStart;
+      for (let k = 0; k < it.per; k++) {
+        const size = sizes[it.si + k] || 0;
+        if (!size) continue;
+        const bytes = data.subarray(off, off + size);
+        off += size;
+        const st = times[it.si + k] || 0;
+        const en = times[it.si + k + 1] != null ? times[it.si + k + 1] : st + Math.round(trk.timescale / 2);
+        const sMs = Math.round(st / trk.timescale * 1000);
+        const eMs = Math.round(en / trk.timescale * 1000);
+        const text = trk.codec === 'wvtt' ? srvMp4VttText(bytes) : srvMp4Tx3gText(bytes);
+        if (text) srvCuePush(cues, sMs, Math.max(sMs + 400, eMs), text);
+      }
+    }
+  }
+  const done = fetches < SRV_MP4_FETCH_MAX;
+  await srvSubCachePut(store, key, { cues: cues, done: done, resumeAt: 0, from: 0 });
+  return { vtt: srvCuesToVtt(cues), partial: !done, from: 0, track: track, cues: cues.length };
+}
+
+/* ═══════════════ مسیر ۱: فهرست ترک‌ها ═══════════════ */
+/* کدهای سه‌حرفی ISO 639-2 (که MKV در Language می‌نویسد) → BCP-47 دوحرفی؛
+   <track srclang> باید برچسب استاندارد مرورگر باشد (fas ✗ / fa ✓). */
+const SRV_LANG3 = {
+  fas: 'fa', per: 'fa', prs: 'fa', eng: 'en', ara: 'ar', tur: 'tr', deu: 'de', ger: 'de', fra: 'fr', fre: 'fr',
+  spa: 'es', ita: 'it', rus: 'ru', hin: 'hi', urd: 'ur', por: 'pt', jpn: 'ja', kor: 'ko', zho: 'zh', chi: 'zh',
+  nld: 'nl', dut: 'nl', pol: 'pl', swe: 'sv', heb: 'he', ell: 'el', gre: 'el', ukr: 'uk', aze: 'az', kur: 'ku',
+  ces: 'cs', cze: 'cs', dan: 'da', fin: 'fi', nor: 'no', ron: 'ro', rum: 'ro', hun: 'hu', bul: 'bg', srp: 'sr',
+  hrv: 'hr', slk: 'sk', slo: 'sk', tha: 'th', vie: 'vi', ind: 'id', msa: 'ms', may: 'ms', ben: 'bn', tam: 'ta',
+  tel: 'te', mal: 'ml', kan: 'kn', mar: 'mr', guj: 'gu', pan: 'pa', sin: 'si', nep: 'ne', kat: 'ka', hye: 'hy',
+  arm: 'hy', eus: 'eu', baq: 'eu', glg: 'gl', cat: 'ca', lit: 'lt', lav: 'lv', est: 'et', slv: 'sl', bel: 'be',
+  tuk: 'tk', uzb: 'uz', kaz: 'kk', tgk: 'tg', pus: 'ps', snd: 'sd', ckb: 'ckb',
+};
+function srvLangOf(lg) {
+  const s = String(lg || '').toLowerCase().trim().split(/[-_]/)[0].slice(0, 8);
+  if (!s || s === 'und' || s === 'unknown' || s === 'mul') return 'fa';
+  if (s.length === 3) return SRV_LANG3[s] || s;
+  return s;
+}
+function srvTrackLabel(name, lang, no, fallback) {
+  const nm = String(name || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 60);
+  const lg = subLangName(lang) || '';
+  if (nm && lg && nm !== lg) return nm + ' - [' + lg + ']';
+  if (nm) return nm;
+  if (lg) return fallback + ' - [' + lg + ']';
+  return fallback + ' ' + (Number(no) || '');
+}
+async function apiStreamTracks(store, request, url) {
+  const t = await srvTokenLoad(store, url, request);
+  if (t.res) return t.res;
+  const tok = t.tok;
+  const probe = await streamProbeTracks(tok.u);
+  let container = (probe && probe.container) || '';
+  if (!container) {
+    try { container = /\.mkv($|\?)/i.test(String(tok.u)) ? 'mkv' : 'mp4'; } catch (e) { container = ''; }
+  }
+  const subUrl = function (no) { return '/api/stream/sub?t=' + t.token + '&track=' + no; };
+  const out = {
+    ok: true,
+    container: container,
+    duration: 0,
+    tracks: { video: [], audio: [], subs: [] },
+    remux: { ok: false, reason: 'این فایل برای پخش، remux لازم ندارد' },
+    probe: !!probe,
+  };
+  if (!probe) {
+    return srvJson({ ok: false, code: 'probe', error: 'فرادادهٔ فایل خوانده نشد', container: container, tracks: out.tracks }, 502);
+  }
+  if (container === 'mkv') {
+    const hdr = await srvMkvHead(tok, request);
+    if (hdr) {
+      out.duration = Math.round((hdr.durationMs || 0) / 1000);
+      for (const tr of hdr.tracks) {
+        if (tr.type === 1) {
+          out.tracks.video.push({ no: tr.no, codec: tr.codec, width: tr.w, height: tr.h, label: srvTrackLabel(tr.name, tr.lang, tr.no, 'ویدئو') });
+        } else if (tr.type === 2) {
+          out.tracks.audio.push({
+            no: tr.no, codec: tr.codec, lang: srvLangOf(tr.lang), srclang: srvLangOf(tr.lang),
+            channels: tr.ch, rate: tr.rate, label: srvTrackLabel(tr.name, tr.lang, tr.no, 'صدا'),
+            /* در پخش سروری فقط صدایی قابل تعویض است که remux آن را می‌سازد */
+            ok: !!srvCodecOf(tr),
+          });
+        } else if (tr.type === 0x11) {
+          out.tracks.subs.push({
+            no: tr.no, codec: tr.codec, fmt: tr.subFmt || 'bitmap',
+            lang: srvLangOf(tr.lang), srclang: srvLangOf(tr.lang),
+            label: srvTrackLabel(tr.name, tr.lang, tr.no, 'زیرنویس'),
+            supported: !!tr.subFmt && tr.subFmt !== 'bitmap' && tr.subFmt !== 'text',
+            src: subUrl(tr.no),
+          });
+        }
+      }
+    }
+    const plan = srvRemuxPlan(hdr, probe);
+    out.remux = { ok: plan.ok, reason: plan.reason || '', src: '/api/stream/remux?t=' + t.token, audio: (out.tracks.audio || []).map(function (a) { return a.no; }) };
+  } else {
+    for (const a of (probe.audio || [])) {
+      out.tracks.audio.push({ no: a.no, codec: a.codec, lang: srvLangOf(a.lang), srclang: srvLangOf(a.lang), label: srvTrackLabel(a.name, a.lang, a.no, 'صدا') });
+    }
+    for (const s of (probe.subs || [])) {
+      const fmt = s.fmt || '';
+      const sup = fmt === 'tx3g' || fmt === 'wvtt' || fmt === 'text' || fmt === 'vtt';
+      out.tracks.subs.push({
+        no: s.no, codec: s.codec || fmt, fmt: fmt,
+        lang: srvLangOf(s.lang), srclang: srvLangOf(s.lang),
+        label: srvTrackLabel(s.name, s.lang, s.no, 'زیرنویس'),
+        supported: sup, src: sup ? subUrl(s.no) : '',
+      });
+    }
+    for (const v of (probe.videoTracks || [])) {
+      out.tracks.video.push({ no: v.no, codec: v.codec, width: v.w || 0, height: v.h || 0, label: 'ویدئو' });
+    }
+  }
+  return srvJson(out);
+}
+
+/* ═══════════════ مسیر ۲: زیرنویس WebVTT ═══════════════ */
+async function apiStreamSub(store, request, url) {
+  const t = await srvTokenLoad(store, url, request);
+  if (t.res) return t.res;
+  const tok = t.tok;
+  const rawTrack = String(url.searchParams.get('track') || url.searchParams.get('n') || '').trim();
+  const digits = streamDigits(rawTrack);
+  if (!/^\d{1,5}$/.test(digits)) return srvFail(400, 'track', 'شمارهٔ ترک لازم است (track=…)');
+  const track = Number(digits);
+  if (!isFinite(track) || track < 1 || track > 65535) return srvFail(400, 'track', 'شمارهٔ ترک لازم است (track=…)');
+  const fromSec = Math.max(0, Math.min(60 * 60 * 12, Number(streamDigits(url.searchParams.get('from') || '')) || 0));
+  const probe = await streamProbeTracks(tok.u);
+  if (!probe) return srvFail(502, 'probe', 'فرادادهٔ فایل خوانده نشد');
+  const key = await srvSubKey(tok, track);
+  let out = null;
+  if (probe.container === 'mkv') {
+    const hdr = await srvMkvHead(tok, request);
+    if (!hdr) return srvFail(502, 'header', 'سر فایل MKV خوانده نشد');
+    out = await srvMkvSubs({ tok: tok, request: request, store: store, key: key, hdr: hdr, track: track, fromSec: fromSec });
+  } else if (probe.container === 'mp4') {
+    out = await srvMp4Subs({ tok: tok, request: request, store: store, key: key, track: track, fromSec: fromSec });
+  } else {
+    return srvFail(415, 'container', 'این کانتینر زیرنویس داخلی ندارد');
+  }
+  if (!out || out.error) return out && out.error ? out.error : srvFail(500, 'internal', 'استخراج زیرنویس ممکن نشد');
+  const h = srvHdr({
+    'content-type': 'text/vtt; charset=utf-8',
+    'x-mvx-track': String(track),
+    'x-mvx-partial': out.partial ? '1' : '0',
+    'x-mvx-from': String(Math.round(out.from || 0)),
+    'x-mvx-cues': String(out.cues || 0),
+    'access-control-allow-origin': request.headers.get('origin') || '*',
+    'access-control-expose-headers': 'x-mvx-partial, x-mvx-from, x-mvx-cues',
+  });
+  if (request.method === 'HEAD') return new Response(null, { status: 200, headers: h });
+  return new Response(out.vtt || 'WEBVTT\n\n', { status: 200, headers: h });
+}
+
+/* ═══════════════ مسیر ۳: MKV → fMP4 (remux) ═══════════════ */
+function srvU16(n) { return new Uint8Array([(n >> 8) & 255, n & 255]); }
+function srvU32(n) { n = Number(n) || 0; return new Uint8Array([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]); }
+function srvU64(n) { n = Number(n) || 0; return srvCat([srvU32(Math.floor(n / 4294967296)), srvU32(n % 4294967296)]); }
+function srvAsc(s) { const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 255; return a; }
+function srvCat(parts) {
+  let n = 0;
+  for (const p of parts) n += p.length;
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+function srvBox(type, parts) {
+  const body = srvCat(parts || []);
+  return srvCat([srvU32(body.length + 8), srvAsc(type), body]);
+}
+function srvFull(type, ver, flags, parts) {
+  return srvBox(type, [new Uint8Array([ver || 0, ((flags || 0) >>> 16) & 255, ((flags || 0) >>> 8) & 255, (flags || 0) & 255])].concat(parts || []));
+}
+function srvMatrix() {
+  return srvCat([srvU32(0x00010000), srvU32(0), srvU32(0), srvU32(0), srvU32(0x00010000), srvU32(0), srvU32(0), srvU32(0), srvU32(0x40000000)]);
+}
+function srvDescLen(n) {
+  if (n < 128) return new Uint8Array([n]);
+  const bytes = [];
+  let v = n;
+  while (v > 0) { bytes.unshift(v & 0x7f); v = Math.floor(v / 128); }
+  for (let i = 0; i < bytes.length - 1; i++) bytes[i] |= 0x80;
+  return new Uint8Array(bytes);
+}
+const SRV_CODECS = {
+  'V_MPEG4/ISO/AVC': { kind: 'video', entry: 'avc1', cfg: 'avcC' },
+  'V_MPEGH/ISO/HEVC': { kind: 'video', entry: 'hvc1', cfg: 'hvcC' },
+  'V_AV1': { kind: 'video', entry: 'av01', cfg: 'av1C' },
+  'A_AAC': { kind: 'audio', entry: 'mp4a', cfg: 'esds' },
+  'A_OPUS': { kind: 'audio', entry: 'Opus', cfg: 'dOps' },
+  'A_AC3': { kind: 'audio', entry: 'ac-3', cfg: 'dac3' },
+  'A_EAC3': { kind: 'audio', entry: 'ec-3', cfg: 'dec3' },
+  'A_FLAC': { kind: 'audio', entry: 'fLaC', cfg: 'dfLa' },
+  'A_MPEG/L3': { kind: 'audio', entry: '.mp3', cfg: '' },
+};
+function srvCodecOf(tr) {
+  const c = String((tr && tr.codec) || '');
+  if (SRV_CODECS[c]) return SRV_CODECS[c];
+  if (c.indexOf('A_AAC') === 0) return SRV_CODECS['A_AAC'];
+  return null;
+}
+function srvRemuxPlan(hdr, probe) {
+  if (!hdr || !hdr.tracks || !hdr.tracks.length) return { ok: false, reason: 'ساختار فایل MKV خوانده نشد' };
+  const v = hdr.tracks.filter(function (t) { return t.type === 1; });
+  if (!v.length) return { ok: false, reason: 'ترک ویدئو در فایل نیست' };
+  if (!srvCodecOf(v[0])) return { ok: false, reason: 'کدک ویدئو برای remux پشتیبانی نمی‌شود (' + v[0].codec + ')' };
+  if (!v[0].priv || !v[0].priv.length) return { ok: false, reason: 'پیکربندی کدک ویدئو در فایل نیست' };
+  const a = hdr.tracks.filter(function (t) { return t.type === 2 && !!srvCodecOf(t); });
+  if (!a.length) return { ok: false, reason: 'کدک صدا برای remux پشتیبانی نمی‌شود' };
+  return { ok: true, video: v[0], audio: a, reason: '' };
+}
+function srvEsds(priv, ch, rate) {
+  const asc = priv && priv.length ? priv : new Uint8Array([0x12, 0x10]);
+  const dsi = srvCat([new Uint8Array([0x05]), srvDescLen(asc.length), asc]);
+  const dcd = srvCat([
+    new Uint8Array([0x04]), srvDescLen(6 + dsi.length), new Uint8Array([0x40, 0x15]), new Uint8Array([0, 0, 0]),
+    srvU32(Math.max(96000, (rate || 48000) * (ch || 2) * 2)), srvU32(Math.max(96000, (rate || 48000) * (ch || 2))),
+    dsi,
+  ]);
+  const es = srvCat([new Uint8Array([0x03]), srvDescLen(3 + dcd.length), new Uint8Array([0, 0]), new Uint8Array([0]), dcd]);
+  return srvFull('esds', 0, 0, [es]);
+}
+function srvDOps(priv) {
+  const p = priv && priv.length >= 19 ? priv : null;
+  const ch = p ? (p[9] || 2) : 2;
+  const pre = p ? (p[10] | (p[11] << 8)) : 312;
+  const rate = p ? ((p[12] | (p[13] << 8) | (p[14] << 16) | (p[15] << 24)) >>> 0) : 48000;
+  const gain = p ? (((p[16] | (p[17] << 8)) << 16) >> 16) : 0;
+  const map = p && p.length > 18 ? p[18] : 0;
+  const body = [new Uint8Array([0, ch, (pre >> 8) & 255, pre & 255]), srvU32(rate), srvU16(gain & 0xffff), new Uint8Array([map])];
+  if (map !== 0 && p && p.length >= 19 + 2 + ch) body.push(p.subarray(19, 19 + 2 + ch));
+  return srvFull('dOps', 0, 0, body);
+}
+function srvSampleEntry(tr, cfg) {
+  if (cfg.kind === 'video') {
+    const priv = tr.priv || new Uint8Array(0);
+    return srvBox(cfg.entry, [
+      new Uint8Array(6), srvU16(1),
+      srvU16(0), srvU16(0), srvU32(0), srvU32(0), srvU32(0),
+      srvU16(Math.max(1, tr.w || 1280)), srvU16(Math.max(1, tr.h || 720)),
+      srvU32(0x00480000), srvU32(0x00480000), srvU32(0),
+      srvU16(1), new Uint8Array(32),
+      srvU16(0x0018), srvU16(0xffff),
+      srvBox(cfg.cfg, [priv]),
+    ]);
+  }
+  const rate = Math.max(8000, Math.min(192000, tr.rate || 48000));
+  const ch = Math.max(1, Math.min(8, tr.ch || 2));
+  let cfgBox;
+  if (cfg.cfg === 'esds') cfgBox = srvEsds(tr.priv, ch, rate);
+  else if (cfg.cfg === 'dOps') cfgBox = srvDOps(tr.priv);
+  else if (cfg.cfg === 'dac3' || cfg.cfg === 'dec3') cfgBox = srvBox(cfg.cfg, [tr.priv || new Uint8Array(3)]);
+  else if (cfg.cfg === 'dfLa') {
+    let p = tr.priv || new Uint8Array(0);
+    if (p.length > 4 && p[0] === 0x66 && p[1] === 0x4c && p[2] === 0x61 && p[3] === 0x43) p = p.subarray(4);
+    if (p.length > 4 && (p[0] & 0x7f) === 0) p = p.subarray(4);
+    cfgBox = srvFull('dfLa', 0, 0, [p]);
+  } else cfgBox = new Uint8Array(0);
+  return srvBox(cfg.entry, [
+    new Uint8Array(6), srvU16(1),
+    new Uint8Array(8),
+    srvU16(ch), srvU16(16), srvU16(0), srvU16(0),
+    srvU32(rate * 65536),
+    cfgBox,
+  ]);
+}
+function srvTimescaleOf(tr, cfg) {
+  if (cfg.kind === 'video') return 1000;
+  return Math.max(8000, Math.min(192000, Math.round(tr.rate || 48000)));
+}
+function srvDefaultDur(tr, cfg, timescale) {
+  if (tr.defaultNs > 0) return Math.max(1, Math.round(tr.defaultNs * timescale / 1e9));
+  if (cfg.kind === 'video') return 0;
+  if (/^A_AAC/.test(tr.codec)) return Math.round(1024 * timescale / (tr.rate || 48000)) || 1024;
+  if (tr.codec === 'A_OPUS') return Math.round(960 * timescale / (tr.rate || 48000)) || 960;
+  if (tr.codec === 'A_AC3' || tr.codec === 'A_EAC3') return Math.round(1536 * timescale / (tr.rate || 48000)) || 1536;
+  return Math.round(timescale / 32) || 1024;
+}
+function srvTrak(trackId, tr, cfg, timescale, durMs) {
+  const isV = cfg.kind === 'video';
+  const dur = Math.max(0, Math.round(durMs * timescale / 1000));
+  const tkhd = srvFull('tkhd', 0, 3, [
+    srvU32(0), srvU32(0), srvU32(trackId), srvU32(0), srvU32(dur),
+    srvU32(0), srvU32(0),
+    srvU16(0), srvU16(0), srvU16(isV ? 0 : 0x0100), srvU16(0),
+    srvMatrix(),
+    srvU32(isV ? Math.max(1, tr.w || 1280) * 65536 : 0),
+    srvU32(isV ? Math.max(1, tr.h || 720) * 65536 : 0),
+  ]);
+  const langRaw = String(tr.lang || '').toLowerCase().replace(/[^a-z]/g, '');
+  const lang = (!langRaw || langRaw === 'und' || langRaw.length < 2) ? 'und' : langRaw.slice(0, 3).padEnd(3, 'd');
+  const langCode = ((lang.charCodeAt(0) - 0x60) << 10) | ((lang.charCodeAt(1) - 0x60) << 5) | (lang.charCodeAt(2) - 0x60);
+  const mdhd = srvFull('mdhd', 0, 0, [srvU32(0), srvU32(0), srvU32(timescale), srvU32(dur), srvU16(langCode), srvU16(0)]);
+  const hdlr = srvFull('hdlr', 0, 0, [
+    srvU32(0), srvAsc(isV ? 'vide' : 'soun'), srvU32(0), srvU32(0), srvU32(0),
+    srvCat([srvAsc(isV ? 'VideoHandler' : 'SoundHandler'), new Uint8Array([0])]),
+  ]);
+  const dinf = srvBox('dinf', [srvFull('dref', 0, 0, [srvU32(1), srvFull('url ', 0, 1, [])])]);
+  const stbl = srvBox('stbl', [
+    srvFull('stsd', 0, 0, [srvU32(1), srvSampleEntry(tr, cfg)]),
+    srvFull('stts', 0, 0, [srvU32(0)]),
+    srvFull('stsc', 0, 0, [srvU32(0)]),
+    srvFull('stsz', 0, 0, [srvU32(0), srvU32(0)]),
+    srvFull('stco', 0, 0, [srvU32(0)]),
+  ]);
+  const minf = srvBox('minf', [
+    isV ? srvFull('vmhd', 0, 1, [srvU16(0), srvU16(0), srvU16(0), srvU16(0)]) : srvFull('smhd', 0, 0, [srvU16(0), srvU16(0)]),
+    dinf,
+    stbl,
+  ]);
+  return srvBox('trak', [tkhd, srvBox('mdia', [mdhd, hdlr, minf])]);
+}
+function srvInitSegment(hdr, plan, audioTr) {
+  const v = plan.video;
+  const vts = 1000;
+  const ats = srvTimescaleOf(audioTr, srvCodecOf(audioTr));
+  const durMs = Math.max(0, hdr.durationMs || 0);
+  const mvhd = srvFull('mvhd', 0, 0, [
+    srvU32(0), srvU32(0), srvU32(1000), srvU32(Math.round(durMs)),
+    srvU32(0x00010000), srvU16(0x0100), srvU16(0),
+    srvU32(0), srvU32(0),
+    srvMatrix(),
+    new Uint8Array(24),
+    srvU32(3),
+  ]);
+  const mvex = srvBox('mvex', [
+    durMs > 0 ? srvFull('mehd', 0, 0, [srvU32(Math.round(durMs))]) : new Uint8Array(0),
+    srvFull('trex', 0, 0, [srvU32(1), srvU32(1), srvU32(0), srvU32(0), srvU32(0)]),
+    srvFull('trex', 0, 0, [srvU32(2), srvU32(1), srvU32(0), srvU32(0), srvU32(0)]),
+  ]);
+  const ftyp = srvBox('ftyp', [srvAsc('isom'), srvU32(512), srvAsc('isom'), srvAsc('iso5'), srvAsc('dash'), srvAsc('mp41')]);
+  return srvCat([
+    ftyp,
+    srvBox('moov', [mvhd, srvTrak(1, v, srvCodecOf(v), vts, durMs), srvTrak(2, audioTr, srvCodecOf(audioTr), ats, durMs), mvex]),
+  ]);
+}
+function srvMoof(seq, trackId, baseDts, samples, dataOffset) {
+  const trunParts = [srvU32(samples.length), srvU32(dataOffset)];
+  for (const s of samples) trunParts.push(srvU32(Math.max(1, s.dur || 0)), srvU32(s.data.length), srvU32(s.key ? 0x02000000 : 0x01010000));
+  const traf = srvBox('traf', [
+    srvFull('tfhd', 0, 0x020000, [srvU32(trackId)]),
+    srvFull('tfdt', 1, 0, [srvU64(Math.max(0, baseDts))]),
+    srvFull('trun', 0, 0x000701, trunParts),
+  ]);
+  return srvBox('moof', [srvFull('mfhd', 0, 0, [srvU32(seq)]), traf]);
+}
+function srvFragment(seq, trackId, baseDts, samples) {
+  const probe = srvMoof(seq, trackId, baseDts, samples, 0);
+  const moof = srvMoof(seq, trackId, baseDts, samples, probe.length + 8);
+  return srvCat([moof, srvBox('mdat', samples.map(function (s) { return s.data; }))]);
+}
+async function apiStreamRemux(store, request, url) {
+  const t = await srvTokenLoad(store, url, request);
+  if (t.res) return t.res;
+  const tok = t.tok;
+  const probe = await streamProbeTracks(tok.u);
+  if (!probe || probe.container !== 'mkv') return srvFail(415, 'container', 'remux فقط برای MKV است');
+  const hdr = await srvMkvHead(tok, request);
+  const plan = srvRemuxPlan(hdr, probe);
+  if (!plan.ok) return srvFail(415, 'codec', plan.reason);
+  const wantAudio = Number(streamDigits(url.searchParams.get('audio') || '')) || 0;
+  const audioTr = plan.audio.filter(function (a) { return a.no === wantAudio; })[0] || plan.audio[0];
+  const audioCfg = srvCodecOf(audioTr), vcfg = srvCodecOf(plan.video);
+  const startSec = Math.max(0, Math.min(60 * 60 * 12, Number(streamDigits(url.searchParams.get('start') || '')) || 0));
+  let startAt = hdr.segmentData;
+  if (startSec > 0) {
+    const cues = await srvMkvCues(tok, request, hdr);
+    const cl = srvClusterAt(cues, startSec * 1000);
+    if (cl) startAt = cl.at;
+  }
+  const vts = 1000, ats = srvTimescaleOf(audioTr, audioCfg);
+  const vDef = srvDefaultDur(plan.video, vcfg, vts);
+  const aDef = srvDefaultDur(audioTr, audioCfg, ats);
+  const init = srvInitSegment(hdr, plan, audioTr);
+  const vTrackNo = plan.video.no, aTrackNo = audioTr.no;
+
+  let seq = 1;
+  let reader = null;
+  let finished = false;
+  let totalBytes = init.length;
+  let queue = [];
+
+  async function readCluster() {
+    const vS = [], aS = [];
+    const walk = await srvMkvWalk(reader, {
+      inside: true,
+      oneCluster: true,
+      tScaleNs: hdr.tScaleNs,
+      maxBytes: 256 * 1024 * 1024,
+      ms: 25000,
+      want: function (no) { return no === vTrackNo || no === aTrackNo; },
+      onBlock: function (b) {
+        const isV = b.track === vTrackNo;
+        const ts = isV ? vts : ats;
+        const def = isV ? vDef : aDef;
+        for (let i = 0; i < b.frames.length; i++) {
+          const data = b.frames[i];
+          if (!data || !data.length) continue;
+          if (isV) vS.push({ dts: Math.round(b.time * ts / 1000) + (i * (def || 0)), dur: def || 1, key: b.key && i === 0, data: data });
+          else aS.push({ dts: Math.round(b.time * ts / 1000) + (i * (def || 0)), dur: def || 1, key: true, data: data });
+        }
+      },
+    });
+    if (walk.done || walk.budget) finished = true;
+    const fix = function (list, def) {
+      list.sort(function (x, y) { return x.dts - y.dts; });
+      for (let i = 0; i < list.length; i++) {
+        const nx = list[i + 1];
+        if (nx && nx.dts > list[i].dts) list[i].dur = nx.dts - list[i].dts;
+        else if (def) list[i].dur = def;
+        if (!(list[i].dur > 0)) list[i].dur = 1;
+      }
+      return list;
+    };
+    fix(vS, vDef); fix(aS, aDef);
+    const out = [];
+    if (vS.length) out.push(srvFragment(seq++, 1, vS[0].dts, vS));
+    if (aS.length) out.push(srvFragment(seq++, 2, aS[0].dts, aS));
+    return out;
+  }
+
+  const stream = new ReadableStream({
+    start(ctrl) { ctrl.enqueue(init); },
+    async pull(ctrl) {
+      try {
+        if (queue.length) { const q = queue.shift(); totalBytes += q.length; ctrl.enqueue(q); return; }
+        if (finished) { try { if (reader) await reader.close(); } catch (e) { } ctrl.close(); return; }
+        if (!reader) {
+          reader = await srvOpenStream(tok, request, startAt, 30000);
+          if (!reader) { try { ctrl.error(new Error('upstream')); } catch (e) { } return; }
+        }
+        const parts = await readCluster();
+        if (!parts.length) {
+          if (finished) { try { await reader.close(); } catch (e) { } ctrl.close(); return; }
+          ctrl.enqueue(new Uint8Array(0));
+          return;
+        }
+        queue = parts.slice(1);
+        totalBytes += parts[0].length;
+        ctrl.enqueue(parts[0]);
+        if (totalBytes > SRV_REMUX_BYTES) finished = true;
+      } catch (e) {
+        try { ctrl.error(e); } catch (x) { }
+      }
+    },
+    cancel() { finished = true; try { if (reader) reader.close(); } catch (e) { } },
+  });
+  const h = srvHdr({
+    'content-type': 'video/mp4',
+    'cache-control': 'private, no-store, no-transform',
+    'accept-ranges': 'none',
+    'x-mvx-remux': '1',
+    'x-mvx-audio': String(audioTr.no),
+    'x-mvx-start': String(startSec),
+  });
+  return new Response(stream, { status: 200, headers: h });
 }
 
 /* ═══════════════════════ شبکهٔ تبلیغات خودکار (اتصال به ads.js) ═══════════════════════
@@ -9651,6 +11026,10 @@ async function handleApi(request, url, store, ctx) {
   if (p === 'stream/src' && m === 'POST') return await apiStreamSrc(store, await readBody(request, 16 * 1024), request, ctx);
   /* بایت‌های موتور داخلی وقتی لبه در دسترس/به‌روز نیست (GET، توکن پخش لازم است) */
   if (p === 'stream/bytes' && m === 'GET') return await apiStreamBytes(store, request, url);
+  /* پردازش رسانه روی سرور: فهرست ترک‌ها، زیرنویس WebVTT و remux فایل MKV */
+  if (p === 'stream/tracks' && (m === 'GET' || m === 'HEAD')) return await apiStreamTracks(store, request, url);
+  if (p === 'stream/sub' && (m === 'GET' || m === 'HEAD')) return await apiStreamSub(store, request, url);
+  if (p === 'stream/remux' && m === 'GET') return await apiStreamRemux(store, request, url);
   if (p === 'ad/click' && m === 'POST') return await apiAdTokenClick(store, await readBody(request, 8 * 1024), request, ctx);
   if (p === 'ad/evs' && m === 'POST') return await apiAdEvents(store, await readBody(request, 32 * 1024), request, ctx);
   mm = p.match(/^ad\/([a-z0-9_]{2,32})\/click$/);
@@ -10085,7 +11464,10 @@ function MVX_PLAYER_MODULE(W) {
     /* زیرنویس داخلیِ فایل قبلی به فایل تازه سرایت نکند (نشانه‌های emb_ بعد از
        ساخته‌شدن جدول ترک دوباره پر می‌شوند) */
     P.embCues = {};
-    if (P.subOn && String(P.subOn).indexOf('emb_') === 0) { P.subOn = ''; P.cues = []; }
+    if (P.subOn && /^(emb_|srv_)/.test(String(P.subOn))) { P.subOn = ''; P.cues = []; }
+    /* trackهای زیرنویس فایل قبلی (توکن تازه، آدرس تازه) */
+    srvClearTracks();
+    P.srv = null; P.srvRemux = ''; P.srvErr = '';
     /* با پخش تازه، تصمیم موتور داخلی (به‌جز انتخاب کاربر) از نو گرفته می‌شود */
     P.forceNative = false;
     P.mp4Done = false;
@@ -10098,7 +11480,12 @@ function MVX_PLAYER_MODULE(W) {
     title();
     renderPanel();
     q('.mvp-wm', P.root).textContent = info.wm || '';
+    /* ترجیح ماندگار کاربر: «موتور داخلی مرورگر» یا پردازش سروری (پیش‌فرض) */
+    P.forceClientDemux = false;
+    try { P.forceClientDemux = ls('mvpEng') === 'client'; } catch (e) { }
     setupSubs(info);
+    /* فهرست ترک‌ها و زیرنویس‌های داخلی از Worker (پیش از انتخاب مسیر پخش) */
+    srvFetchTracks(info);
     setSource(info.src, info.fmt, reason === 'start' || reason === 'next');
   }
   function destroyHls() { if (P && P.hls) { try { P.hls.destroy(); } catch (e) { } P.hls = null; } }
@@ -10615,6 +12002,9 @@ function MVX_PLAYER_MODULE(W) {
   }
   function destroyMkv() {
     if (!P) return;
+    if (P.srvSeekFn) { try { P.video.removeEventListener('seeking', P.srvSeekFn); } catch (e) { } P.srvSeekFn = null; }
+    P.srvActive = false;
+    P.srvSeeking = false;
     if (P.mkvNative) {
       P.mkvNative = false;
       try { P.video.removeAttribute('src'); P.video.load(); } catch (e) { }
@@ -10661,8 +12051,9 @@ function MVX_PLAYER_MODULE(W) {
     return lg === 'fa' || lg === 'per' || lg === 'fas' || /فارسی|persian|farsi|دوبله/i.test(nm);
   }
   function trackLabelOf(tr, idx, word) {
-    var nm = String(tr.name || '').replace(/[\u0000-\u001f]/g, '').trim();
-    var lang = trkLangName(tr.lang);
+    /* ترک‌های سروری «label» آماده دارند؛ ترک‌های probe/demux نام خام دارند */
+    var nm = String(tr.label || tr.name || '').replace(/[\u0000-\u001f]/g, '').trim();
+    var lang = trkLangName(tr.srclang || tr.lang);
     var base = nm || (word + ' ' + (idx + 1));
     return lang ? base + ' - [' + lang + ']' : base;
   }
@@ -10946,7 +12337,11 @@ function MVX_PLAYER_MODULE(W) {
   function mkvRungs() {
     var out = [];
     var d = (P.info && P.info.direct) || '';
-    /* demux اول: زیرنویس‌های داخلی و کنترل کامل؛ اگر شکست خورد، پخش بومی (اندروید) */
+    /* ۱) remux سرور: Worker خودش MKV را به fMP4 تبدیل می‌کند؛ سبک‌ترین حالت برای
+          گوشی/مرورگر (هیچ دموکسر جاوااسکریپتی در کلاینت اجرا نمی‌شود).
+       ۲) دموکسر داخل مرورگر (موتور داخلی قبلی) — پشتیبانِ مطمئن.
+       ۳) پخش بومی (اندروید/کروم) اگر مرورگر خودش MKV را بخواند. */
+    if (P.srvRemux && !P.forceClientDemux) out.push({ mode: 'srv', src: P.srvRemux });
     out.push({ mode: 'demux', src: P.info.src });
     if (d) out.push({ mode: 'demux', src: d });
     if (mkvCanNative()) {
@@ -10990,11 +12385,25 @@ function MVX_PLAYER_MODULE(W) {
   }
   function startMkv(src) {
     if (!P) return;
-    P.mkvRungs = mkvRungs();
-    P.mkvRun = 0;
-    P.mkvDone = false;
-    P.mkvWhy = '';
-    mkvGo();
+    var mine = P;
+    var goRungs = function () {
+      if (!P || P !== mine) return;
+      P.mkvRungs = mkvRungs();
+      P.mkvRun = 0;
+      P.mkvDone = false;
+      P.mkvWhy = '';
+      mkvGo();
+    };
+    /* انتخاب پلهٔ «remux سرور» به فهرست ترک‌های سروری وابسته است؛ حداکثر ۲.۵
+       ثانیه صبر می‌کنیم و بعد (مثل قبل) با موتور داخلی شروع می‌کنیم. */
+    if (P.srvWait && !P.srv && !P.forceClientDemux) {
+      var started = false;
+      var fin = function () { if (started) return; started = true; goRungs(); };
+      setTimeout(fin, 2500);
+      P.srvWait.then(fin, fin);
+      return;
+    }
+    goRungs();
   }
   function mkvGo() {
     if (!P || P.mkvDone) return;
@@ -11002,6 +12411,41 @@ function MVX_PLAYER_MODULE(W) {
     if (!rung) return mkvFailStep('net');
     destroyMkv();
     var v = P.video;
+    if (rung.mode === 'srv') {
+      /* جریان fMP4ِ ساختهٔ Worker: همان <video>، بدون MediaSource و بدون demux
+         در کلاینت. جهش با گرفتن جریان تازه از همان ثانیه انجام می‌شود. */
+      P.srvActive = true;
+      P.mkvNative = true;              /* پاک‌سازی src در destroyMkv */
+      P.srvLoadAt = Date.now();
+      P.srvSeeking = false;
+      var atSrv = P.mkvSeek || 0;
+      P.mkvSeek = 0;
+      P.srvAt = atSrv;
+      P.srvSeekFn = function () {
+        if (!P || !P.srvActive || P.srvSeeking) return;
+        /* جهشِ ناشی از خودِ بارگذاری جریان (loadedmetadata → currentTime) نباید
+           جریان تازه بسازد؛ وگرنه حلقهٔ بی‌پایان بارگذاری می‌شود. */
+        if (Date.now() - (P.srvLoadAt || 0) < 2500) return;
+        var t = v.currentTime || 0;
+        if (srvCovered(t)) return;
+        srvSeek(t);
+      };
+      try { v.addEventListener('seeking', P.srvSeekFn); } catch (e) { }
+      try {
+        v.removeAttribute('src');
+        v.src = srvRemuxUrl(rung.src, atSrv);
+        var onMetaSrv = function () {
+          v.removeEventListener('loadedmetadata', onMetaSrv);
+          if (atSrv > 1) { try { v.currentTime = atSrv; } catch (e) { } }
+          mkvGoPlay();
+        };
+        v.addEventListener('loadedmetadata', onMetaSrv);
+        v.load();
+      } catch (e) { return mkvFailStep('srv'); }
+      setLoading(true);
+      setTimeout(function () { if (P) setLoading(false); }, 3000);
+      return;
+    }
     if (rung.mode === 'native') {
       /* اندروید/کروم و برخی مرورگرها خودِ MKV (H.264+AAC) را بومی می‌خوانند —
          برای <video> هیچ CORS لازم نیست؛ پس لینک مستقیم هم اینجا کار می‌کند. */
@@ -12001,6 +13445,7 @@ function MVX_PLAYER_MODULE(W) {
     return cont === 'mp4' && mp4WorthDemux(ti);
   }
   function switchAudio (no) {
+    if (P && P.srvActive) return srvSwitchAudio(no);
     if (P && P.mp4) return mp4SwitchAudio(no);
     return mkvSwitchAudio(no);
   }
@@ -12022,6 +13467,7 @@ function MVX_PLAYER_MODULE(W) {
      موتور را با همان ترک روشن می‌کنیم (رفتار VLC). */
   function engineWithAudio (no) {
     if (!P || !P.info) return;
+    if (P.srvActive) return srvSwitchAudio(no);
     if (P.mp4) return mp4SwitchAudio(no);
     if (P.mkv && P.mkv.tracks) return mkvSwitchAudio(no);
     var at = P.video.currentTime || 0;
@@ -12114,7 +13560,7 @@ function MVX_PLAYER_MODULE(W) {
     var done = function (yes) {
       box.classList.remove('on');
       clearTimeout(P.resT);
-      if (yes && P && P.video) { try { P.video.currentTime = t; } catch (e) { } }
+      if (yes && P && P.video) seekTo(t);
     };
     q('[data-r="yes"]', box).onclick = function () { done(true); };
     q('[data-r="no"]', box).onclick = function () { done(false); };
@@ -12283,6 +13729,215 @@ function MVX_PLAYER_MODULE(W) {
     cues.sort(function (a, b) { return a.s - b.s; });
     return cues;
   }
+  /* ══════════════ پردازش رسانه روی سرور (Worker) ══════════════
+     سرور سه چیز می‌دهد: فهرست ترک‌ها (media.tracks)، زیرنویس داخلی به‌صورت
+     WebVTT (media.sub) و جریان قابل پخش MKV (media.remux). پلیر:
+       ۱. فهرست را می‌گیرد و زیرنویس‌های داخلی را هم به فهرست خودش اضافه می‌کند و
+          هم به‌صورت <track kind="subtitles" src=… srclang=…> در <video> می‌گذارد
+          (منوی بومی مرورگر/صفحه‌خوان)،
+       ۲. برای MKV اول جریان remuxِ سرور را پخش می‌کند (پردازش روی Worker) و اگر
+          شکست خورد دموکسر داخل مرورگر (همان موتور قبلی) را امتحان می‌کند. */
+  function srvFetchTracks(info) {
+    if (!P || !info || !info.media || !info.media.tracks) { if (P) P.srvWait = null; return; }
+    var mine = P;
+    P.srv = null; P.srvErr = ''; P.srvRemux = '';
+    P.srvWait = doFetch(info.media.tracks, { credentials: 'omit' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      if (!P || P !== mine) return null;
+      if (!j || !j.ok) throw new Error((j && j.error) || 'bad');
+      P.srv = j;
+      P.srvDur = Number(j.duration) || 0;
+      P.srvRemux = (j.remux && j.remux.ok && j.remux.src) ? j.remux.src : '';
+      /* ترک صدای پیش‌فرض: نسخهٔ «دوبله» فارسی را می‌خواند، نسخهٔ «زیرنویس»
+         صدای اصلی را — همان قاعدهٔ موتور داخلی، این بار روی سرور. */
+      P.mkvAudioPref = srvPickAudio(j);
+      srvMergeSubs(j);
+      srvInjectTracks(j);
+      return j;
+    }).catch(function (e) {
+      if (P && P === mine) P.srvErr = String((e && e.message) || e || '');
+      return null;
+    });
+  }
+  function srvPickAudio(j) {
+    var list = (j && j.tracks && j.tracks.audio) || [];
+    if (!list.length) return 0;
+    var cur = JSON.stringify((P && P.mkvAudioPref) || 0);
+    var keep = list.filter(function (t) { return t.no === Number(cur); })[0];
+    if (keep) return keep.no;
+    var dub = !!(P && P.cur && P.cur.track === 'dub');
+    var fa = list.filter(function (t) {
+      return t.srclang === 'fa' || /دوبله|فارسی|persian|farsi/i.test(String(t.label || ''));
+    })[0];
+    var orig = list.filter(function (t) {
+      return /اصلی|original|main/i.test(String(t.label || '')) || t.srclang === 'en';
+    })[0];
+    if (dub && fa) return fa.no;
+    if (!dub && orig) return orig.no;
+    return (fa || list[0]).no;
+  }
+  /* زیرنویس‌های داخلی سرور در فهرست زیرنویس پلیر (با src آمادهٔ WebVTT) */
+  function srvMergeSubs(j) {
+    if (!P || !j || !j.tracks || !j.tracks.subs) return;
+    P.subs = P.subs || [];
+    var have = {};
+    P.subs.forEach(function (s) { have[s.id] = 1; });
+    var added = 0;
+    j.tracks.subs.forEach(function (t) {
+      if (!t.supported || !t.src) return;
+      var id = 'srv_' + t.no;
+      if (have[id]) return;
+      have[id] = 1;
+      P.subs.push({ id: id, label: t.label || ('زیرنویس ' + t.no), src: t.src, lang: t.srclang || 'fa', srclang: t.srclang || 'fa', srv: true });
+      added++;
+    });
+    if (!added) return;
+    try { renderPanel(); if (P.panel === 'trk') renderTrk(); } catch (e) { }
+    if (P.subPref && !P.subOn && P.subs.some(function (s) { return s.id === P.subPref; })) selectSub(P.subPref, true);
+  }
+  /* تزریق <track kind="subtitles">؛ حالت پیش‌فرض hidden است تا لایهٔ خودِ پلیر
+     (نوشناسی فارسی، اندازه، پس‌زمینه و تأخیر) کار کند؛ با دکمهٔ «نمایش بومی
+     مرورگر» همان ترک به showing می‌رود و منوی متن بومی مرورگر فعال می‌شود. */
+  function srvInjectTracks(j) {
+    var v = P && P.video;
+    if (!v || !v.appendChild) return;
+    P.srvTracks = P.srvTracks || {};
+    (j.tracks.subs || []).forEach(function (t) {
+      if (!t.supported || !t.src) return;
+      var id = 'srv_' + t.no;
+      if (P.srvTracks[id]) return;
+      var el = null;
+      try { el = D.createElement('track'); } catch (e) { return; }
+      el.kind = 'subtitles';
+      el.label = t.label || ('زیرنویس ' + t.no);
+      el.srclang = t.srclang || 'fa';
+      el.src = t.src;
+      try { el.setAttribute('data-srv', String(t.no)); } catch (e) { }
+      var sync = function () {
+        try {
+          if (!el.track) return;
+          el.track.mode = (P && P.ccNative && P.subOn === id) ? 'showing' : 'hidden';
+        } catch (e) { }
+      };
+      try { el.addEventListener('load', sync); } catch (e) { }
+      try { v.appendChild(el); } catch (e) { }
+      P.srvTracks[id] = el;
+      /* حالت همین‌جا هم ست می‌شود تا پیش از رویداد load، مرورگر متن را
+         خودبه‌خود نشان ندهد (پیش‌فرض مرورگر برای <track> می‌تواند showing باشد). */
+      sync();
+      setTimeout(sync, 0);
+    });
+  }
+  /* پاک‌سازی trackهای تزریق‌شده (تعویض قسمت/فایل: توکن قبلی منقضی شده است) */
+  function srvClearTracks() {
+    if (!P) return;
+    for (var k in (P.srvTracks || {})) {
+      var el = P.srvTracks[k];
+      try { if (el && el.parentNode && el.parentNode.removeChild) el.parentNode.removeChild(el); } catch (e) { }
+      try { if (el && el.track) el.track.mode = 'disabled'; } catch (e) { }
+    }
+    P.srvTracks = {};
+  }
+  function srvSyncNative() {
+    if (!P) return;
+    for (var k in (P.srvTracks || {})) {
+      var el = P.srvTracks[k];
+      try {
+        if (!el || !el.track) continue;
+        el.track.mode = (P.ccNative && P.subOn === k) ? 'showing' : 'hidden';
+      } catch (e) { }
+    }
+  }
+  function srvToggleNative(on) {
+    if (!P) return;
+    P.ccNative = !!on;
+    if (P.ccNative && !P.subOn) {
+      var first = (P.subs || []).filter(function (s) { return s.srv; })[0];
+      if (first) { P.subPref = first.id; selectSub(first.id, true); }
+    }
+    srvSyncNative();
+    renderSub(true);
+    renderTrk();
+    renderPanel();
+    toast(P.ccNative ? 'زیرنویس با موتور مرورگر (track) نمایش داده می‌شود' : 'زیرنویس با لایهٔ پلیر نمایش داده می‌شود');
+  }
+  /* آدرس remux با ترک صدا و ثانیهٔ شروع (برای جهش) */
+  function srvRemuxUrl(base, at) {
+    if (!base) return '';
+    var q = [];
+    var aud = Number(P && P.mkvAudioPref) || 0;
+    if (aud) q.push('audio=' + aud);
+    if (at && at > 1) q.push('start=' + Math.floor(at));
+    return base + (q.length ? (base.indexOf('?') >= 0 ? '&' : '?') + q.join('&') : '');
+  }
+  function srvCovered(t) {
+    var b = P && P.video && P.video.buffered;
+    if (!b) return false;
+    for (var i = 0; i < b.length; i++) { if (t >= b.start(i) - 0.6 && t <= b.end(i) + 0.6) return true; }
+    return false;
+  }
+  /* جهش در پخشِ سروری: چون جریان تکه‌تکه است، از همان ثانیه یک جریان تازه از
+     Worker گرفته می‌شود (Worker از نزدیک‌ترین خوشهٔ MKV با Range می‌خواند). */
+  /* هر جهشی از رابط کاربر (نوار پیشرفت، ±۱۰ ثانیه، کلیدهای ۰..۹) از همین‌جا
+     می‌گذرد تا در پخش سروری، جریان تازه از همان ثانیه گرفته شود. */
+  function seekTo(t) {
+    if (!P) return;
+    t = Math.max(0, Number(t) || 0);
+    if (P.srvActive) { srvSeek(t); return; }
+    try { P.video.currentTime = t; } catch (e) { }
+  }
+  function srvSeek(t) {
+    if (!P || !P.srvActive) return;
+    var rung = (P.mkvRungs || [])[P.mkvRun];
+    if (!rung || rung.mode !== 'srv') return;
+    var v = P.video;
+    t = Math.max(0, Number(t) || 0);
+    P.srvSeeking = true;
+    P.srvAt = t;
+    P.srvLoadAt = Date.now();
+    try {
+      v.removeAttribute('src');
+      v.src = srvRemuxUrl(rung.src, t);
+      var onMeta = function () {
+        v.removeEventListener('loadedmetadata', onMeta);
+        if (!P) return;
+        try { if (t > 0.5) v.currentTime = t; } catch (e) { }
+        P.srvSeeking = false;
+        var pr = v.play();
+        if (pr && pr.catch) pr.catch(function () { });
+      };
+      v.addEventListener('loadedmetadata', onMeta);
+      v.load();
+    } catch (e) { P.srvSeeking = false; }
+    setLoading(true);
+    setTimeout(function () { if (P) setLoading(false); }, 1800);
+  }
+  function srvSwitchAudio(no) {
+    if (!P || !P.srvActive) return;
+    P.mkvAudioPref = Number(no) || 0;
+    var t = P.video.currentTime || 0;
+    srvSeek(t);
+    var tr = ((P.srv && P.srv.tracks && P.srv.tracks.audio) || []).filter(function (x) { return x.no === P.mkvAudioPref; })[0];
+    toast('صدا: ' + (tr ? tr.label : (P.mkvAudioPref ? ('ترک ' + P.mkvAudioPref) : 'پیش‌فرض')));
+  }
+  /* بازگشت به موتور داخلی مرورگر (demux سمت کلاینت) و برگشت به پردازش سروری */
+  function srvRestart(server) {
+    if (!P || !P.info) return;
+    var at = P.video.currentTime || 0;
+    P.forceClientDemux = !server;
+    try { ls('mvpEng', server ? null : 'client'); } catch (e) { }
+    P.mkvSeek = at > 1 ? at : 0;
+    P.pendingSeek = 0;
+    P.mkvDone = false; P.mkvRun = 0; P.mkvRungs = null; P.mkvWhy = '';
+    P.srvSeeking = false;
+    closePanels(); hideMsg();
+    startMkv(P.info.src);
+    toast(server ? 'پردازش روی سرور (remux)' : 'موتور داخلی مرورگر');
+  }
+  function srvClientEngine() { srvRestart(false); }
+  function srvServerEngine() { srvRestart(true); }
   function setupSubs(info) {
     P.subs = info.subs || [];
     P.trackInfo = info.tracks || null;
@@ -12297,6 +13952,7 @@ function MVX_PLAYER_MODULE(W) {
     renderSub(true);
     var ccBtn = P.root && q('[data-a="cc"]', P.root);
     if (ccBtn) ccBtn.classList.toggle('on', !!id);
+    srvSyncNative();
     if (!id) { if (!silent) toast('زیرنویس خاموش'); return; }
     var sub = P.subs.filter(function (s) { return s.id === id; })[0];
     if (!sub) return;
@@ -12324,6 +13980,8 @@ function MVX_PLAYER_MODULE(W) {
   function renderSub(force) {
     var box = P && q('.mvp-sub', P.root);
     if (!box) return;
+    /* نمایش بومی مرورگر (track) روشن است: متن را خودِ مرورگر می‌نویسد */
+    if (P.ccNative && P.subOn && String(P.subOn).indexOf('srv_') === 0) { if (force || box.innerHTML) box.innerHTML = ''; return; }
     if (!P.subOn || !P.cues.length) { if (force || box.innerHTML) box.innerHTML = ''; return; }
     var t = P.video.currentTime + (P.subOffset || 0);
     var cues = P.cues, i = P.cueIdx || 0;
@@ -12340,17 +13998,21 @@ function MVX_PLAYER_MODULE(W) {
     if (!panel) return;
     var mkvAud = (P.mkv && P.mkv.audioList && P.mkv.audioList.length) ? P.mkv.audioList : null;
     var mp4Aud = (P.mp4 && P.mp4.audioList && P.mp4.audioList.length) ? P.mp4.audioList : null;
-    var demuxAud = mkvAud || mp4Aud;
+    /* ترک‌های صدا از سرور (remux، بدون دموکسر در کلاینت) */
+    var srvAud = (P.srvActive && P.srv && P.srv.tracks && P.srv.tracks.audio && P.srv.tracks.audio.length) ? P.srv.tracks.audio : null;
+    var demuxAud = mkvAud || mp4Aud || srvAud;
     var probeAud = (P.trackInfo && P.trackInfo.audio && P.trackInfo.audio.length) ? P.trackInfo.audio : [];
     var auds = demuxAud || probeAud;
     var switchable = !!(demuxAud && demuxAud.length);
     var curAudio = 0;
-    if (P.mkv) curAudio = P.mkv.audioOff ? 0 : ((P.mkv.audioSel) || (P.mkvAudioPref || 0));
+    if (srvAud) curAudio = Number(P.mkvAudioPref) || (srvAud[0] && srvAud[0].no) || 0;
+    else if (P.mkv) curAudio = P.mkv.audioOff ? 0 : ((P.mkv.audioSel) || (P.mkvAudioPref || 0));
     else if (P.mp4) curAudio = P.mp4.audio ? P.mp4.audio.id : 0;
     else curAudio = P.mp4AudioPref || 0;
-    var engine = P.mkv ? 'MKV' : (P.mp4 ? 'MP4' : '');
+    var engine = P.srvActive ? 'سرور (remux)' : (P.mkv ? 'MKV' : (P.mp4 ? 'MP4' : ''));
     var html = '<div class="mvp-ph">☰ ترک‌های فایل (صدا و زیرنویس)<button type="button" class="mvp-btn" data-x="1">' + I.close + '</button></div>';
-    if (engine) html += '<div class="mvp-sec"><span style="font-size:11.5px;color:var(--tx3)">موتور پخش داخل‌صفحهٔ ' + engine + ' فعال است — تعویض ترک صدا و زیرنویس داخلی از همین‌جا انجام می‌شود.</span></div>';
+    if (P.srvActive) html += '<div class="mvp-sec"><span style="font-size:11.5px;color:var(--tx3)">پردازش روی سرور فعال است: Worker خودش MKV را به fMP4 تبدیل می‌کند (بدون دموکسر در مرورگر) — تعویض صدا و زیرنویس داخلی از همین‌جا انجام می‌شود.</span></div>';
+    else if (engine) html += '<div class="mvp-sec"><span style="font-size:11.5px;color:var(--tx3)">موتور پخش داخل‌صفحهٔ ' + engine + ' فعال است — تعویض ترک صدا و زیرنویس داخلی از همین‌جا انجام می‌شود.</span></div>';
     html += '<div class="mvp-sec"><h6>🔊 صدا</h6><div class="mvp-opts">';
     if (switchable) html += '<button type="button" class="mvp-opt' + (!curAudio ? ' on' : '') + '" data-aud="0">غیرفعال</button>';
     if (!auds.length) {
@@ -12377,6 +14039,16 @@ function MVX_PLAYER_MODULE(W) {
       var id = 'emb_' + ts.no;
       if (!known[id]) subs.push({ id: id, label: trackLabelOf(ts, i, 'زیرنویس'), embedded: ts.no, src: '', listed: true });
     });
+    /* یک زیرنویس داخلی دو منبع دارد: سرور (srv_) و دموکسر مرورگر (emb_). تا
+       وقتی دموکسر کیف را درنیاورده، نسخهٔ سروری را نشان می‌دهیم تا فهرست
+       تکراری نشود. */
+    var srvNos = {};
+    subs.forEach(function (s) { if (String(s.id).indexOf('srv_') === 0) srvNos[String(s.id).slice(4)] = 1; });
+    subs = subs.filter(function (s) {
+      if (String(s.id).indexOf('emb_') !== 0) return true;
+      var no = String(s.id).slice(4);
+      return !srvNos[no] || !!(P.embCues && P.embCues[s.embedded]);
+    });
     html += '<div class="mvp-sec"><h6>💬 زیرنویس</h6><div class="mvp-opts"><button type="button" class="mvp-opt' + (!P.subOn ? ' on' : '') + '" data-sub="">غیرفعال</button>' +
       subs.map(function (s) {
         /* زیرنویس داخلی وقتی موتور (MKV/MSE) فعال است قابل انتخاب است */
@@ -12385,8 +14057,17 @@ function MVX_PLAYER_MODULE(W) {
       }).join('') + '</div></div>';
     html += '<div class="mvp-sec"><h6>موتور پخش</h6><div class="mvp-opts">' +
       '<button type="button" class="mvp-opt' + ((P.mp4 || P.mkv) ? ' on' : '') + '" data-demux="1">🔁 موتور داخلی (تعویض صدا/زیرنویس)</button>' +
+      (P.srvActive ? '<button type="button" class="mvp-opt" data-clienteng="1">موتور داخلی مرورگر (بدون سرور)</button>' : '') +
+      (!P.srvActive && P.forceClientDemux && P.srvRemux ? '<button type="button" class="mvp-opt" data-servereng="1">پردازش روی سرور (remux)</button>' : '') +
       (P.mp4 ? '<button type="button" class="mvp-opt" data-native="1">پخش معمولی (بومی)</button>' : '') +
       '</div></div>';
+    /* زیرنویس‌های سروری (WebVTT از Worker) → نمایش با track بومی مرورگر */
+    if (P.srv && P.srv.tracks && P.srv.tracks.subs && P.srv.tracks.subs.length) {
+      html += '<div class="mvp-sec"><h6>Ⓣ نمایش بومی زیرنویس (track)</h6><div class="mvp-opts">' +
+        '<button type="button" class="mvp-opt' + (P.ccNative ? ' on' : '') + '" data-ccnative="' + (P.ccNative ? '0' : '1') + '">' + (P.ccNative ? 'نمایش با موتور مرورگر' : 'لایهٔ فارسی پلیر') + '</button>' +
+        '<span style="font-size:11.5px;color:var(--tx3)">زیرنویس‌های داخلی فایل به‌صورت &lt;track kind="subtitles"&gt; در ویدئو هستند؛ این دکمه تعیین می‌کند متن را مرورگر بنویسد یا لایهٔ خودِ پلیر.</span>' +
+        '</div></div>';
+    }
     html += '<div class="mvp-sec"><h6>تنظیمات زیرنویس</h6><div class="mvp-opts"><button type="button" class="mvp-opt" data-x="1" data-open-set="1">اندازه، پس‌زمینه و هم‌زمانی ⚙</button></div></div>';
     panel.innerHTML = html;
   }
@@ -12646,7 +14327,7 @@ function MVX_PLAYER_MODULE(W) {
   function seekBy(d) {
     var v = P.video;
     if (!isFinite(v.duration)) return;
-    v.currentTime = Math.max(0, Math.min(v.duration - 0.5, v.currentTime + d));
+    seekTo(Math.max(0, Math.min(v.duration - 0.5, v.currentTime + d)));
     fx(d < 0 ? 'l' : 'r', (d < 0 ? '« ' : '') + fa(Math.abs(d)) + ' ثانیه' + (d > 0 ? ' »' : ''));
     showUi();
   }
@@ -12662,7 +14343,7 @@ function MVX_PLAYER_MODULE(W) {
     r.addEventListener('dragstart', function (e) { e.preventDefault(); });
     r.addEventListener('mousemove', function () { showUi(); });
     r.addEventListener('click', function (e) {
-      var b = e.target.closest ? e.target.closest('[data-a],[data-x],[data-track],[data-sid],[data-sub],[data-size],[data-subbg],[data-off],[data-speed],[data-fit],[data-ep],[data-aud],[data-audstart],[data-demux],[data-native]') : null;
+      var b = e.target.closest ? e.target.closest('[data-a],[data-x],[data-track],[data-sid],[data-sub],[data-size],[data-subbg],[data-off],[data-speed],[data-fit],[data-ep],[data-aud],[data-audstart],[data-demux],[data-native],[data-ccnative],[data-clienteng],[data-servereng]') : null;
       if (!b) return;
       e.stopPropagation();
       showUi();
@@ -12682,6 +14363,9 @@ function MVX_PLAYER_MODULE(W) {
       if (b.hasAttribute('data-audstart')) { return engineWithAudio(Number(b.getAttribute('data-audstart')) || 0); }
       if (b.hasAttribute('data-demux')) return forceDemux();
       if (b.hasAttribute('data-native')) return forceNativePlay();
+      if (b.hasAttribute('data-ccnative')) return srvToggleNative(b.getAttribute('data-ccnative') === '1');
+      if (b.hasAttribute('data-clienteng')) return srvClientEngine();
+      if (b.hasAttribute('data-servereng')) return srvServerEngine();
       if (b.hasAttribute('data-x')) return closePanels();
       if (b.hasAttribute('data-track')) {
         var t = b.getAttribute('data-track');
@@ -12760,7 +14444,7 @@ function MVX_PLAYER_MODULE(W) {
       if (!P.drag) return;
       P.drag = false;
       prog.classList.remove('drag');
-      if (P.dragAt != null && isFinite(P.dragAt)) v.currentTime = P.dragAt;
+      if (P.dragAt != null && isFinite(P.dragAt)) seekTo(P.dragAt);
       P.dragAt = null;
       showUi();
     }
@@ -12874,7 +14558,7 @@ function MVX_PLAYER_MODULE(W) {
       case ']': case '>': v.playbackRate = Math.min(3, Math.round((v.playbackRate + 0.25) * 100) / 100); toast('سرعت ' + fa(String(v.playbackRate)) + '×'); break;
       case 'Escape': if (P.panel) closePanels(); else if (!isFs()) close(); else handled = false; break;
       default:
-        if (/^[0-9]$/.test(k) && isFinite(v.duration)) v.currentTime = v.duration * Number(k) / 10;
+        if (/^[0-9]$/.test(k) && isFinite(v.duration)) seekTo(v.duration * Number(k) / 10);
         else handled = false;
     }
     if (handled) { e.preventDefault(); showUi(); }
@@ -12974,7 +14658,20 @@ function MVX_PLAYER_MODULE(W) {
       start: function (src, from) { startMp4(src, from); },
       startMkv: function (src, from) { P.mkvSeek = from || 0; startMkv(src); return P.mkv; },
       stateMkv: function () { return P && P.mkv; },
-      plan: function (fmt, cont, ti, fn, fd) { return wantEngine(fmt, cont, ti, fn, fd); }
+      plan: function (fmt, cont, ti, fn, fd) { return wantEngine(fmt, cont, ti, fn, fd); },
+      /* قلاب‌های پردازش سروری (برای تست بدون مرورگر) */
+      srvTracks: function (info) { return srvFetchTracks(info); },
+      srvRungs: function () { return mkvRungs(); },
+      srvUrl: function (base, at) { return srvRemuxUrl(base, at); },
+      srvAudio: function (j) { return srvPickAudio(j); },
+      srvToggle: function (on) { return srvToggleNative(on); },
+      srvServer: function () { return srvServerEngine(); },
+      panel: function (name) { if (name === 'trk') return renderTrk(); return renderPanel(); },
+      srvClient: function () { return srvClientEngine(); },
+      srvSync: function () { return srvSyncNative(); },
+      srvClear: function () { return srvClearTracks(); },
+      selectSub: function (id, silent) { return selectSub(id, silent); },
+      seekTo: function (t) { return seekTo(t); },
     }
   };
 }
