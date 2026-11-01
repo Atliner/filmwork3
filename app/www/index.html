@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0e14">
+<title>سینماگرام — انتخاب آدرس</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(1200px 600px at 50% -10%, #1b2433, #0b0e14 60%);
+    color: #eef1f6; font-family: Vazirmatn, Tahoma, system-ui, sans-serif; padding: 24px;
+  }
+  .card {
+    width: min(460px, 100%); background: rgba(21,26,36,.86); border: 1px solid #242c3b;
+    border-radius: 22px; padding: 26px 22px; box-shadow: 0 30px 80px rgba(0,0,0,.55);
+  }
+  h1 { margin: 0 0 6px; font-size: 20px; font-weight: 900; }
+  p { margin: 0 0 18px; color: #9aa6bd; font-size: 13.5px; line-height: 2; }
+  label { display: block; font-size: 12.5px; color: #9aa6bd; margin-bottom: 6px; }
+  input {
+    width: 100%; padding: 13px 14px; border-radius: 12px; border: 1px solid #2b3549;
+    background: #10151f; color: #fff; font: inherit; font-size: 14px; direction: ltr;
+  }
+  input:focus { outline: 2px solid #ff9b39; outline-offset: 1px; }
+  button {
+    width: 100%; margin-top: 14px; padding: 13px 16px; border: 0; border-radius: 12px;
+    background: linear-gradient(135deg, #ff5f2e, #ffb01f); color: #131313; font: inherit;
+    font-weight: 900; font-size: 15px; cursor: pointer;
+  }
+  button:disabled { opacity: .6; cursor: default; }
+  .msg { margin-top: 12px; font-size: 12.5px; line-height: 1.9; color: #ffb4a8; min-height: 20px; }
+  .hint { margin-top: 14px; padding-top: 14px; border-top: 1px dashed #242c3b; font-size: 12px; color: #7f8ba1; line-height: 2; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .brand img { width: 42px; height: 42px; border-radius: 12px; }
+  .brand b { font-size: 15px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="brand"><img src="icon.png" alt=""><b>سینماگرام</b></div>
+  <h1>آدرس سایت را وارد کنید</h1>
+  <p>این برنامه پوستهٔ رسمی سایت است. آدرس دامنهٔ خودت را یک‌بار بگذار تا از این پس مستقیم باز شود. اگر دامنه فیلتر شد، همین‌جا آدرس تازه را وارد کن.</p>
+  <label for="url">آدرس سایت</label>
+  <input id="url" type="url" inputmode="url" placeholder="https://example.com" autocomplete="off" spellcheck="false">
+  <button id="go">باز کردن سایت</button>
+  <div class="msg" id="msg"></div>
+  <div class="hint">
+    در نسخهٔ اندروید/ویندوز که از گیت‌هاب ساخته می‌شود، این آدرس از قبل داخل فایل قرار می‌گیرد.
+    برای تغییر بعدی: آدرس را پاک کنید و دوباره ثبت کنید.
+  </div>
+</div>
+<script>
+(function () {
+  var KEY = 'mvx_site';
+  var input = document.getElementById('url');
+  var msg = document.getElementById('msg');
+  var go = document.getElementById('go');
+
+  function normalize(v) {
+    v = String(v || '').trim();
+    if (!v) return '';
+    if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+    try {
+      var u = new URL(v);
+      if (!/^https?:$/.test(u.protocol)) return '';
+      if (!u.hostname || u.hostname.indexOf('.') < 0) return '';
+      return u.origin;
+    } catch (e) { return ''; }
+  }
+
+  var saved = '';
+  try { saved = localStorage.getItem(KEY) || ''; } catch (e) { }
+  if (saved) {
+    input.value = saved;
+    /* قبلاً ثبت شده → مستقیم برو (اگر سایت باز نشد، با پارامتر reset=false نمی‌مانیم) */
+    location.replace(saved);
+    return;
+  }
+
+  go.addEventListener('click', function () {
+    var url = normalize(input.value);
+    if (!url) { msg.textContent = 'آدرس معتبر نیست؛ مثلاً https://site.example.com'; return; }
+    msg.textContent = '';
+    go.disabled = true;
+    try { localStorage.setItem(KEY, url); } catch (e) { }
+    location.replace(url);
+  });
+  input.addEventListener('keydown', function (e) { if (e.key === 'Enter') go.click(); });
+})();
+</script>
+</body>
+</html>

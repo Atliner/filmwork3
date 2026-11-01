@@ -14,3 +14,16 @@ node_modules/
 filmwork-kv-backup*.json
 *.sqlite
 *.sqlite3
+
+# Local Node/shared-hosting runtime data (SQLite + compiled copy of worker.js)
+hosting/data/
+hosting/config.local.json
+
+# Capacitor / Android build outputs
+app/android/
+app/www/config.js
+app/.capacitor/
+
+# Electron build outputs
+app/desktop/release/
+app/desktop/dist/

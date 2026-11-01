@@ -416,6 +416,12 @@ function mergeSettings(s) {
     streamBindIp: true,
     streamDirectPlay: true,
     streamWatermark: true,
+    /* پردازش فایل روی سرور (MKV/MP4 چندترک، زیرنویس چسبیده). خاموش = پلیر سبک‌تر،
+       بدون probe و بدون demux؛ فقط زیرنویس/دوبلهٔ جدا که مدیر وارد می‌کند.
+       پیش‌فرض روشن است تا نصب‌های قدیمی رفتارشان عوض نشود. */
+    plInternal: true,
+    /* اگر نسخهٔ «دوبله» فایل صوتی جداگانه داشته باشد، خودکار همان صدا انتخاب شود */
+    plDubAuto: true,
     /* ── شبکهٔ تبلیغات خودکار (ads.js روی Worker/اکانت دیگر) ── */
     adNetEnabled: false,
     adNetUrl: '',
@@ -755,15 +761,35 @@ function storageError(message) { const e=new Error(message);e.status=503;return 
 function assertStorageWritable(env) {
   if (storagePaused(env)) throw storageError('انتقال دیتابیس در حال انجام است؛ تغییرات موقتاً متوقف‌اند');
 }
+/* autoInit: برای نصب تازهٔ «فقط D1» (بدون KV). وقتی هیچ KV بایند نشده باشد
+   خودکار روشن می‌شود: اسکیما یک‌بار ساخته و وضعیت ready ثبت می‌شود تا نه
+   صفحهٔ انتقال لازم باشد نه هیچ نوشتن KV. با داشتن KV (نصب قدیمی) رفتار
+   قبلی حفظ می‌شود؛ برای روشن‌کردن دستی: D1_AUTO_BOOTSTRAP=1 */
 class D1Backend {
-  constructor(db) {
+  constructor(db, opts) {
     if (!db?.prepare) throw storageError('اتصال D1 با نام DB تنظیم نشده است');
     this.db=db.withSession ? db.withSession('first-primary') : db;
+    this.autoInit=!!(opts && opts.autoInit);
     this.ready=null;
+  }
+  async bootstrap() {
+    await this.db.batch(D1_SCHEMA.map(sql=>this.db.prepare(sql)));
+    const state=JSON.stringify({phase:'ready',auto:true,startedAt:Date.now(),finishedAt:Date.now(),copied:0,verified:0,cursor:''});
+    await this.db.prepare('INSERT INTO filmwork_migration(id,state) VALUES(1,?) ON CONFLICT(id) DO NOTHING').bind(state).run();
   }
   async ensureReady() {
     if (!this.ready) this.ready=(async()=>{
-      const row=await this.db.prepare('SELECT state FROM filmwork_migration WHERE id=1').first();
+      let row=null;
+      try { row=await this.db.prepare('SELECT state FROM filmwork_migration WHERE id=1').first(); }
+      catch (e) {
+        /* جدول‌ها وجود ندارند (نصب تازه): فقط با اجازهٔ بوت‌استرپ ساخته می‌شوند */
+        if (!this.autoInit) throw e;
+        row=null;
+      }
+      if (!row && this.autoInit) {
+        await this.bootstrap();
+        row=await this.db.prepare('SELECT state FROM filmwork_migration WHERE id=1').first();
+      }
       if (!row || JSON.parse(row.state).phase!=='ready') throw storageError('انتقال D1 هنوز بررسی و نهایی نشده؛ دیتابیس خالی فعال نمی‌شود');
     })().catch(e=>{this.ready=null;throw e;});
     return this.ready;
@@ -828,11 +854,21 @@ function isHeavyPrefix (p) {
   return false;
 }
 function storageMode (env) {
-  const mode = String(env?.STORAGE_BACKEND || 'kv').toLowerCase();
-  if (mode === 'd1') return 'd1';
-  if (mode === 'hybrid') return 'hybrid';
-  if (mode !== 'kv') throw storageError('STORAGE_BACKEND باید kv، hybrid یا d1 باشد');
+  const raw = String(env?.STORAGE_BACKEND || '').trim().toLowerCase();
+  const hasDb = !!env?.DB;
+  const hasKv = !!env?.KV;
+  /* بدون تنظیم صریح: DB تنها → d1 (نصب بدون KV)، DB+KV → hybrid، فقط KV → kv */
+  if (!raw) { if (hasDb && !hasKv) return 'd1'; if (hasDb) return 'hybrid'; return 'kv'; }
+  if (raw === 'd1') return 'd1';
+  if (raw === 'hybrid') return 'hybrid';
+  if (raw !== 'kv') throw storageError('STORAGE_BACKEND باید kv، hybrid یا d1 باشد');
   return 'kv';
+}
+/* آیا D1 اجازهٔ ساخت خودکار اسکیما دارد؟ (نصب بدون KV یا درخواست صریح) */
+function d1AutoInit (env) {
+  if (!env || !env.DB) return false;
+  if (String(env.D1_AUTO_BOOTSTRAP || '') === '0') return false;
+  return String(env.D1_AUTO_BOOTSTRAP || '') === '1' || !env.KV;
 }
 function hasDataStorage(env) {
   const mode = storageMode(env);
@@ -842,7 +878,7 @@ function hasDataStorage(env) {
 function dataBackend(env) {
   // حالت قدیم (all-D1)؛ در حالت‌های hybrid/kv، Store خودش مسیریابی می‌کند.
   const mode = storageMode(env);
-  if (mode === 'd1') return new D1Backend(env.DB);
+  if (mode === 'd1') return new D1Backend(env.DB, { autoInit: d1AutoInit(env) });
   return env?.KV;
 }
 function memFallbackRead(k) {
@@ -995,7 +1031,7 @@ class Store {
     const sameBinding = !!(env && kv === env.KV);
     /* حالت قدیم all-D1: همه‌چیز یک بک‌اند (D1) */
     if (mode === 'd1') {
-      this.d1 = new D1Backend(this.env.DB);
+      this.d1 = new D1Backend(this.env.DB, { autoInit: d1AutoInit(this.env) });
       this.kv = this.d1;
       this.hybrid = false;
       this._d1Ready = undefined;
@@ -1004,7 +1040,7 @@ class Store {
     }
     /* حالت hybrid/kv: D1 (در صورت اتصال) برای کلیدهای سنگین، KV برای بقیه.
        اگر فراخوان بک‌اند دلخواه داده باشد (تست/مسیر legacy)، همان حفظ می‌شود. */
-    this.d1 = (this.env.DB && this.env.DB.prepare) ? new D1Backend(this.env.DB) : null;
+    this.d1 = (this.env.DB && this.env.DB.prepare) ? new D1Backend(this.env.DB, { autoInit: d1AutoInit(this.env) }) : null;
     this.kv = sameBinding ? this.env.KV : (kv || null);
     this.hybrid = !!(this.d1 && this.kv);
     this._d1Ready = undefined;
@@ -1022,6 +1058,8 @@ class Store {
   }
   /* بک‌اند محلی یک کلید: hybrid → D1 برای سنگین‌ها (با تنزل به KV)، بقیه KV */
   async localBackendFor(k) {
+    /* نصب بدون KV: هر کلیدی (سبک یا سنگین) روی D1 می‌نشیند */
+    if (!this.kv && this.d1) return (await this.heavyBe()) || null;
     if (!this.hybrid) return this.kv || null;
     if (isHeavyKey(k)) return (await this.heavyBe()) || this.kv || null;
     return this.kv || null;
@@ -1147,6 +1185,13 @@ class Store {
     do { const page = await this.listPage(prefix, cursor, 1000); keys.push(...page.keys); cursor = page.cursor; } while (cursor);
     return keys;
   }
+}
+
+/* ساخت انبار داده برای هر درخواست — تنها نقطهٔ ساخت Store در Worker.
+   در حالت «فقط D1» (بدون KV) هم همان Store کار می‌کند و هیچ نوشتن KV لازم نیست. */
+function makeStore(env) {
+  const e = env || {};
+  return new Store(e.KV || null, e);
 }
 
 /* ═══════════════════════ تلگرام: ربات، صفحهٔ share ═══════════════════════ */
@@ -1811,6 +1856,63 @@ function setVariantFileSubs(bag, track, quality, fileId, subsArr) {
     else delete cell.subs;
   }
 }
+/* «لینک فایل صوتی دوبله» هر نسخه (f.dubs) — دقیقاً مثل زیرنویس: آرایهٔ
+   {url,label}. فایل صدا جدا از تصویر پخش می‌شود (ویدئو بی‌صدا + <audio>)؛
+   پس می‌توان برای هر کیفیت/نسخه یک دوبلهٔ مستقل داشت، بدون remux. */
+function setVariantFileDubs(bag, track, quality, fileId, dubsArr) {
+  const v = ensureVariants(bag);
+  const t = track === 'dub' ? 'dub' : 'sub';
+  const q = qualityKey(quality);
+  if (!q || !v[t][q]) return;
+  const cell = v[t][q];
+  const fid = String(fileId || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 20);
+  const fl = Array.isArray(cell.files) && cell.files.length ? cell.files : null;
+  const val = (Array.isArray(dubsArr) && dubsArr.length) ? dubsArr.slice(0, STREAM_AUDS_MAX) : null;
+  if (fl) {
+    const targets = fid ? fl.filter(function (f) { return f && f.id === fid; }) : (fl.length === 1 ? fl.slice(0, 1) : []);
+    targets.forEach(function (f) {
+      if (val) f.dubs = val.map(function (s) { return { url: s.url, label: s.label || '' }; });
+      else delete f.dubs;
+    });
+  } else {
+    if (val) cell.dubs = val.map(function (s) { return { url: s.url, label: s.label || '' }; });
+    else delete cell.dubs;
+  }
+}
+/* متن فیلد «فایل صوتی دوبله»: «لینک | عنوان» با جداکنندهٔ ویرگول/خط جدید.
+   برای CDNهایی که پسوند ندارند، وجود « | عنوان» کافی است. */
+function streamIsAudioUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    if (/\.(mp3|m4a|m4b|aac|ogg|oga|opus|flac|wav|weba|mka)$/i.test(u.pathname)) return true;
+    const last = u.pathname.split('/').filter(Boolean).pop() || '';
+    return !!last && last.indexOf('.') < 0; /* مسیر بدون پسوند (CDN) */
+  } catch (e) { return false; }
+}
+function streamAudioFmtOf(url) {
+  try {
+    const p = new URL(url).pathname.toLowerCase();
+    const m = /\.(mp3|m4a|m4b|aac|ogg|oga|opus|flac|wav|weba|mka)$/.exec(p);
+    return m ? m[1] : 'mp3';
+  } catch (e) { return 'mp3'; }
+}
+function parseDubField(text) {
+  const out = [];
+  String(text || '').split(/[,،\n]/).map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (part) {
+    let label = '', url = part;
+    const bar = part.indexOf('|');
+    if (bar >= 0) { url = part.slice(0, bar).trim(); label = streamLabelClean(part.slice(bar + 1)); }
+    if (!streamIsAudioUrl(url)) return;
+    url = streamSafeUrl(url);
+    if (!url) return;
+    if (!label) {
+      try { label = decodeURIComponent(new URL(url).pathname.split('/').pop() || '').replace(/\.[a-z0-9]+$/i, ''); } catch (e) { label = ''; }
+    }
+    out.push({ url: url, label: label || 'دوبله' });
+  });
+  return out.slice(0, STREAM_AUDS_MAX);
+}
 /* متن فیلد زیرنویس: «لینک | عنوان» با جداکنندهٔ ویرگول/خط جدید */
 function parseSubField(text) {
   const out = [];
@@ -2184,6 +2286,8 @@ function adGateInfo(set) {
 
 const STREAM_MAX_PER_BAG = 24;
 const STREAM_SUBS_MAX = 6;
+/* سقف فایل‌های صوتی دوبلهٔ جدا برای هر نسخه */
+const STREAM_AUDS_MAX = 4;
 /* سقف هر درخواست بایتی موتور داخلی از مسیر /api/stream/bytes (بدون لبه) */
 const STREAM_BYTES_MAX = 6 * 1024 * 1024;
 const STREAM_FMTS = ['mp4', 'hls', 'webm', 'mkv', 'auto'];
@@ -2764,6 +2868,8 @@ function streamsOf(bag) {
         const vf = { id: 'vf_' + (f.id || (t + '_' + q)), track: t, quality: q, url: url, fmt: streamFmtOf(url), label: String(f.title || '').trim(), at: 0 };
         const fsubs = (f.subs && f.subs.length) ? f.subs : ((t === 'sub' || t === 'dub') && v[t][q] && v[t][q].subs) || null;
         if (Array.isArray(fsubs) && fsubs.length) vf.subs = fsubs.filter(function (s) { return s && s.url; }).slice(0, STREAM_SUBS_MAX);
+        const fdubs = (f.dubs && f.dubs.length) ? f.dubs : ((t === 'sub' || t === 'dub') && v[t][q] && v[t][q].dubs) || null;
+        if (Array.isArray(fdubs) && fdubs.length) vf.dubs = fdubs.filter(function (s) { return s && s.url; }).slice(0, STREAM_AUDS_MAX);
         push(vf);
       });
     });
@@ -2956,6 +3062,13 @@ async function streamEdgeChecks(request, secret, tok, kind) {
 function streamMime(fmt, upstreamType) {
   const t = String(upstreamType || '').toLowerCase();
   if (t.indexOf('video/') === 0 || t.indexOf('audio/') === 0) return upstreamType;
+  if (fmt === 'mp3') return 'audio/mpeg';
+  if (fmt === 'm4a' || fmt === 'm4b' || fmt === 'aac') return 'audio/mp4';
+  if (fmt === 'ogg' || fmt === 'oga' || fmt === 'opus') return 'audio/ogg';
+  if (fmt === 'weba') return 'audio/webm';
+  if (fmt === 'flac') return 'audio/flac';
+  if (fmt === 'wav') return 'audio/wav';
+  if (fmt === 'mka') return 'audio/x-matroska';
   if (fmt === 'mp4') return 'video/mp4';
   if (fmt === 'webm') return 'video/webm';
   if (fmt === 'mkv') return 'video/x-matroska';
@@ -3296,15 +3409,19 @@ async function streamBuild(store, set, user, item, picked, sid, request, avoid, 
   const ua = request.headers.get('user-agent') || '';
   const fmt = picked.stream.fmt || streamFmtOf(picked.stream.url);
   const kind = fmt === 'hls' ? 'h' : 'v';
+  /* ترک‌های داخلی فایل (صدا/زیرنویس چسبیده): اگر مدیر «پردازش ترک‌های داخلی» را
+     خاموش کرده باشد نه probe می‌کنیم نه demux — فقط یک درخواست سبک پخش می‌ماند.
+     درخواست صریح موتور داخلی از پلیر (demux) این پرچم را دوباره روشن می‌کند. */
+  const internal = set.plInternal !== false || wantDemux === true;
   /* فهرست ترک‌های داخل فایل (صدا/زیرنویس) مثل VLC — فقط فراداده؛ شکست بی‌صدا */
-  const trackInfo = await streamProbeTracks(picked.stream.url);
+  const trackInfo = internal ? await streamProbeTracks(picked.stream.url) : null;
   /* کانتینر واقعی فایل از magic بر fmt مقدم است (لینک بدون پسوند/پسوند غلط)؛
      webm و hls دست‌نخورده می‌مانند */
   let fmtOut = fmt;
   if (trackInfo && trackInfo.container && fmt !== 'webm' && fmt !== 'hls') fmtOut = trackInfo.container;
   /* پخش داخل‌صفحه (fetch بایت‌ها با dest=empty) وقتی لازم است که فایل MKV باشد یا
      چند ترک صدا/زیرنویس داخلی داشته باشد — یا کاربر خودش موتور داخلی را بخواهد. */
-  const demux = fmtOut !== 'hls' && fmtOut !== 'webm' && !!(
+  const demux = internal && fmtOut !== 'hls' && fmtOut !== 'webm' && !!(
     wantDemux === true || fmtOut === 'mkv'
     || (trackInfo && ((trackInfo.audio || []).length > 1 || (trackInfo.subs || []).length > 0))
   );
@@ -3333,6 +3450,22 @@ async function streamBuild(store, set, user, item, picked, sid, request, avoid, 
   let sidx = 0;
   for (const t of (picked.stream.subs || [])) await addSub(t, 'fs_' + (++sidx));
   for (const t of (picked.bag.streamSubs || [])) await addSub(t, 't_' + (++sidx));
+  /* فایل‌های صوتی دوبلهٔ جدا (f.dubs) — با همان توکن امن و همان قواعد لبه */
+  const audios = [];
+  const seenAudioUrls = new Set();
+  let aidx = 0;
+  for (const t of (picked.stream.dubs || [])) {
+    if (!t || audios.length >= STREAM_AUDS_MAX) continue;
+    const u = streamSafeUrl(t.url);
+    if (!u || seenAudioUrls.has(u)) continue;
+    seenAudioUrls.add(u);
+    const at = await streamTokenMake(edge.secret, {
+      v: 1, k: 'v', u: u, e: exp + 6 * 3600, s: sid, o: hosts, f: streamAudioFmtOf(u),
+      i: set.streamBindIp !== false && ip ? await streamBindHash(edge.secret, 'ip', streamIpPrefix(ip)) : '',
+      a: ua ? await streamBindHash(edge.secret, 'ua', ua) : '',
+    });
+    audios.push({ id: 'fa_' + (++aidx), label: t.label || ('دوبله ' + (audios.length + 1)), lang: 'fa', src: edge.base + '/v/' + at });
+  }
   const ep = streamEpisodeInfo(item, picked.bag);
   /* ── پردازش رسانه روی سرور ──
      برای فایل‌هایی که پردازش لازم دارند (MKV یا MP4 چندترک) سه آدرس آماده
@@ -3354,6 +3487,9 @@ async function streamBuild(store, set, user, item, picked, sid, request, avoid, 
     options: streamOptionsOf(item, picked.bag, user),
     subs: subs,
     subDefault: picked.track === 'sub' && subs.length ? subs[0].id : '',
+    /* دوبلهٔ صوتی جدا: برای نسخهٔ «دوبله»، پیش‌فرض همان صدا؛ برای بقیه خاموش */
+    audios: audios,
+    audioDefault: picked.track === 'dub' && set.plDubAuto !== false && audios.length ? audios[0].id : '',
     wm: set.streamWatermark === false ? '' : streamWatermarkOf(user),
   };
 }
@@ -8908,6 +9044,7 @@ function streamAdminState(set) {
     maxSessions: Math.max(1, Math.min(10, parseInt(set.streamMaxSessions, 10) || 2)),
     bindIp: set.streamBindIp !== false, watermark: set.streamWatermark !== false,
     directPlay: set.streamDirectPlay !== false,
+    internal: set.plInternal !== false, dubAuto: set.plDubAuto !== false,
     edges: (set.streamEdges || []).map(function (e) { return { id: e.id, url: e.url, off: !!e.off, secret: maskToken(e.secret) }; }),
   };
 }
@@ -8934,7 +9071,7 @@ function applyStreamAdSettings(set, body, env) {
     patch[k] = n;
     return '';
   }
-  ['streamEnabled', 'streamPublic', 'streamBindIp', 'streamWatermark', 'streamDirectPlay', 'adNetEnabled', 'adNetHouseFallback', 'adNetBotLinks',
+  ['streamEnabled', 'streamPublic', 'streamBindIp', 'streamWatermark', 'streamDirectPlay', 'plInternal', 'plDubAuto', 'adNetEnabled', 'adNetHouseFallback', 'adNetBotLinks',
     'plAdPre', 'plAdSwitch', 'plAdBanner', 'plAdPause', 'dlChargeEnabled'].forEach(function (k) { if (body[k] !== undefined) patch[k] = !!body[k]; });
   const errs = [
     int('streamTokenMin', 10, 720, 'اعتبار توکن پخش (دقیقه)'), int('streamMaxSessions', 1, 10, 'تعداد پخش هم‌زمان'),
@@ -9033,7 +9170,10 @@ async function storageStatus(store, set) {
     d1Ready: d1Ready,
     hasKv: !!store.kv && !(store.kv instanceof D1Backend),
     hasCacheKv: !!(store.env && store.env.CACHE_KV),
+    autoInit: d1AutoInit(store.env),
+    kvFree: !(store.env && store.env.KV),
     shards: (set.shards || []).map(function (x) { return { id: x.id, url: x.url }; }),
+    contentShards: (set.shards || []).length,
   };
 }
 async function handleAdmin(store, url, request, adminUser) {
@@ -9629,6 +9769,11 @@ async function handleAdmin(store, url, request, adminUser) {
       if (String(body.subs || '').trim() && !subsArr.length) return json({ error: 'لینک زیرنویس معتبر نیست؛ باید پسوند srt یا vtt داشته باشد (مثلاً https://cdn.example.com/fa.srt) — با ویرگول می‌توانید چند لینک بدهید' }, 400);
       setVariantFileSubs(bag, track, qk, plTargetId, subsArr);
     }
+    if (Object.prototype.hasOwnProperty.call(body, 'dubs')) {
+      const dubsArr = parseDubField(body.dubs);
+      if (String(body.dubs || '').trim() && !dubsArr.length) return json({ error: 'لینک فایل صوتی دوبله معتبر نیست؛ باید لینک کامل mp3/m4a/aac/ogg (یا آدرس بدون پسوند) با « | عنوان» باشد — با ویرگول می‌توانید چند صدا بدهید' }, 400);
+      setVariantFileDubs(bag, track, qk, plTargetId, dubsArr);
+    }
     if (body.premium !== undefined) {
       setVariantPremium(bag, track, qk, !!body.premium);
     }
@@ -10208,13 +10353,13 @@ async function tg(env, method, body) {
   return data.result;
 }
 async function site(env, action, body) {
-  const r = await contentBotAction(new Store(env.KV, env), body, action);
+  const r = await contentBotAction(makeStore(env), body, action);
   const data = await r.json();
   if (!r.ok) { const e = new Error(data.error || 'خطای سایت'); e.status = r.status; throw e; }
   return data;
 }
 async function contentSiteOrigin(env) {
-  const settings = await getSettings(new Store(env.KV, env));
+  const settings = await getSettings(makeStore(env));
   const raw = env.SITE_PUBLIC_ORIGIN || settings.publicUrl || '';
   try { const url = new URL(raw); if (url.protocol === 'https:') return url.origin; } catch {}
   throw new Error('دامنه عمومی سایت را در تنظیمات یا SITE_PUBLIC_ORIGIN مشخص کنید');
@@ -10914,7 +11059,7 @@ export class EditorSession {
     if (storagePaused(this.env)) { await storage.setAlarm(Date.now()+60000); return; }
     if (Number(job.at)-Date.now()>3000) { await storage.setAlarm(Number(job.at)+1000); return; } // alarm زودتر رسید
     let res;
-    try { res=await sendDlNotice(new Store(this.env.KV,this.env),job); } catch { res={ok:false,retry:true}; }
+    try { res=await sendDlNotice(makeStore(this.env),job); } catch { res={ok:false,retry:true}; }
     if (!res.ok && res.retry && (job.tries || 0)<4) {
       job.tries=(job.tries || 0)+1;
       await storage.put('dln',job);
@@ -11048,6 +11193,97 @@ function faviconSvg() {
   return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0b0e14"/><path d="M24 18 L46 32 L24 46 Z" fill="#ff7a1a"/><rect x="12" y="16" width="6" height="32" rx="3" fill="#ffb01f"/></svg>';
 }
 
+/* ── PWA: آیکن‌ها، manifest و service worker (نصب روی آیفون/اندروید/دسکتاپ) ──
+   آیکن‌ها PNG واقعی ۱۹۲ و ۵۱۲ هستند (Chrome برای نصب‌پذیر بودن همین را می‌خواهد؛
+   iOS هم apple-touch-icon می‌گیرد). base64 داخل فایل است تا هیچ فایل استاتیکی لازم نباشد. */
+const PWA_ICON_192 = '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';
+const PWA_ICON_512 = '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';
+function pwaIconResponse(size) {
+  const b64 = size >= 512 ? PWA_ICON_512 : PWA_ICON_192;
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Response(bytes, {
+    headers: {
+      'content-type': 'image/png',
+      'content-length': String(bytes.length),
+      'cache-control': 'public, max-age=604800, immutable',
+    },
+  });
+}
+function manifestResponse(settings) {
+  const name = String(settings.siteName || 'سینماگرام');
+  const desc = String(settings.tagline || 'فیلم و سریال');
+  const manifest = {
+    name: name,
+    short_name: name.slice(0, 14),
+    description: desc,
+    lang: 'fa',
+    dir: 'rtl',
+    id: '/',
+    start_url: '/?src=pwa',
+    scope: '/',
+    display: 'standalone',
+    display_override: ['fullscreen', 'standalone', 'minimal-ui'],
+    orientation: 'any',
+    background_color: '#0b0e14',
+    theme_color: '#0b0e14',
+    categories: ['entertainment', 'video'],
+    icons: [
+      { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+    ],
+    shortcuts: [
+      { name: 'جستجو', url: '/?src=pwa#/search', icons: [{ src: '/icon-192.png', sizes: '192x192' }] },
+      { name: 'حساب من', url: '/?src=pwa#/account', icons: [{ src: '/icon-192.png', sizes: '192x192' }] },
+    ],
+  };
+  return new Response(JSON.stringify(manifest), {
+    headers: { 'content-type': 'application/manifest+json; charset=utf-8', 'cache-control': 'public, max-age=3600' },
+  });
+}
+/* service worker: پوستهٔ صفحه آفلاین بماند؛ هیچ API/فایل ویدئویی کش نمی‌شود
+   (حجم و سهمیه، و مهم‌تر: محتوای خصوصی کاربر) */
+function serviceWorkerResponse() {
+  const js = `'use strict';
+const V = 'mvx-pwa-v1';
+const SHELL = ['/', '/favicon.svg', '/icon-192.png', '/icon-512.png'];
+self.addEventListener('install', function (e) {
+  e.waitUntil(caches.open(V).then(function (c) { return c.addAll(SHELL).catch(function () { }); }).then(function () { return self.skipWaiting(); }));
+});
+self.addEventListener('activate', function (e) {
+  e.waitUntil(caches.keys().then(function (keys) {
+    return Promise.all(keys.filter(function (k) { return k !== V; }).map(function (k) { return caches.delete(k); }));
+  }).then(function () { return self.clients.claim(); }));
+});
+self.addEventListener('fetch', function (e) {
+  var req = e.request;
+  if (req.method !== 'GET') return;
+  var u = new URL(req.url);
+  if (u.origin !== self.location.origin) return;
+  if (u.pathname.indexOf('/api/') === 0 || u.pathname.indexOf('/sv/') === 0 || u.pathname.indexOf('/v/') === 0 || u.pathname.indexOf('/r/') === 0) return;
+  if (u.pathname.indexOf('/assets/') === 0) {
+    e.respondWith(caches.open(V).then(function (c) {
+      return c.match(req).then(function (hit) {
+        var net = fetch(req).then(function (res) { if (res && res.ok) c.put(req, res.clone()); return res; }).catch(function () { return hit; });
+        return hit || net;
+      });
+    }));
+    return;
+  }
+  if (req.mode === 'navigate') {
+    e.respondWith(fetch(req).then(function (res) {
+      var copy = res.clone();
+      caches.open(V).then(function (c) { c.put('/', copy); }).catch(function () { });
+      return res;
+    }).catch(function () { return caches.match('/'); }));
+  }
+});
+`;
+  return new Response(js, { headers: { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'public, max-age=3600' } });
+}
+
 function htmlPage(settings) {
   const html = APP_HTML
     .replace(/@@PLAYER_V@@/g, playerAssetVersion())
@@ -11063,7 +11299,7 @@ export default {
     if (storagePath==='/storage-migration') return new Response(D1_MIGRATION_GATE,{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-frame-options':'DENY','referrer-policy':'no-referrer','x-robots-tag':'noindex'}});
     if (storagePath==='/api/admin/storage/d1') {
       try {
-        const store=new Store(env.KV,env);
+        const store=makeStore(env);
         // Read-only authentication: getSettings() may otherwise repair defaults
         // and write to KV while the migration freeze is active.
         const settings=await store.get('set');
@@ -11100,7 +11336,7 @@ export default {
     if (storagePaused(env)) return new Response('سایت برای انتقال امن دیتابیس موقتاً در حالت نگهداری است. لطفاً بعداً تلاش کنید.',{status:503,headers:{'Retry-After':'60','content-type':'text/plain; charset=utf-8'}});
     if (!request || typeof request.url !== 'string') {
       try {
-        const store = new Store(env.KV, env);
+        const store = makeStore(env);
         const set = await getSettings(store);
         /* عوض‌شدن ربات‌ها از Runtime variables: وبهوکِ ربات جدید خودکار ثبت می‌شود */
         if (set.botToken && webhookStale(set)) {
@@ -11112,13 +11348,24 @@ export default {
       return new Response('ok');
     }
     const url = new URL(request.url);
+    /* پایش سبک (uptime/mirror-health) — بدون خواندن دیتابیس */
+    if (url.pathname === '/api/health') {
+      return new Response(JSON.stringify({ ok: true, app: 'filmwork', v: '3.61', t: Date.now(), storage: storageMode(env) }), {
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' },
+      });
+    }
     try {
-      const store = new Store(env.KV, env);
+      const store = makeStore(env);
       if (store.kv instanceof D1Backend) await store.kv.ensureReady();
       if (url.pathname === '/favicon.ico' || url.pathname === '/favicon.svg') {
         return new Response(faviconSvg(), { headers: { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=86400' } });
       }
       if (url.pathname === '/img' && request.method === 'GET') return await imgResponse(request, url, store);
+      /* ── PWA: نصب روی آیفون/اندروید/دسکتاپ و پنجرهٔ مستقل ── */
+      if (url.pathname === '/manifest.webmanifest' || url.pathname === '/manifest.json') return manifestResponse(await getSettings(store));
+      if (url.pathname === '/sw.js') return serviceWorkerResponse();
+      if (url.pathname === '/icon-192.png' || url.pathname === '/apple-touch-icon.png') return pwaIconResponse(192);
+      if (url.pathname === '/icon-512.png' || url.pathname === '/icon-512' ) return pwaIconResponse(512);
       /* مهاجرت خودکار آدرس: با اولین درخواست از آدرس جدید، publicUrl و وبهوک ربات‌ها دنبال می‌روند */
       try { await ensureCurrentOrigin(store, await getSettings(store), request, ctx); } catch (eM) { }
       /* لبهٔ داخلی پخش آنلاین (وقتی Worker لبهٔ جدایی تعریف نشده) */
@@ -11216,10 +11463,13 @@ function MVX_PLAYER_MODULE(W) {
     '.mvp-v{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}' +
     '.mvp.fit-cover .mvp-v{object-fit:cover}.mvp.fit-fill .mvp-v{object-fit:fill}' +
     '.mvp-tap{position:absolute;inset:0;z-index:2}' +
-    '.mvp-sub{position:absolute;left:5%;right:5%;bottom:9%;z-index:4;text-align:center;pointer-events:none;transition:bottom .25s;line-height:1.55;font-weight:700}' +
-    '.mvp.ui .mvp-sub{bottom:118px}' +
-    '.mvp-sub span{display:inline;padding:.12em .45em;border-radius:6px;background:rgba(0,0,0,.62);text-shadow:0 0 3px #000,0 0 6px #000;box-decoration-break:clone;-webkit-box-decoration-break:clone;white-space:pre-line}' +
-    '.mvp.sub-nobg .mvp-sub span{background:none}.mvp.sub-s .mvp-sub{font-size:15px}.mvp.sub-m .mvp-sub{font-size:20px}.mvp.sub-l .mvp-sub{font-size:27px}.mvp.sub-xl .mvp-sub{font-size:34px}' +
+    '.mvp{--cc-fs:20px;--cc-fw:700;--cc-lh:1.55;--cc-ff:inherit;--cc-c:#fff;--cc-bg:rgba(0,0,0,.62);--cc-edge:0 0 3px #000,0 0 6px #000;--cc-bot:9%;--cc-pad:.12em .45em}' +
+    '.mvp-sub{position:absolute;left:5%;right:5%;bottom:var(--cc-bot);z-index:4;text-align:center;pointer-events:none;transition:bottom .25s;line-height:var(--cc-lh);font-weight:var(--cc-fw);font-family:var(--cc-ff);font-size:var(--cc-fs)}' +
+    '.mvp.ui .mvp-sub{bottom:min(calc(var(--cc-bot) + 86px),86%)}' +
+    '.mvp-sub span{display:inline;padding:var(--cc-pad);border-radius:6px;background:var(--cc-bg);color:var(--cc-c);text-shadow:var(--cc-edge);box-decoration-break:clone;-webkit-box-decoration-break:clone;white-space:pre-line}' +
+    '.mvp.sub-nobg .mvp-sub span{background:none}' +
+    '.mvp-opt.sw{padding:0;width:36px;height:30px;display:inline-flex;align-items:center;justify-content:center}' +
+    '.mvp-opt.sw i{width:16px;height:16px;border-radius:50%;display:block;box-shadow:0 0 0 1px rgba(255,255,255,.4)}' +
     '.mvp-wm{position:absolute;z-index:5;font-size:12px;font-weight:700;color:rgba(255,255,255,.34);text-shadow:0 0 2px rgba(0,0,0,.6);pointer-events:none;transition:left 2.5s ease,top 2.5s ease;white-space:nowrap;direction:ltr}' +
     '.mvp-grad{position:absolute;left:0;right:0;z-index:6;pointer-events:none;opacity:0;transition:opacity .25s}.mvp-grad.t{top:0;height:120px;background:linear-gradient(rgba(0,0,0,.75),transparent)}.mvp-grad.b{bottom:0;height:170px;background:linear-gradient(transparent,rgba(0,0,0,.85))}' +
     '.mvp.ui .mvp-grad{opacity:1}' +
@@ -11249,6 +11499,10 @@ function MVX_PLAYER_MODULE(W) {
     '.mvp-fx{position:absolute;top:50%;z-index:7;transform:translateY(-50%);padding:14px 18px;border-radius:999px;background:rgba(0,0,0,.55);font-weight:800;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}.mvp-fx.l{left:12%}.mvp-fx.r{right:12%}.mvp-fx.c{left:50%;transform:translate(-50%,-50%)}.mvp-fx.on{opacity:1}' +
     '.mvp-panel{position:absolute;z-index:12;right:12px;bottom:86px;width:min(340px,calc(100% - 24px));max-height:min(70vh,520px);overflow:auto;border-radius:16px;background:rgba(18,22,30,.94);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid rgba(255,255,255,.12);box-shadow:0 18px 50px rgba(0,0,0,.6);direction:rtl;display:none}' +
     '.mvp-panel.on{display:block;animation:mvpin .18s ease}@keyframes mvpin{from{opacity:0;transform:translateY(8px)}}' +
+    '.mvp-a{display:none}' +
+    '.mvp-hint{display:block;margin:6px 6px 0;font-size:11.5px;line-height:1.7;color:rgba(255,255,255,.55)}' +
+    '.mvp-chip.aud{background:rgba(255,176,31,.18);color:#ffd08a}' +
+    '.mvp-opt.audrow{display:inline-flex;align-items:center;gap:6px}' +
     '.mvp-ph{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.08);font-weight:800;font-size:14px;position:sticky;top:0;background:rgba(18,22,30,.98)}' +
     '.mvp-ph button{margin-inline-start:auto}' +
     '.mvp-sec{padding:8px 10px 10px}.mvp-sec h6{margin:4px 6px 6px;font-size:12px;color:rgba(255,255,255,.55);font-weight:700}' +
@@ -11278,7 +11532,9 @@ function MVX_PLAYER_MODULE(W) {
     '.mvp-toast{position:absolute;z-index:25;left:50%;top:70px;transform:translateX(-50%);padding:9px 16px;border-radius:999px;background:rgba(0,0,0,.75);font-size:13px;font-weight:700;opacity:0;transition:opacity .2s;pointer-events:none;direction:rtl;white-space:nowrap}.mvp-toast.on{opacity:1}' +
     '.mvp-resume{position:absolute;z-index:11;left:50%;bottom:110px;transform:translateX(-50%);display:none;gap:8px;align-items:center;padding:8px 8px 8px 14px;border-radius:999px;background:rgba(18,22,30,.92);border:1px solid rgba(255,255,255,.14);direction:rtl;font-size:13px;font-weight:700;white-space:nowrap}' +
     '.mvp-resume.on{display:flex}.mvp-resume button{appearance:none;border:0;border-radius:999px;padding:7px 14px;font:inherit;font-weight:800;cursor:pointer;background:rgba(255,255,255,.12);color:#fff}.mvp-resume button.pri{background:#ffb01f;color:#111}' +
-    '@media (max-width:600px){.mvp-hm{display:none!important}.mvp-btn{width:38px;height:38px}.mvp-time{font-size:12px;padding:0 4px}.mvp.ui .mvp-sub{bottom:104px}}';
+    '@media (max-width:600px){.mvp-hm{display:none!important}.mvp-btn{width:38px;height:38px}.mvp-time{font-size:12px;padding:0 4px}.mvp.ui .mvp-sub{bottom:min(calc(var(--cc-bot) + 70px),86%)}' +
+   '.mvp-panel{left:8px;right:8px;bottom:76px;width:auto;max-height:66vh;border-radius:18px}' +
+   '.mvp-opt{padding:9px 13px;font-size:13.5px}}';
 
   var P = null;
   function injectCss() {
@@ -11347,11 +11603,12 @@ function MVX_PLAYER_MODULE(W) {
 
   function build() {
     var r = D.createElement('div');
-    r.className = 'mvp ui loading paused sub-' + (ls('mvx_subsize') || 'm') + (ls('mvx_subbg') === false ? ' sub-nobg' : '');
+    r.className = 'mvp ui loading paused';
     r.setAttribute('dir', 'ltr');
     r.setAttribute('role', 'dialog');
     r.innerHTML =
       '<video class="mvp-v" playsinline webkit-playsinline preload="auto" disablepictureinpicture disableremoteplayback x-webkit-airplay="deny" controlslist="nodownload noplaybackrate noremoteplayback"></video>' +
+      '<audio class="mvp-a" preload="auto" playsinline></audio>' +
       '<div class="mvp-sub" dir="auto"></div><div class="mvp-wm"></div><div class="mvp-tap"></div>' +
       '<div class="mvp-grad t"></div><div class="mvp-grad b"></div>' +
       '<div class="mvp-center"><div class="mvp-spin"></div><button type="button" class="mvp-big" aria-label="پخش">' + I.play + '</button></div>' +
@@ -11382,8 +11639,10 @@ function MVX_PLAYER_MODULE(W) {
     var v = P.video;
     try { v.disablePictureInPicture = true; v.disableRemotePlayback = true; } catch (e) { }
     var vol = ls('mvx_vol');
-    if (vol && typeof vol.v === 'number') { v.volume = Math.max(0, Math.min(1, vol.v)); v.muted = !!vol.m; }
-    q('.mvp-vol input', r).value = v.muted ? 0 : v.volume;
+    if (vol && typeof vol.v === 'number') { v.volume = Math.max(0, Math.min(1, vol.v)); P.userMuted = !!vol.m; }
+    v.muted = !!P.userMuted;
+    q('.mvp-vol input', r).value = P.userMuted ? 0 : v.volume;
+    applyCc(r);
     bindUi();
   }
 
@@ -11394,8 +11653,9 @@ function MVX_PLAYER_MODULE(W) {
     var t2 = '';
     if (info.ep && info.ep.cur) t2 = 'فصل ' + fa(info.ep.cur.season) + ' · قسمت ' + fa(info.ep.cur.n) + (info.ep.cur.title && !/^قسمت/.test(info.ep.cur.title) ? ' — ' + info.ep.cur.title : '');
     var cur = info.cur || P.cur || {};
-    var chips = (cur.track ? '<span class="mvp-chip">' + (cur.track === 'dub' ? '🎙 دوبله' : '💬 زیرنویس') + '</span>' : '') +
-      (cur.quality ? '<span class="mvp-chip acc">' + esc(qLabel(cur.quality)) + '</span>' : '');
+    var chips = (cur.track ? '<span class="mvp-chip" data-a="cc">' + (cur.track === 'dub' ? '🎙 دوبله' : '💬 زیرنویس') + '</span>' : '') +
+      (P.audioOn ? '<span class="mvp-chip aud" data-a="cc">🎙 ' + esc(audioLabel()) + '</span>' : '') +
+      (cur.quality ? '<span class="mvp-chip acc" data-a="set">' + esc(qLabel(cur.quality)) + '</span>' : '');
     q('.t1', P.root).textContent = t1;
     q('.t2', P.root).innerHTML = esc(t2) + chips;
     var ep = info.ep;
@@ -11484,6 +11744,7 @@ function MVX_PLAYER_MODULE(W) {
     P.forceClientDemux = false;
     try { P.forceClientDemux = ls('mvpEng') === 'client'; } catch (e) { }
     setupSubs(info);
+    setupAudios(info);
     /* فهرست ترک‌ها و زیرنویس‌های داخلی از Worker (پیش از انتخاب مسیر پخش) */
     srvFetchTracks(info);
     setSource(info.src, info.fmt, reason === 'start' || reason === 'next');
@@ -13992,6 +14253,224 @@ function MVX_PLAYER_MODULE(W) {
     if (box.innerHTML !== html) box.innerHTML = html;
   }
 
+  /* ══════════════ دوبلهٔ صوتی جدا (external dub) ══════════════
+     مدیر برای هر نسخه می‌تواند فایل صوتی دوبله (mp3/m4a/…) را مثل زیرنویس وارد
+     کند. پلیر تصویر را بی‌صدا و همان فایل صدا را با <audio> پخش می‌کند و
+     هم‌زمان نگه می‌دارد: تعویض کیفیت، جهش، سرعت، توقف و بی‌صدا همه با هم
+     همگام می‌شوند. مزیت: هیچ remux/دموکسی لازم نیست و برای هر کیفیت می‌توان
+     دوبلهٔ مستقل داشت. */
+  function audiosOf() { return (P && Array.isArray(P.audios)) ? P.audios : []; }
+  function currentAudio() {
+    if (!P || !P.audioOn) return null;
+    var hit = audiosOf().filter(function (a) { return a.id === P.audioOn; })[0];
+    return hit || null;
+  }
+  function audioEl() { return P ? q('.mvp-a', P.root) : null; }
+  function audioTarget() {
+    return Math.max(0, (Number(P && P.video && P.video.currentTime) || 0) + (Number(P && P.audioOffset) || 0));
+  }
+  function audioStop() {
+    var a = audioEl();
+    if (!a) return;
+    try { a.pause(); } catch (e) { }
+    try { a.removeAttribute('src'); } catch (e) { }
+    P.audioReady = false;
+    P.audioSrc = '';
+  }
+  function audioSync(force) {
+    var a = audioEl();
+    if (!P || !P.audioOn || !a || !P.audioReady) return;
+    var target = audioTarget();
+    var drift = target - (Number(a.currentTime) || 0);
+    /* در پخش عادی فقط انحراف محسوس را درست می‌کنیم (پرش‌های ریز شنیده نمی‌شود) */
+    if (force || Math.abs(drift) > 0.35) { try { a.currentTime = target; } catch (e) { } }
+    try { a.playbackRate = P.video.playbackRate || 1; } catch (e) { }
+  }
+  function audioPlay() {
+    var a = audioEl();
+    if (!P || !P.audioOn || !a || !P.audioReady) return;
+    audioSync(false);
+    try {
+      a.playbackRate = P.video.playbackRate || 1;
+      a.volume = P.video.volume;
+      a.muted = !!P.userMuted;
+      var pr = a.play();
+      if (pr && pr.catch) pr.catch(function () { if (P && P.audioOn) toast('صدای دوبله پخش نشد؛ دوباره انتخاب کنید'); });
+    } catch (e) { }
+  }
+  function audioPause() { var a = audioEl(); if (a) { try { a.pause(); } catch (e) { } } }
+  function audioLabel() {
+    var tr = currentAudio();
+    return tr ? (tr.label || 'دوبله') : '';
+  }
+  function selectAudio(id, silent) {
+    if (!P) return;
+    var list = audiosOf();
+    var tr = id ? list.filter(function (a) { return a.id === id; })[0] : null;
+    if (id && !tr) id = '';
+    var a = audioEl();
+    if (!id) {
+      P.audioOn = ''; P.audioPref = '';
+      audioStop();
+      P.video.muted = !!P.userMuted;
+      try { paintVol(); } catch (e) { }
+      try { title(); renderPanel(); if (P.panel === 'trk') renderTrk(); } catch (e) { }
+      if (!silent) toast('صدای اصلی (همراه تصویر)');
+      return;
+    }
+    if (!a) return;
+    /* انتخاب دوبارهٔ همان صدا (تمدید توکن/تعویض کیفیت با همان فایل) → بارگذاری دوباره لازم نیست */
+    var same = P.audioOn === tr.id && P.audioSrc === tr.src && P.audioReady;
+    P.audioOn = tr.id;
+    P.audioPref = tr.label || '';
+    P.video.muted = true;             /* تصویر بی‌صدا؛ صدا از فایل دوبله */
+    if (same) { audioSync(true); if (!P.video.paused) audioPlay(); }
+    else {
+      P.audioReady = false;
+      a.onloadedmetadata = null;
+      a.oncanplay = function () {
+        if (!P || P.audioOn !== tr.id) return;
+        P.audioReady = true;
+        audioSync(true);
+        if (!P.video.paused) audioPlay();
+      };
+      a.onerror = function () {
+        if (!P || P.audioOn !== tr.id) return;
+        toast('فایل صوتی دوبله بارگذاری نشد');
+        selectAudio('', true);
+      };
+      a.onended = function () {
+        if (P && P.audioOn === tr.id && !P.video.paused && !P.video.ended) toast('فایل دوبله تمام شد');
+      };
+      P.audioSrc = tr.src;
+      try { a.src = tr.src; a.load(); } catch (e) { }
+    }
+    try { paintVol(); title(); renderPanel(); if (P.panel === 'trk') renderTrk(); } catch (e) { }
+    if (!silent) toast('صدا: ' + (tr.label || 'دوبله'));
+  }
+  /* هم‌زمانی ترجیح کاربر بین کیفیت‌ها/قسمت‌ها حفظ می‌شود (با عنوان صدا) */
+  function setupAudios(info) {
+    if (!P) return;
+    P.audios = (info && Array.isArray(info.audios)) ? info.audios : [];
+    var want = '';
+    if (P.audioPref) {
+      var byLabel = P.audios.filter(function (a) { return (a.label || '') === P.audioPref; })[0];
+      if (byLabel) want = byLabel.id;
+    }
+    if (!want && P.audioOn && P.audios.some(function (a) { return a.id === P.audioOn; })) want = P.audioOn;
+    if (!want && info && info.audioDefault) want = info.audioDefault;
+    if (P.audioOn && !P.audios.some(function (a) { return a.id === P.audioOn; })) {
+      P.audioOn = '';
+      audioStop();
+    }
+    selectAudio(want || '', true);
+  }
+  function mutedNow() {
+    if (!P) return false;
+    if (P.audioOn) {
+      var a = audioEl();
+      return !!(P.userMuted || (a && (a.muted || a.volume === 0)));
+    }
+    return !!(P.video.muted || P.video.volume === 0);
+  }
+  function paintVol() {
+    if (!P) return;
+    var btn = P.root && q('[data-a="mute"]', P.root);
+    if (btn) btn.innerHTML = mutedNow() ? I.mute : I.vol;
+    var vi = P.root && q('.mvp-vol input', P.root);
+    if (vi) vi.value = mutedNow() ? 0 : P.video.volume;
+  }
+  function toggleMute() {
+    if (!P) return;
+    var v = P.video, a = audioEl();
+    var next = !mutedNow();
+    P.userMuted = next;
+    if (a) a.muted = next;
+    v.muted = P.audioOn ? true : next;
+    if (!next) {
+      if (!(v.volume > 0)) v.volume = 0.6;
+      if (a && !(a.volume > 0)) a.volume = 0.6;
+    }
+    paintVol();
+    ls('mvx_vol', { v: v.volume, m: next });
+  }
+
+  /* ══════════════ ظاهر زیرنویس (فونت/اندازه/رنگ/حاشیه/پس‌زمینه/جا/فاصلهٔ خط) ══════════════
+     همه با CSS variable روی ریشهٔ پلیر اعمال می‌شود؛ خودِ رندر زیرنویس
+     (renderSub) دست نمی‌خورد، پس این تنظیمات برای زیرنویس دستی و داخلی یکسان است. */
+  var CC_DEF = { size: 'm', font: 'system', color: '#ffffff', edge: 'shadow', bg: 62, pos: 'bottom', lh: 'normal' };
+  var CC_FONT = {
+    system: "var(--mvp-ff,'Vazirmatn',Vazir,'IRANSans','Segoe UI',Tahoma,sans-serif)",
+    naskh: "'Noto Naskh Arabic','Iranian Sans',serif",
+    tahoma: 'Tahoma,Arial,sans-serif',
+    mono: "'Courier New',monospace"
+  };
+  var CC_SIZE = { s: 16, m: 20, l: 27, xl: 34 };
+  var CC_EDGE = {
+    none: 'none',
+    shadow: '0 0 3px #000,0 0 6px #000',
+    outline: '-1.4px 0 #000,1.4px 0 #000,0 -1.4px #000,0 1.4px #000,-1.4px -1.4px #000,1.4px 1.4px #000,-1.4px 1.4px #000,1.4px -1.4px #000',
+    glow: '0 0 10px rgba(0,0,0,.92)'
+  };
+  var CC_POS = { bottom: '9%', mid: '26%', top: '78%' };
+  var CC_LH = { tight: 1.25, normal: 1.55, loose: 1.95 };
+  var CC_BG = [0, 35, 62, 85];
+  var CC_COLOR = ['#ffffff', '#ffe066', '#7ee7ff', '#b6f5a1', '#ffb3d1'];
+  function ccPrefs() {
+    var o = ls('mvx_cc');
+    if (!o || typeof o !== 'object') o = {};
+    var out = {};
+    for (var k in CC_DEF) out[k] = (o[k] === undefined ? CC_DEF[k] : o[k]);
+    /* مهاجرت از تنظیمات قدیمی (کلاس‌های sub-s/m/l/xl و کلید sub-nobg) */
+    if (o.size === undefined) { var old = ls('mvx_subsize'); if (old && CC_SIZE[old]) out.size = old; }
+    if (o.bg === undefined && ls('mvx_subbg') === false) out.bg = 0;
+    if (!CC_SIZE[out.size]) out.size = 'm';
+    if (!CC_FONT[out.font]) out.font = 'system';
+    if (!CC_EDGE[out.edge]) out.edge = 'shadow';
+    if (!CC_POS[out.pos]) out.pos = 'bottom';
+    if (!CC_LH[out.lh]) out.lh = 'normal';
+    if (CC_BG.indexOf(Number(out.bg)) < 0) out.bg = CC_DEF.bg;
+    if (typeof out.color !== 'string' || !out.color) out.color = CC_DEF.color;
+    return out;
+  }
+  function applyCc(root) {
+    var r = root || (P && P.root);
+    if (!r) return;
+    var o = ccPrefs();
+    var st = r.style || {};
+    function setv(k, v) { try { if (st.setProperty) st.setProperty(k, v); else st[k] = v; } catch (e) { st[k] = v; } }
+    setv('--cc-fs', (CC_SIZE[o.size] || 20) + 'px');
+    setv('--cc-ff', CC_FONT[o.font] || CC_FONT.system);
+    setv('--cc-c', o.color);
+    setv('--cc-edge', CC_EDGE[o.edge] || CC_EDGE.shadow);
+    setv('--cc-lh', String(CC_LH[o.lh] || 1.55));
+    setv('--cc-bot', CC_POS[o.pos] || CC_POS.bottom);
+    var pct = Number(o.bg) || 0;
+    setv('--cc-bg', pct > 0 ? 'rgba(0,0,0,' + Math.round(pct) / 100 + ')' : 'transparent');
+    setv('--cc-fw', '700');
+    try { r.classList.toggle('sub-nobg', !(pct > 0)); } catch (e) { }
+    if (P) P.cc = o;
+    return o;
+  }
+  function ccSet(key, val) {
+    var o = ccPrefs();
+    if (!(key in CC_DEF)) return o;
+    if (key === 'bg') val = Number(val) || 0;
+    o[key] = val;
+    ls('mvx_cc', o);
+    var fixed = ccPrefs();
+    if (fixed[key] !== o[key]) { ls('mvx_cc', fixed); }
+    applyCc();
+    if (P && P.panel === 'set') renderPanel();
+    toast('ظاهر زیرنویس به‌روز شد');
+    return fixed;
+  }
+  function ccOption(key, list, cur) {
+    return list.map(function (z) {
+      return '<button type="button" class="mvp-opt' + (String(cur) === z[0] ? ' on' : '') + '" data-cc="' + key + '" data-ccv="' + z[0] + '">' + z[1] + '</button>';
+    }).join('');
+  }
+
   /* ── تنظیمات: نسخه، کیفیت، زیرنویس، سرعت، نسبت تصویر ── */
   function renderTrk() {
     var panel = q('[data-p="trk"]', P.root);
@@ -14010,10 +14489,32 @@ function MVX_PLAYER_MODULE(W) {
     else if (P.mp4) curAudio = P.mp4.audio ? P.mp4.audio.id : 0;
     else curAudio = P.mp4AudioPref || 0;
     var engine = P.srvActive ? 'سرور (remux)' : (P.mkv ? 'MKV' : (P.mp4 ? 'MP4' : ''));
-    var html = '<div class="mvp-ph">☰ ترک‌های فایل (صدا و زیرنویس)<button type="button" class="mvp-btn" data-x="1">' + I.close + '</button></div>';
+    var html = '<div class="mvp-ph">☰ صدا و زیرنویس<button type="button" class="mvp-btn" data-x="1">' + I.close + '</button></div>';
+    /* دوبلهٔ جدا (فایل صوتی مدیر) — همیشه اول، بدون هیچ تنظیم اضافه */
+    var ext = audiosOf();
+    if (ext.length) {
+      html += '<div class="mvp-sec"><h6>🎙 صدا / دوبله</h6><div class="mvp-opts">' +
+        '<button type="button" class="mvp-opt' + (!P.audioOn ? ' on' : '') + '" data-extaud="">صدای اصلی</button>' +
+        ext.map(function (a) {
+          return '<button type="button" class="mvp-opt audrow' + (a.id === P.audioOn ? ' on' : '') + '" data-extaud="' + esc(a.id) + '">' + esc(a.label || 'دوبله') + (a.id === P.audioOn ? ' ✓' : '') + '</button>';
+        }).join('') + '</div>';
+      if (P.audioOn) {
+        html += '<div class="mvp-opts" style="margin-top:8px">' +
+          '<button type="button" class="mvp-opt" data-audshift="-0.5">−۰٫۵ ثانیه</button>' +
+          '<button type="button" class="mvp-opt" data-audshift="0">' + (P.audioOffset ? fa((P.audioOffset > 0 ? '+' : '') + P.audioOffset.toFixed(1)) + ' (صفر)' : 'هم‌زمان') + '</button>' +
+          '<button type="button" class="mvp-opt" data-audshift="0.5">+۰٫۵ ثانیه</button></div>' +
+          '<span class="mvp-hint">اگر صدا کمی جلو/عقب است، با این دکمه‌ها تنظیم کنید؛ ویدئو بی‌صدا و صدا از فایل دوبله پخش می‌شود.</span>';
+      } else if (!P.srvActive && !P.mkv && !P.mp4) {
+        html += '<span class="mvp-hint">صدا از داخل خود فایل تصویر پخش می‌شود. برای انتخاب دوبلهٔ فارسی، یکی از فایل‌های بالا را بزنید.</span>';
+      }
+      html += '</div>';
+    }
+    if (!ext.length && !P.srvActive && !P.mkv && !P.mp4 && !(P.trackInfo && ((P.trackInfo.audio || []).length > 1 || (P.trackInfo.subs || []).length))) {
+      html += '<div class="mvp-sec"><span class="mvp-hint">این نسخه دوبله یا ترک داخلی ندارد؛ فقط زیرنویس‌های همین فهرست در دسترس‌اند.</span></div>';
+    }
     if (P.srvActive) html += '<div class="mvp-sec"><span style="font-size:11.5px;color:var(--tx3)">پردازش روی سرور فعال است: Worker خودش MKV را به fMP4 تبدیل می‌کند (بدون دموکسر در مرورگر) — تعویض صدا و زیرنویس داخلی از همین‌جا انجام می‌شود.</span></div>';
     else if (engine) html += '<div class="mvp-sec"><span style="font-size:11.5px;color:var(--tx3)">موتور پخش داخل‌صفحهٔ ' + engine + ' فعال است — تعویض ترک صدا و زیرنویس داخلی از همین‌جا انجام می‌شود.</span></div>';
-    html += '<div class="mvp-sec"><h6>🔊 صدا</h6><div class="mvp-opts">';
+    html += '<div class="mvp-sec"><h6>🔊 ترک صدای داخل فایل</h6><div class="mvp-opts">';
     if (switchable) html += '<button type="button" class="mvp-opt' + (!curAudio ? ' on' : '') + '" data-aud="0">غیرفعال</button>';
     if (!auds.length) {
       html += '<span style="font-size:12px;color:var(--tx3)">فهرست ترک‌های داخل فایل در دسترس نیست.' + (P.mp4 || P.mkv ? '' : ' <button type="button" class="mvp-opt" data-demux="1" style="margin-top:6px">🔁 خواندن ترک‌های داخل فایل</button>') + '</span>';
@@ -14049,7 +14550,7 @@ function MVX_PLAYER_MODULE(W) {
       var no = String(s.id).slice(4);
       return !srvNos[no] || !!(P.embCues && P.embCues[s.embedded]);
     });
-    html += '<div class="mvp-sec"><h6>💬 زیرنویس</h6><div class="mvp-opts"><button type="button" class="mvp-opt' + (!P.subOn ? ' on' : '') + '" data-sub="">غیرفعال</button>' +
+    html += '<div class="mvp-sec"><h6>💬 زیرنویس' + (subs.length ? ' (' + fa(subs.length) + ')' : '') + '</h6><div class="mvp-opts"><button type="button" class="mvp-opt' + (!P.subOn ? ' on' : '') + '" data-sub="">غیرفعال</button>' +
       subs.map(function (s) {
         /* زیرنویس داخلی وقتی موتور (MKV/MSE) فعال است قابل انتخاب است */
         var usable = !s.listed || !!(s.embedded != null && P.embCues && P.embCues[s.embedded]) || !!(P.mkv && P.mkv.st && P.mkv.st.subs && P.mkv.st.subs[s.embedded]);
@@ -14081,7 +14582,6 @@ function MVX_PLAYER_MODULE(W) {
     var qs = opts[cur.track] || [];
     var speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
     var fits = [['contain', 'اصلی'], ['cover', 'پرکردن'], ['fill', 'کشیده']];
-    var sizes = [['s', 'کوچک'], ['m', 'متوسط'], ['l', 'بزرگ'], ['xl', 'خیلی بزرگ']];
     var html = '<div class="mvp-ph">⚙ تنظیمات پخش<button type="button" class="mvp-btn" data-x="1">' + I.close + '</button></div>';
     if (tracks.length) html += '<div class="mvp-sec"><h6>نسخه (صدا)</h6><div class="mvp-opts">' + tracks.map(function (t) {
       return '<button type="button" class="mvp-opt' + (t[0] === cur.track ? ' on' : '') + '" data-track="' + t[0] + '">' + t[1] + '</button>';
@@ -14089,14 +14589,43 @@ function MVX_PLAYER_MODULE(W) {
     if (qs.length) html += '<div class="mvp-sec"><h6>نسخه / کیفیت</h6><div class="mvp-opts">' + qs.map(function (o) {
       return '<button type="button" class="mvp-opt' + (o.id === cur.streamId ? ' on' : '') + (o.locked ? ' lock' : '') + '" data-sid="' + esc(o.id) + '" data-q="' + esc(o.q) + '">' + esc(o.label) + (o.locked ? ' ⭐' : '') + '</button>';
     }).join('') + '</div></div>';
-    if ((P.subs || []).length) {
-      html += '<div class="mvp-sec"><h6>زیرنویس</h6><div class="mvp-opts"><button type="button" class="mvp-opt' + (!P.subOn ? ' on' : '') + '" data-sub="">خاموش</button>' +
-        P.subs.map(function (s) { return '<button type="button" class="mvp-opt' + (s.id === P.subOn ? ' on' : '') + '" data-sub="' + esc(s.id) + '">' + esc(s.label) + '</button>'; }).join('') + '</div>' +
-        '<h6 style="margin-top:10px">اندازهٔ زیرنویس</h6><div class="mvp-opts">' + sizes.map(function (z) {
-          return '<button type="button" class="mvp-opt' + (P.root.classList.contains('sub-' + z[0]) ? ' on' : '') + '" data-size="' + z[0] + '">' + z[1] + '</button>';
-        }).join('') + '<button type="button" class="mvp-opt' + (!P.root.classList.contains('sub-nobg') ? ' on' : '') + '" data-subbg="1">پس‌زمینه</button></div>' +
-        '<h6 style="margin-top:10px">هم‌زمانی زیرنویس (G / H)</h6><div class="mvp-opts"><button type="button" class="mvp-opt" data-off="-0.5">−۰٫۵ ثانیه</button><button type="button" class="mvp-opt" data-off="0">' + (P.subOffset ? fa((P.subOffset > 0 ? '+' : '') + P.subOffset.toFixed(1)) + ' (صفر)' : 'بدون تأخیر') + '</button><button type="button" class="mvp-opt" data-off="0.5">+۰٫۵ ثانیه</button></div></div>';
+    var ext = audiosOf();
+    if (ext.length) {
+      html += '<div class="mvp-sec"><h6>🎙 صدا / دوبله</h6><div class="mvp-opts">' +
+        '<button type="button" class="mvp-opt' + (!P.audioOn ? ' on' : '') + '" data-extaud="">صدای اصلی</button>' +
+        ext.map(function (a) {
+          return '<button type="button" class="mvp-opt' + (a.id === P.audioOn ? ' on' : '') + '" data-extaud="' + esc(a.id) + '">' + esc(a.label || 'دوبله') + '</button>';
+        }).join('') + '</div>';
+      if (P.audioOn) {
+        html += '<h6 style="margin-top:10px">هم‌زمانی صدا</h6><div class="mvp-opts">' +
+          '<button type="button" class="mvp-opt" data-audshift="-0.5">−۰٫۵ ثانیه</button>' +
+          '<button type="button" class="mvp-opt" data-audshift="0">' + (P.audioOffset ? fa((P.audioOffset > 0 ? '+' : '') + P.audioOffset.toFixed(1)) + ' (صفر)' : 'بدون تأخیر') + '</button>' +
+          '<button type="button" class="mvp-opt" data-audshift="0.5">+۰٫۵ ثانیه</button></div>' +
+          '<span class="mvp-hint">تصویر بی‌صدا می‌شود و صدا از فایل دوبله می‌آید؛ این تنظیم اختلاف جزئی را جبران می‌کند.</span>';
+      }
+      html += '</div>';
     }
+    var cc = ccPrefs();
+    var subList = P.subs || [];
+    html += '<div class="mvp-sec"><h6>💬 زیرنویس</h6>';
+    if (subList.length) {
+      html += '<div class="mvp-opts"><button type="button" class="mvp-opt' + (!P.subOn ? ' on' : '') + '" data-sub="">خاموش</button>' +
+        subList.map(function (s) { return '<button type="button" class="mvp-opt' + (s.id === P.subOn ? ' on' : '') + '" data-sub="' + esc(s.id) + '">' + esc(s.label) + '</button>'; }).join('') + '</div>';
+    } else {
+      html += '<span class="mvp-hint">برای این نسخه زیرنویسی ثبت نشده است؛ تنظیمات ظاهر همین‌جا آماده است.</span>';
+    }
+    html += '<h6 style="margin-top:10px">اندازه</h6><div class="mvp-opts">' + ccOption('size', [['s', 'کوچک'], ['m', 'متوسط'], ['l', 'بزرگ'], ['xl', 'خیلی بزرگ']], cc.size) + '</div>' +
+      '<h6 style="margin-top:10px">فونت</h6><div class="mvp-opts">' + ccOption('font', [['system', 'پیش‌فرض'], ['naskh', 'نسخ'], ['tahoma', 'تاهوما'], ['mono', 'تک‌عرض']], cc.font) + '</div>' +
+      '<h6 style="margin-top:10px">رنگ متن</h6><div class="mvp-opts">' + CC_COLOR.map(function (c) {
+        return '<button type="button" class="mvp-opt sw' + (cc.color === c ? ' on' : '') + '" data-cc="color" data-ccv="' + c + '" title="' + c + '"><i style="background:' + c + '"></i></button>';
+      }).join('') + '</div>' +
+      '<h6 style="margin-top:10px">حاشیه و خوانایی</h6><div class="mvp-opts">' + ccOption('edge', [['shadow', 'سایه'], ['outline', 'خط دور'], ['glow', 'هاله'], ['none', 'بدون']], cc.edge) + '</div>' +
+      '<h6 style="margin-top:10px">پس‌زمینه</h6><div class="mvp-opts">' + CC_BG.map(function (b) {
+        return '<button type="button" class="mvp-opt' + (Number(cc.bg) === b ? ' on' : '') + '" data-cc="bg" data-ccv="' + b + '">' + (b ? fa(String(b)) + '٪' : 'بدون') + '</button>';
+      }).join('') + '</div>' +
+      '<h6 style="margin-top:10px">جای زیرنویس</h6><div class="mvp-opts">' + ccOption('pos', [['bottom', 'پایین'], ['mid', 'وسط'], ['top', 'بالا']], cc.pos) + '</div>' +
+      '<h6 style="margin-top:10px">فاصلهٔ خطوط</h6><div class="mvp-opts">' + ccOption('lh', [['tight', 'فشرده'], ['normal', 'عادی'], ['loose', 'باز']], cc.lh) + '</div>' +
+      '<h6 style="margin-top:10px">هم‌زمانی (G / H)</h6><div class="mvp-opts"><button type="button" class="mvp-opt" data-off="-0.5">−۰٫۵ ثانیه</button><button type="button" class="mvp-opt" data-off="0">' + (P.subOffset ? fa((P.subOffset > 0 ? '+' : '') + P.subOffset.toFixed(1)) + ' (صفر)' : 'بدون تأخیر') + '</button><button type="button" class="mvp-opt" data-off="0.5">+۰٫۵ ثانیه</button></div></div>';
     html += '<div class="mvp-sec"><h6>سرعت پخش</h6><div class="mvp-opts">' + speeds.map(function (s) {
       return '<button type="button" class="mvp-opt' + (P.video.playbackRate === s ? ' on' : '') + '" data-speed="' + s + '">' + (s === 1 ? 'عادی' : fa(String(s)) + '×') + '</button>';
     }).join('') + '</div></div>';
@@ -14332,10 +14861,14 @@ function MVX_PLAYER_MODULE(W) {
     showUi();
   }
   function setVol(x) {
-    var v = P.video;
-    v.volume = Math.max(0, Math.min(1, x));
-    v.muted = v.volume === 0;
-    fx('c', '🔊 ' + fa(Math.round(v.volume * 100)) + '٪');
+    var v = P.video, a = audioEl();
+    x = Math.max(0, Math.min(1, x));
+    v.volume = x;
+    P.userMuted = x === 0;
+    v.muted = P.audioOn ? true : x === 0;
+    if (a) { a.volume = x; a.muted = P.userMuted; }
+    paintVol();
+    fx('c', '🔊 ' + fa(Math.round(x * 100)) + '٪');
   }
   function bindUi() {
     var r = P.root, v = P.video;
@@ -14343,7 +14876,7 @@ function MVX_PLAYER_MODULE(W) {
     r.addEventListener('dragstart', function (e) { e.preventDefault(); });
     r.addEventListener('mousemove', function () { showUi(); });
     r.addEventListener('click', function (e) {
-      var b = e.target.closest ? e.target.closest('[data-a],[data-x],[data-track],[data-sid],[data-sub],[data-size],[data-subbg],[data-off],[data-speed],[data-fit],[data-ep],[data-aud],[data-audstart],[data-demux],[data-native],[data-ccnative],[data-clienteng],[data-servereng]') : null;
+      var b = e.target.closest ? e.target.closest('[data-a],[data-x],[data-track],[data-sid],[data-sub],[data-size],[data-subbg],[data-off],[data-speed],[data-fit],[data-ep],[data-aud],[data-audstart],[data-extaud],[data-audshift],[data-cc],[data-demux],[data-native],[data-ccnative],[data-clienteng],[data-servereng]') : null;
       if (!b) return;
       e.stopPropagation();
       showUi();
@@ -14352,13 +14885,21 @@ function MVX_PLAYER_MODULE(W) {
       if (a === 'play') return togglePlay();
       if (a === 'back') return seekBy(-10);
       if (a === 'fwd') return seekBy(10);
-      if (a === 'mute') { v.muted = !v.muted; if (!v.muted && v.volume === 0) v.volume = 0.6; return; }
+      if (a === 'mute') return toggleMute();
       if (a === 'fs') return toggleFs();
       if (a === 'set') return P.panel === 'set' ? closePanels() : openPanel('set');
       if (a === 'eps') return P.panel === 'eps' ? closePanels() : openPanel('eps');
       if (a === 'next') { var n = P.info && P.info.ep && P.info.ep.next; if (n) gotoEp(n.id); return; }
       if (a === 'cc') { renderTrk(); return P.panel === 'trk' ? closePanels() : openPanel('trk'); }
       if (b.hasAttribute('data-open-set')) { renderPanel(); return openPanel('set'); }
+      if (b.hasAttribute('data-extaud')) { return selectAudio(b.getAttribute('data-extaud') || '', false); }
+      if (b.hasAttribute('data-audshift')) {
+        var sh = Number(b.getAttribute('data-audshift'));
+        P.audioOffset = sh ? Math.round(((P.audioOffset || 0) + sh) * 10) / 10 : 0;
+        audioSync(true);
+        toast('هم‌زمانی صدا: ' + fa((P.audioOffset || 0).toFixed(1)) + ' ثانیه');
+        return renderPanel();
+      }
       if (b.hasAttribute('data-aud')) { return switchAudio(Number(b.getAttribute('data-aud')) || 0); }
       if (b.hasAttribute('data-audstart')) { return engineWithAudio(Number(b.getAttribute('data-audstart')) || 0); }
       if (b.hasAttribute('data-demux')) return forceDemux();
@@ -14382,13 +14923,11 @@ function MVX_PLAYER_MODULE(W) {
         return switchTo({ track: P.cur.track, quality: b.getAttribute('data-q'), streamId: sid });
       }
       if (b.hasAttribute('data-sub')) { P.subPref = b.getAttribute('data-sub'); selectSub(P.subPref); renderPanel(); if (P.panel === 'trk') renderTrk(); return; }
-      if (b.hasAttribute('data-size')) {
-        ['s', 'm', 'l', 'xl'].forEach(function (z) { r.classList.remove('sub-' + z); });
-        r.classList.add('sub-' + b.getAttribute('data-size'));
-        ls('mvx_subsize', b.getAttribute('data-size'));
-        return renderPanel();
+      if (b.hasAttribute('data-cc')) {
+        var ckey = b.getAttribute('data-cc'), cval = b.getAttribute('data-ccv');
+        ccSet(ckey, ckey === 'bg' ? Number(cval) : cval);
+        return;
       }
-      if (b.hasAttribute('data-subbg')) { var nb = r.classList.toggle('sub-nobg'); ls('mvx_subbg', !nb); return renderPanel(); }
       if (b.hasAttribute('data-off')) { var o = Number(b.getAttribute('data-off')); P.subOffset = o ? Math.round(((P.subOffset || 0) + o) * 10) / 10 : 0; toast('تأخیر زیرنویس: ' + fa(P.subOffset.toFixed(1)) + ' ثانیه'); return renderPanel(); }
       if (b.hasAttribute('data-speed')) { v.playbackRate = Number(b.getAttribute('data-speed')); toast('سرعت ' + fa(String(v.playbackRate)) + '×'); return renderPanel(); }
       if (b.hasAttribute('data-fit')) { P.fit = b.getAttribute('data-fit'); r.classList.remove('fit-cover', 'fit-fill'); if (P.fit !== 'contain') r.classList.add('fit-' + P.fit); return renderPanel(); }
@@ -14463,11 +15002,19 @@ function MVX_PLAYER_MODULE(W) {
       tip.textContent = fmtT(p * v.duration);
     });
     var volIn = q('.mvp-vol input', r);
-    volIn.addEventListener('input', function () { v.volume = Number(volIn.value); v.muted = v.volume === 0; });
+    volIn.addEventListener('input', function () {
+      var x = Number(volIn.value);
+      v.volume = x;
+      P.userMuted = x === 0;
+      v.muted = P.audioOn ? true : x === 0;
+      var a = audioEl();
+      if (a) { a.volume = x; a.muted = P.userMuted; }
+    });
     /* ویدئو */
     v.addEventListener('playing', function () { setLoading(false); r.classList.remove('paused'); hidePause(); P.errCount = 0; showUi(); });
-    v.addEventListener('play', function () { r.classList.remove('paused'); q('[data-a="play"]', r).innerHTML = I.pause; hidePause(); });
+    v.addEventListener('play', function () { r.classList.remove('paused'); q('[data-a="play"]', r).innerHTML = I.pause; hidePause(); if (P.audioOn) audioPlay(); });
     v.addEventListener('pause', function () {
+      if (P.audioOn) audioPause();
       r.classList.add('paused');
       q('[data-a="play"]', r).innerHTML = I.play;
       showUi(true);
@@ -14478,17 +15025,17 @@ function MVX_PLAYER_MODULE(W) {
     v.addEventListener('waiting', function () { setLoading(true); });
     v.addEventListener('canplay', function () { setLoading(false); });
     v.addEventListener('seeking', function () { P.seeking = true; hidePause(); });
-    v.addEventListener('seeked', function () { P.seeking = false; renderSub(true); });
-    v.addEventListener('ended', function () { savePos(true); ls(posKey(), null); nextUp(); });
+    v.addEventListener('seeked', function () { P.seeking = false; renderSub(true); if (P.audioOn) audioSync(true); });
+    v.addEventListener('ended', function () { if (P.audioOn) audioPause(); savePos(true); ls(posKey(), null); nextUp(); });
     v.addEventListener('error', function () { onVideoError(); });
     v.addEventListener('volumechange', function () {
-      q('[data-a="mute"]', r).innerHTML = v.muted || v.volume === 0 ? I.mute : I.vol;
-      volIn.value = v.muted ? 0 : v.volume;
-      ls('mvx_vol', { v: v.volume, m: v.muted });
+      paintVol();
+      ls('mvx_vol', { v: v.volume, m: mutedNow() });
     });
     v.addEventListener('progress', paintBuf);
     v.addEventListener('timeupdate', onTime);
     v.addEventListener('durationchange', onTime);
+    v.addEventListener('ratechange', function () { if (P.audioOn) audioSync(false); });
   }
   function paintBuf() {
     var v = P.video, b = v.buffered, d = v.duration;
@@ -14507,6 +15054,7 @@ function MVX_PLAYER_MODULE(W) {
     q('.mvp-time', P.root).textContent = fmtT(t) + ' / ' + (isFinite(d) ? fmtT(d) : '--:--');
     renderSub();
     paintBuf();
+    if (P.audioOn && !v.paused && !P.seeking) audioSync(false);
     savePos();
     if (P.mp4) mp4Tick(P.mp4);
     var now = Date.now();
@@ -14548,7 +15096,7 @@ function MVX_PLAYER_MODULE(W) {
       case 'l': case 'L': seekBy(10); break;
       case 'ArrowUp': setVol(v.volume + 0.05); break;
       case 'ArrowDown': setVol(v.volume - 0.05); break;
-      case 'm': case 'M': v.muted = !v.muted; break;
+      case 'm': case 'M': toggleMute(); break;
       case 'f': case 'F': toggleFs(); break;
       case 'c': case 'C': q('[data-a="cc"]', P.root).click(); break;
       case 'n': case 'N': q('[data-a="next"]', P.root).hidden || q('[data-a="next"]', P.root).click(); break;
@@ -14570,6 +15118,7 @@ function MVX_PLAYER_MODULE(W) {
     injectCss();
     P = { opts: Object.assign({}, opts || {}), host: host || {}, cur: { track: (opts && opts.track) || '', quality: (opts && opts.quality) || '', streamId: (opts && opts.streamId) || '' },
       sid: '', info: null, subs: [], subOn: '', cues: [], subOffset: 0, evq: [], watch: 0, bannerIdx: 0, errCount: 0, closed: false,
+      audios: [], audioOn: '', audioPref: '', audioOffset: 0, audioReady: false, audioSrc: '', userMuted: false,
       /* موتورهای داخل‌صفحه: mkv (دموکسر EBML) و mp4 (MSE + جدول نمونه) */
       mkv: null, mp4: null, mp4Idx: null, mp4AudioPref: 0, mp4AudioOff: false,
       embCues: {}, embSubs: null, forceDemux: false, forceNative: false, mp4Done: false, cont: '' };
@@ -14627,6 +15176,7 @@ function MVX_PLAYER_MODULE(W) {
     flushEvq();
     p.closed = true;
     clearInterval(p.wmT); clearInterval(p.nxT); clearTimeout(p.uiT); clearTimeout(p.resT); clearTimeout(p.bhT); clearTimeout(p.padT);
+    try { audioStop(); } catch (e) { }
     destroyHls();
     destroyMkv();
     destroyMp4();
@@ -14671,6 +15221,13 @@ function MVX_PLAYER_MODULE(W) {
       srvSync: function () { return srvSyncNative(); },
       srvClear: function () { return srvClearTracks(); },
       selectSub: function (id, silent) { return selectSub(id, silent); },
+      selectAudio: function (id, silent) { return selectAudio(id, silent); },
+      setupAudios: function (info) { return setupAudios(info); },
+      ccPrefs: function () { return ccPrefs(); },
+      ccSet: function (k, v) { return ccSet(k, v); },
+      ccApply: function () { return applyCc(); },
+      audioSync: function (f) { return audioSync(f); },
+      audioState: function () { return { on: P && P.audioOn, offset: P && P.audioOffset, ready: P && P.audioReady, list: audiosOf() }; },
       seekTo: function (t) { return seekTo(t); },
     }
   };
@@ -14805,6 +15362,10 @@ const APP_HTML = `<!doctype html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="@@SITE@@">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="format-detection" content="telephone=no">
 <title>@@SITE@@</title>
 <meta name="description" content="@@TAG@@">
 <meta property="og:title" content="@@SITE@@">
@@ -15303,7 +15864,9 @@ button.dp-slide{cursor:zoom-in}
 .var-row-lab{grid-template-columns:1fr auto auto}
 .var-q{margin-bottom:10px;padding-bottom:8px;border-bottom:1px dashed var(--line)}
 .var-q:last-child{border-bottom:0}
-.var-extra{display:grid;grid-template-columns:minmax(100px,160px) 1fr 1fr auto;gap:8px;align-items:center;margin:6px 0}
+.var-extra{display:grid;grid-template-columns:minmax(100px,160px) 1fr auto;gap:8px;align-items:center;margin:6px 0}
+.var-extra .vf-links{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.var-extra.var-extra-new{grid-template-columns:1fr 1fr auto auto}
 .var-add{margin:4px 0 8px}
 .var-newq{grid-template-columns:minmax(120px,1fr) auto}
 .q-alts{display:flex;flex-direction:column;gap:6px;margin:8px 0 12px;max-width:560px}
@@ -15441,7 +16004,7 @@ button.dp-slide{cursor:zoom-in}
   .airing-fields{grid-template-columns:1fr}
   .d-info h1{font-size:19px}
   .q-row{display:flex}
-  .var-row,.var-extra{grid-template-columns:1fr}
+  .var-row,.var-extra,.var-extra .vf-links,.var-extra.var-extra-new{grid-template-columns:1fr}
   /* مودال در موبایل: شیت پایین صفحه (iOS-like) */
   .mwrap{padding:0;align-items:flex-end}
   .modal{padding:18px 16px calc(18px + env(safe-area-inset-bottom));border-radius:22px 22px 0 0;max-height:94dvh;animation:sheetUp .22s cubic-bezier(.2,.8,.2,1)}
@@ -18603,7 +19166,7 @@ function storageLabel (st) {
   st = st || {};
   var lbl = 'KV';
   if (st.mode === 'hybrid') lbl = 'D1 + KV (ترکیبی)';
-  else if (st.mode === 'd1') lbl = 'D1';
+  else if (st.mode === 'd1') lbl = 'D1 تنها (بدون KV)';
   lbl += st.d1Ready ? ' ✓' : (st.hasD1 ? ' (در انتظار انتقال)' : '');
   return lbl;
 }
@@ -18630,8 +19193,9 @@ function shardStatusHtml (st) {
   return '<div class="adm-row" style="margin-bottom:10px;flex-wrap:wrap">' +
     '<em class="badge">حالت: ' + esc(storageLabel(st)) + '</em>' +
     '<em class="badge' + (st.d1Ready ? ' acc' : '') + '">D1 اصلی: ' + (st.d1Ready ? 'آماده' : (st.hasD1 ? 'در انتظار انتقال' : 'اتصال ندارد')) + '</em>' +
-    '<em class="badge">KV: ' + (st.hasKv ? '✓' : '✗') + '</em>' +
-    '<em class="badge">CACHE_KV: ' + (st.hasCacheKv ? '✓' : '✗') + '</em>' +
+    '<em class="badge' + (st.kvFree ? ' acc' : '') + '">KV: ' + (st.hasKv ? '✓' : (st.kvFree ? 'لازم نیست (حذف شده)' : '✗')) + '</em>' +
+    '<em class="badge">CACHE_KV: ' + (st.hasCacheKv ? '✓' : 'اختیاری') + '</em>' +
+    '<em class="badge">ساخت خودکار اسکیما: ' + (st.autoInit ? '✓' : 'دستی') + '</em>' +
     '<em class="badge">کش عمومی (Cache API): فعال</em></div>' +
     '<div id="shard-rows">' +
     (rows || '<p class="note" style="margin:8px 0">شاردی اضافه نشده است — همهٔ آثار در D1 اصلی ذخیره می‌شوند.</p>') + '</div>' +
@@ -18671,6 +19235,10 @@ function streamAdminHtml (st) {
     admChk('set-st-ip', st.bindIp !== false, 'قفل توکن به IP کاربر (لینک کپی‌شده روی اینترنت دیگر کار نمی‌کند)') +
     admChk('set-st-direct', st.directPlay !== false, 'پخش مستقیم اضطراری: اگر سرور نتوانست فایل را از مبدأ بگیرد، مرورگر خودش مستقیم از لینک بگیرد (لینک فایل در مرورگر دیده می‌شود؛ برای لینک‌هایی که مبدأ، دسترسی سرور را می‌بندد لازم است)') +
     admChk('set-st-wm', st.watermark !== false, 'واترمارک متحرک شناسهٔ کاربر روی تصویر (ردیابی ضبط صفحه)') +
+    '<div class="d-sec-h" style="margin-top:12px">صدا و زیرنویس</div>' +
+    '<p class="note" style="margin:6px 0">زیرنویس و دوبلهٔ جدا را برای هر نسخه در «ویرایش اثر ← کیفیت‌ها» وارد کنید (فیلدهای زیر لینک فایل). در پلیر، کاربر بین «صدای اصلی» و فایل‌های دوبله انتخاب می‌کند و زیرنویس‌ها را با اندازه/پس‌زمینه/هم‌زمانی می‌بیند.</p>' +
+    admChk('set-st-engine', st.internal !== false, 'پردازش ترک‌های داخلی فایل روی سرور (MKV/MP4 چندصدا و زیرنویس چسبیده) — برای سایت سبک و کم‌مصرف این را <b>خاموش</b> کنید؛ پلیر فقط با زیرنویس/دوبلهٔ جدا کار می‌کند') +
+    admChk('set-st-dubauto', st.dubAuto !== false, 'اگر نسخهٔ «دوبله» فایل صوتی دوبلهٔ جدا دارد، خودکار همان صدا پخش شود') +
     '<div class="d-sec-h" style="margin-top:12px">لبه‌های پخش (Worker روی اکانت‌های دیگر)</div>' +
     (edges || '<p class="note" style="margin:8px 0">لبه‌ای اضافه نشده؛ ویدئو از همین Worker (مسیر /sv) پراکسی می‌شود. برای سهمیهٔ بیشتر، یک یا چند لبه روی اکانت‌های رایگان دیگر بسازید.</p>') +
     '<details style="margin-top:10px"><summary>➕ افزودن لبهٔ پخش</summary>' +
@@ -19659,6 +20227,8 @@ function bindAdminTab (tab, q) {
         streamBindIp: $('#set-st-ip') ? $('#set-st-ip').checked : undefined,
         streamDirectPlay: $('#set-st-direct') ? $('#set-st-direct').checked : undefined,
         streamWatermark: $('#set-st-wm') ? $('#set-st-wm').checked : undefined,
+        plInternal: $('#set-st-engine') ? $('#set-st-engine').checked : undefined,
+        plDubAuto: $('#set-st-dubauto') ? $('#set-st-dubauto').checked : undefined,
       };
       var btEl = $('#set-bot');
       var bt = btEl ? btEl.value.trim() : '';
@@ -19762,9 +20332,12 @@ function openItemEditor (it, prefillUrl) {
           return '<div class="var-extra">' +
             '<input data-vt="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="عنوان نسخه" value="' + esc(f.title || '') + '">' +
             '<input data-vu2="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی" value="' + esc(sourceHref(f.source) || '') + '" dir="ltr">' +
-            '<input data-vpl="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="لینک پخش آنلاین (اختیاری)" title="برای دکمهٔ تماشای آنلاین همین نسخه؛ خالی = بدون پخش آنلاین" value="' + esc(f.pl || '') + '" dir="ltr">' +
-            '<input data-vsub="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="لینک زیرنویس‌ها (اختیاری) — با ویرگول جدا" title="فایل‌های زیرنویس این نسخه (srt/vtt)؛ هر لینک با « | عنوان» برای نام در پلیر. در تنظیمات پلیر نمایش داده می‌شوند" value="' + esc((f.subs || []).map(function (s) { return s.url + (s.label ? ' | ' + s.label : ''); }).join(', ')) + '" dir="ltr">' +
-            '<button type="button" class="btn btn-danger btn-sm" data-vd="' + t.k + ':' + q + ':' + (epId || '') + ':' + esc(f.id) + '">حذف</button></div>';
+            '<button type="button" class="btn btn-danger btn-sm" data-vd="' + t.k + ':' + q + ':' + (epId || '') + ':' + esc(f.id) + '">حذف</button>' +
+            '<div class="vf-links">' +
+            '<input data-vpl="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="▶ لینک پخش آنلاین (اختیاری)" title="برای دکمهٔ تماشای آنلاین همین نسخه؛ خالی = بدون پخش آنلاین" value="' + esc(f.pl || '') + '" dir="ltr">' +
+            '<input data-vsub="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="💬 لینک زیرنویس‌ها — با ویرگول" title="فایل‌های زیرنویس این نسخه (srt/vtt)؛ هر لینک با « | عنوان» برای نام در پلیر. در تنظیمات پلیر نمایش داده می‌شوند" value="' + esc((f.subs || []).map(function (s) { return s.url + (s.label ? ' | ' + s.label : ''); }).join(', ')) + '" dir="ltr">' +
+            '<input data-vdub="' + t.k + '-' + q + '-' + (epId || '') + '-' + esc(f.id) + '" placeholder="🎙 لینک صدای دوبله — با ویرگول" title="فایل صوتی دوبلهٔ جدا از تصویر (mp3/m4a/aac/…). هر لینک با « | عنوان» برای نام در پلیر؛ کاربر در پلیر بین صدای اصلی و این دوبله انتخاب می‌کند" value="' + esc((f.dubs || []).map(function (s) { return s.url + (s.label ? ' | ' + s.label : ''); }).join(', ')) + '" dir="ltr">' +
+            '</div></div>';
         }).join('');
         return '<div class="var-q">' +
           '<div class="var-row var-row-lab">' +
@@ -19822,7 +20395,7 @@ function openItemEditor (it, prefillUrl) {
     galleryEditorHtml(it) +
     '<div class="field"><label>توضیحات</label><textarea id="e-desc">' + esc(it.description || '') + '</textarea></div>' +
     '<label style="display:flex;gap:8px;align-items:center;font-size:13.5px;cursor:pointer;margin-bottom:12px"><input type="checkbox" id="e-featured" style="width:auto"' + (it.featured ? ' checked' : '') + '> ⭐ نمایش در هیرو صفحهٔ اصلی</label>' +
-    (isSeries ? '' : ('<div class="d-sec-h">کیفیت‌ها و نوع صدا</div><p style="font-size:12px;color:var(--tx3);margin-bottom:8px">کیفیت اصلی فقط عنوان است (بدون لینک). زیر هر کیفیت با «نسخه دیگر» فایل را با عنوان و لینک اضافه کنید. ستاره یعنی فقط اشتراک. هر نسخه می‌تواند زیر لینک فایل، «لینک پخش آنلاین» هم داشته باشد (بدون عنوان؛ خالی = بدون پخش آنلاین).</p><div id="e-var">' + variantGridHtml(it, '') + '</div>')) +
+    (isSeries ? '' : ('<div class="d-sec-h">کیفیت‌ها و نوع صدا</div><p style="font-size:12px;color:var(--tx3);margin-bottom:8px">کیفیت اصلی فقط عنوان است (بدون لینک). زیر هر کیفیت با «نسخه دیگر» فایل را با عنوان و لینک اضافه کنید. ستاره یعنی فقط اشتراک. هر نسخه سه فیلد اختیاری کنار فایل دارد: «لینک پخش آنلاین»، «لینک زیرنویس‌ها» (srt/vtt) و «لینک صدای دوبله» (mp3/m4a/…). هر سه خالی می‌توانند بمانند. در پلیر، زیرنویس‌ها و دوبلهٔ جدا بدون هیچ تنظیمی از همین جا خوانده می‌شوند.</p><div id="e-var">' + variantGridHtml(it, '') + '</div>')) +
     (isSeries ? (
       '<div class="d-sec-h">فصل‌ها و قسمت‌ها</div>' +
       '<p style="font-size:12px;color:var(--tx3);margin-bottom:8px">ستاره روی قسمت کل قسمت را قفل اشتراک می‌کند؛ ستاره کنار کیفیت همان فایل را.</p>' +
@@ -20008,7 +20581,7 @@ function openItemEditor (it, prefillUrl) {
           var parts = b.getAttribute('data-va').split(':');
           var track = parts[0], q = parts[1], epid = parts[2] || epId || '';
           var row = document.createElement('div');
-          row.className = 'var-extra';
+          row.className = 'var-extra var-extra-new';
           row.innerHTML = '<input class="vf-new-t" placeholder="عنوان نسخه مثلاً دوبله دوم">' +
             '<input class="vf-new-u" placeholder="https://t.me/kanal/123,https://t.me/kanal/124" title="حداکثر ۱۰ لینک؛ جداکننده ویرگول انگلیسی یا فارسی؛ برای ذخیره از فیلد خارج شوید" dir="ltr">' +
             '<span></span>' +
@@ -20049,6 +20622,8 @@ function openItemEditor (it, prefillUrl) {
         if (plEl) body.pl = plEl.value.trim();
         var subEl = $('[data-vsub]', row);
         if (subEl) body.subs = subEl.value.trim();
+        var dubEl = $('[data-vdub]', row);
+        if (dubEl) body.dubs = dubEl.value.trim();
         api('/admin/item/' + it.id + '/variant', { method: 'POST', body: body }).then(function (r) {
           it = r.item;
           toast(url ? 'نسخه ذخیره شد ✓' : 'نسخه حذف شد', 'ok');
@@ -20065,6 +20640,9 @@ function openItemEditor (it, prefillUrl) {
         el.addEventListener('change', function () { saveVarRow(el); });
       });
       $all('[data-vsub]', root).forEach(function (el) {
+        el.addEventListener('change', function () { saveVarRow(el); });
+      });
+      $all('[data-vdub]', root).forEach(function (el) {
         el.addEventListener('change', function () { saveVarRow(el); });
       });
       $all('[data-vd]', root).forEach(function (b) {
@@ -20555,6 +21133,16 @@ if (document.readyState === 'loading') {
 } else {
   __goBoot();
 }
+})();
+/* ══ PWA: نصب روی دستگاه + پوستهٔ آفلاین ══
+   در مینی‌اپ تلگرام لازم نیست (خودش WebView است)؛ در بقیه مرورگرها ثبت می‌شود. */
+(function () {
+  try {
+    if (!('serviceWorker' in navigator)) return;
+    if (/Telegram|TelegramBot/i.test(navigator.userAgent || '')) return;
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') return;
+    setTimeout(function () { navigator.serviceWorker.register('/sw.js').catch(function () { }); }, 1800);
+  } catch (e) { }
 })();
 </script>
 </body>

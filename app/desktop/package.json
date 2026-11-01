@@ -1,0 +1,56 @@
+{
+  "name": "filmwork-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "نسخهٔ ویندوز سینماگرام (Electron)",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis portable --x64"
+  },
+  "build": {
+    "appId": "net.filmwork.desktop",
+    "productName": "Filmwork",
+    "artifactName": "filmwork-windows-${version}.${ext}",
+    "files": [
+      "main.cjs",
+      "site-url.txt",
+      {
+        "from": "../www",
+        "to": "www",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Filmwork"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  }
+}

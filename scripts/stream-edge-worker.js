@@ -159,6 +159,13 @@ async function streamEdgeChecks(request, secret, tok, kind) {
 function streamMime(fmt, upstreamType) {
   const t = String(upstreamType || '').toLowerCase();
   if (t.indexOf('video/') === 0 || t.indexOf('audio/') === 0) return upstreamType;
+  if (fmt === 'mp3') return 'audio/mpeg';
+  if (fmt === 'm4a' || fmt === 'm4b' || fmt === 'aac') return 'audio/mp4';
+  if (fmt === 'ogg' || fmt === 'oga' || fmt === 'opus') return 'audio/ogg';
+  if (fmt === 'weba') return 'audio/webm';
+  if (fmt === 'flac') return 'audio/flac';
+  if (fmt === 'wav') return 'audio/wav';
+  if (fmt === 'mka') return 'audio/x-matroska';
   if (fmt === 'mp4') return 'video/mp4';
   if (fmt === 'webm') return 'video/webm';
   if (fmt === 'mkv') return 'video/x-matroska';

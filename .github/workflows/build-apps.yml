@@ -1,0 +1,137 @@
+# ══════════════════════════════════════════════════════════════════════════
+#  ساخت فایل‌های نهایی برنامه — اندروید (APK موبایل + اندروید تی‌وی) و ویندوز (EXE)
+# ──────────────────────────────────────────────────────────────────────────
+#  اجرا:
+#    • دستی: Actions → «Build apps» → Run workflow → آدرس سایت را وارد کن
+#    • خودکار: تگ بزن (git tag app-v1.0.0 && git push --tags)
+#  خروجی‌ها:
+#    • filmwork-android.apk   (همان فایل روی گوشی و تلویزیون اندروید نصب می‌شود)
+#    • filmwork-windows.exe   (نصب‌کننده) + نسخهٔ portable
+#    • در صورت تگ، همه به‌صورت Assets در GitHub Release قرار می‌گیرند.
+#  PWA برای آیفون فایلی لازم ندارد: سایت خودش /manifest.webmanifest و /sw.js را می‌دهد.
+# ══════════════════════════════════════════════════════════════════════════
+name: Build apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_url:
+        description: 'آدرس سایت (https://…) — خالی = برنامه با انتخاب‌گر آدرس'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'app-v*'
+
+permissions:
+  contents: write
+
+env:
+  SITE_URL: ${{ github.event.inputs.site_url || vars.SITE_URL }}
+  APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '1.0.0' }}
+
+jobs:
+  # ── اندروید: موبایل + Android TV با همان APK ────────────────────────────
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: نصب وابستگی‌ها
+        working-directory: app
+        run: npm install --no-audit --no-fund
+
+      - name: تنظیم آدرس سایت
+        working-directory: app
+        run: node scripts/configure.mjs
+
+      - name: ساخت پروژهٔ اندروید
+        working-directory: app
+        run: |
+          npx cap add android
+          npx cap sync android
+          node scripts/patch-android.mjs
+
+      - name: ساخت APK (debug — امضاشده با کلید debug، قابل نصب)
+        working-directory: app/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: آماده‌سازی فایل خروجی
+        run: |
+          mkdir -p dist
+          cp app/android/app/build/outputs/apk/debug/app-debug.apk dist/filmwork-android.apk
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filmwork-android-apk
+          path: dist/filmwork-android.apk
+          if-no-files-found: error
+
+      - name: انتشار در Release (فقط روی تگ)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/filmwork-android.apk
+          name: 'Filmwork ${{ env.APP_VERSION }}'
+          body: |
+            نسخهٔ آمادهٔ نصب:
+            - **اندروید / اندروید تی‌وی**: `filmwork-android.apk`
+            - **ویندوز**: `filmwork-windows-*.exe` (نصب‌کننده و portable)
+            - **آیفون / دسکتاپ**: از خود سایت نصب شود (PWA) — Safari → Add to Home Screen
+          fail_on_unmatched_files: false
+
+  # ── ویندوز: نصب‌کننده + portable ────────────────────────────────────────
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: نصب وابستگی‌ها
+        working-directory: app/desktop
+        run: npm install --no-audit --no-fund
+
+      - name: نوشتن آدرس سایت
+        working-directory: app/desktop
+        shell: pwsh
+        run: |
+          $url = "${{ env.SITE_URL }}"
+          if ($url) { Set-Content -Path site-url.txt -Value $url -NoNewline -Encoding utf8 }
+          else { Set-Content -Path site-url.txt -Value "" -NoNewline -Encoding utf8 }
+
+      - name: ساخت EXE
+        working-directory: app/desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filmwork-windows-exe
+          path: app/desktop/release/*.exe
+          if-no-files-found: error
+
+      - name: انتشار در Release (فقط روی تگ)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/desktop/release/*.exe
+          fail_on_unmatched_files: false
