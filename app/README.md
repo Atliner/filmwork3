@@ -15,6 +15,17 @@
 
 ## ساخت با گیت‌هاب (بدون نصب چیزی روی سیستم)
 
+> **فعال‌سازی یک‌بارهٔ CI:** فایل ورک‌فلوی بیلد در `app/ci/build-apps.yml` نگه داشته شده
+> (توکن‌های GitHub App اجازهٔ ساختن فایل داخل `.github/workflows/` را ندارند). یک‌بار
+> این را اجرا کن و پوش کن:
+> ```bash
+> mkdir -p .github/workflows && cp app/ci/build-apps.yml .github/workflows/
+> git add .github/workflows/build-apps.yml && git commit -m "ci: build apps" && git push
+> ```
+> اگر با توکن شما هم رد شد، فایل را از رابط وب گیت‌هاب
+> (Add file → Create new file → `.github/workflows/build-apps.yml`) بساز و محتوای
+> `app/ci/build-apps.yml` را در آن بچسبان.
+
 1. تگ بزن تا Release ساخته شود:
    ```bash
    git tag app-v1.0.0
