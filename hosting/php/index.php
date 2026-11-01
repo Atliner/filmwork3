@@ -104,6 +104,7 @@ if (in_array($method, ['POST', 'PUT', 'PATCH'], true)) {
 
 $respHeaders = [];
 $statusCode = 200;
+$sent = false;
 
 $ch = curl_init(upstream_url());
 curl_setopt_array($ch, [
@@ -114,7 +115,6 @@ curl_setopt_array($ch, [
     CURLOPT_CONNECTTIMEOUT => CONNECT_TIMEOUT,
     CURLOPT_TIMEOUT        => 0,
     CURLOPT_HTTPHEADER     => $headers,
-    CURLOPT_ENCODING       => '',
     CURLOPT_SSL_VERIFYPEER => true,
     CURLOPT_SSL_VERIFYHOST => 2,
     CURLOPT_HEADERFUNCTION => function ($ch, $line) use (&$respHeaders, &$statusCode) {
@@ -140,10 +140,14 @@ curl_setopt_array($ch, [
         $respHeaders[$name] = $value;
         return $len;
     },
-    CURLOPT_WRITEFUNCTION  => function ($ch, $chunk) use (&$respHeaders) {
+    CURLOPT_WRITEFUNCTION  => function ($ch, $chunk) use (&$respHeaders, &$statusCode, &$sent) {
         static $started = false;
         if (!$started) {
             $started = true;
+            $sent = true;
+            /* کد وضعیت باید پیش از فرستادن هدرها ست شود (متن پاسخ همین‌جا
+               به کاربر منتقل می‌شود و بعد از آن هدر قابل تغییر نیست) */
+            http_response_code($statusCode ?: 200);
             foreach ($respHeaders as $name => $value) {
                 if (is_int($name)) header($value); else header($name . ': ' . $value, true);
             }
@@ -174,7 +178,7 @@ if ($ok === false) {
     header('content-type: text/plain; charset=utf-8');
     header('cache-control: no-store');
     echo 'ارتباط با سرور اصلی برقرار نشد: ' . curl_error($ch);
-} else {
+} elseif (!$sent) {
     http_response_code($statusCode ?: 200);
 }
 curl_close($ch);
