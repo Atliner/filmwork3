@@ -11566,14 +11566,34 @@ function MVX_PLAYER_MODULE(W) {
     ls('mvx_adseen', s);
   }
   function posKey() { return 'mvx_pos:' + P.opts.itemId + ':' + (P.opts.epId || ''); }
+  /* فهرست «ادامهٔ تماشا» برای صفحهٔ خانه — هر فایل یک ردیف، آخرین‌ها اول */
+  function resumePush(sec, dur) {
+    try {
+      var it = (P && P.info && P.info.item) || {};
+      if (!it.id) return;
+      var epId = String((P.opts && P.opts.epId) || '');
+      var key = String(it.id) + ':' + epId;
+      var list = ls('mvx_resume');
+      if (!Array.isArray(list)) list = [];
+      list = list.filter(function (x) { return x && x.id && (String(x.id) + ':' + String(x.ep || '')) !== key; });
+      if (sec > 30 && dur - sec > 20) {
+        var epc = P.info && P.info.ep && P.info.ep.cur ? P.info.ep.cur : null;
+        list.unshift({
+          id: it.id, ep: epId, title: it.title || '', poster: it.poster || '', type: it.type || '',
+          t: Math.round(sec), d: Math.round(dur), epT: epc ? ('فصل ' + epc.season + ' · قسمت ' + epc.n) : '', at: Date.now()
+        });
+      }
+      ls('mvx_resume', list.slice(0, 24));
+    } catch (e) { }
+  }
   function savePos(force) {
     if (!P || !P.video || P.adActive) return;
     var v = P.video, d = v.duration;
     if (!isFinite(d) || d < 60 || !v.currentTime) return;
     if (!force && Date.now() - (P.lastSave || 0) < 8000) return;
     P.lastSave = Date.now();
-    if (v.currentTime > d * 0.95 || d - v.currentTime < 30) ls(posKey(), null);
-    else ls(posKey(), { t: Math.floor(v.currentTime), d: Math.floor(d), at: Date.now() });
+    if (v.currentTime > d * 0.95 || d - v.currentTime < 30) { ls(posKey(), null); resumePush(0, d); }
+    else { ls(posKey(), { t: Math.floor(v.currentTime), d: Math.floor(d), at: Date.now() }); resumePush(v.currentTime, d); }
   }
   function toast(msg) {
     var t = P && q('.mvp-toast', P.root);
@@ -15223,6 +15243,7 @@ function MVX_PLAYER_MODULE(W) {
       selectSub: function (id, silent) { return selectSub(id, silent); },
       selectAudio: function (id, silent) { return selectAudio(id, silent); },
       setupAudios: function (info) { return setupAudios(info); },
+      savePos: function (force) { return savePos(force); },
       ccPrefs: function () { return ccPrefs(); },
       ccSet: function (k, v) { return ccSet(k, v); },
       ccApply: function () { return applyCc(); },
@@ -16167,6 +16188,101 @@ button.dp-slide{cursor:zoom-in}
   .qg-toc ul{margin-top:8px}
   .qg-cards2{grid-template-columns:1fr}
   .qg-node-tags{flex-basis:100%;justify-content:flex-start;margin:6px 0 0 24px}
+}
+/* ══════════════════════════════════════════════════════════════════════════
+   لایهٔ بازطراحی ظاهر (v3.61) — عمق، تمرکز و حرکت نرم
+   ──────────────────────────────────────────────────────────────────────────
+   قوانین این بخش بعد از همهٔ قوانین قبلی می‌آیند تا فقط «پالایش» کنند:
+     • پالت کمی تیره‌تر و سردتر با همان نارنجی برند (کمتر خسته‌کننده در شب)
+     • کارت‌ها: بالا آمدن، درخشش لبه، براقی ملایم روی هاور، سایهٔ لایه‌ای
+     • حلقهٔ تمرکز واضح برای کیبورد و کنترل تلویزیون (D-pad)
+     • گذار نرم بین صفحه‌ها، اسکلت لودینگ، و احترام به prefers-reduced-motion
+   ══════════════════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#080a10; --bg2:#0d111a; --card:#121722; --card2:#171d2b; --line:#202737;
+  --tx:#f3f6fb; --tx2:#a2adc3; --tx3:#6c7789;
+  --acc:#ff7a1a; --acc2:#ffc247; --acc-soft:rgba(255,122,26,.14);
+  --acc3:#7c5cff; --info:#38bdf8;
+  --grad:linear-gradient(135deg,#ff5f2e 0%,#ffb01f 58%,#ffd76a 100%);
+  --shadow:0 20px 52px rgba(0,0,0,.52);
+  --shadow-s:0 10px 26px rgba(0,0,0,.38);
+  --ring:0 0 0 3px rgba(255,122,26,.3);
+  --rad:20px; --rad-s:15px;
+  --content-w:1280px;
+}
+body:before{background:radial-gradient(58% 38% at 88% -8%,rgba(255,122,26,.16),transparent 62%),radial-gradient(48% 32% at -4% 102%,rgba(124,92,255,.1),transparent 62%)}
+::selection{background:var(--acc2);color:#14100a}
+/* گذار آرام ورود صفحه (فقط برای main؛ هدر و ناوبری ثابت می‌مانند) */
+@keyframes mvxPageIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+main{animation:mvxPageIn .26s ease both}
+/* ── ردیف «ادامهٔ تماشا»: نوار پیشرفت روی پوستر ── */
+.card-rsm{width:150px}
+.card-prog{position:absolute;left:0;right:0;bottom:0;height:4px;z-index:3;background:rgba(255,255,255,.18)}
+.card-prog i{display:block;height:100%;background:var(--grad);box-shadow:0 0 10px rgba(255,122,26,.6)}
+.card-rsm-b{position:absolute;top:8px;left:8px;z-index:3;font-size:10px;font-weight:900;padding:3px 8px;border-radius:999px;background:rgba(8,10,15,.78);border:1px solid rgba(255,255,255,.14);color:var(--acc2);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+.row-rsm .row-h h3{color:var(--acc2)}
+.row-clear{font-size:11.5px;font-weight:800;color:var(--tx3);padding:4px 10px;border-radius:999px;border:1px solid var(--glass-line);background:var(--glass);transition:color .15s,border-color .15s}
+.row-clear:hover{color:var(--err);border-color:rgba(255,84,112,.45)}
+/* ── کارت‌ها: حس «شیشهٔ لبه‌روشن» ── */
+.card{position:relative;isolation:isolate;box-shadow:var(--shadow-s);transition:transform .2s cubic-bezier(.2,.7,.3,1),box-shadow .2s,border-color .2s}
+.card:hover{transform:translateY(-6px) scale(1.012);border-color:rgba(255,122,26,.55);box-shadow:0 22px 44px rgba(0,0,0,.55),0 0 0 1px rgba(255,122,26,.28)}
+.card:active{transform:translateY(-2px) scale(.997)}
+.card:focus-visible{outline:none;border-color:var(--acc);box-shadow:var(--ring),var(--shadow-s)}
+.card:after{content:'';position:absolute;inset:0;z-index:4;border-radius:inherit;pointer-events:none;background:linear-gradient(115deg,transparent 38%,rgba(255,255,255,.13) 50%,transparent 62%);opacity:0;transform:translateX(-40%);transition:opacity .3s,transform .6s cubic-bezier(.2,.7,.3,1)}
+.card:hover:after{opacity:1;transform:translateX(40%)}
+.card-p{transition:filter .25s}
+.card:hover .card-p{filter:saturate(1.08) brightness(1.05)}
+.grid .card,.hscroll .card{scroll-snap-align:start}
+/* ── ردیف‌های افقی: نوار اسکرول نازک و اسنپ نرم ── */
+.hscroll,.people,.season-bar{scroll-behavior:smooth;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.18) transparent}
+.hscroll::-webkit-scrollbar,.people::-webkit-scrollbar,.season-bar::-webkit-scrollbar{height:6px}
+.hscroll::-webkit-scrollbar-thumb,.people::-webkit-scrollbar-thumb,.season-bar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:99px}
+.hscroll::-webkit-scrollbar-thumb:hover{background:rgba(255,122,26,.5)}
+/* ── تمرکز واضح برای کیبورد و کنترل تلویزیون ── */
+:where(a,button,input,select,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--acc2);outline-offset:2px;border-radius:10px}
+.card:focus-visible{outline:none;box-shadow:var(--ring),var(--shadow-s)}
+/* ── دکمه‌ها: ریزحرکت و درخشش لبه ── */
+.btn{transition:transform .14s,filter .16s,background .16s,border-color .16s,box-shadow .16s}
+.btn:hover{transform:translateY(-1px)}
+.btn:active{transform:translateY(0) scale(.97)}
+.btn-primary:hover{box-shadow:0 10px 28px rgba(255,122,26,.42),inset 0 1px 0 rgba(255,255,255,.4)}
+/* ── هدر: سایهٔ نرم برای جدا شدن از محتوا ── */
+.hdr{box-shadow:0 1px 0 var(--glass-line),0 12px 30px rgba(0,0,0,.28);transition:background .25s,box-shadow .25s}
+.row-h h3{letter-spacing:-.1px}
+.row-h a{transition:color .15s,transform .15s}
+.row-h a:hover{color:var(--acc2)}
+/* ── ناوبری پایین موبایل: قرص فعال ── */
+.bnav a{transition:color .15s}
+.bnav a .ic{transition:transform .18s cubic-bezier(.2,.7,.3,1)}
+.bnav a.on .ic{transform:translateY(-2px) scale(1.08)}
+/* ── اسکلت لودینگ (به‌جای صفحهٔ خالی هنگام واکشی) ── */
+.sk{position:relative;overflow:hidden;background:rgba(255,255,255,.05);border-radius:var(--rad-xs)}
+.sk:after{content:'';position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,rgba(255,255,255,.09),transparent);animation:mvxSk 1.15s infinite}
+@keyframes mvxSk{to{transform:translateX(100%)}}
+.sk-card{border-radius:var(--rad);overflow:hidden;border:1px solid var(--glass-line);background:var(--glass)}
+.sk-card .sk-p{aspect-ratio:2/3}
+.sk-line{height:11px;margin:10px 10px 0;border-radius:6px}
+.sk-line.s{width:56%;margin-bottom:12px}
+.spin{border-width:2.5px;border-color:rgba(255,255,255,.12);border-top-color:var(--acc);filter:drop-shadow(0 0 10px rgba(255,122,26,.35))}
+/* ── حالت‌های خالی: دعوت به اقدام به‌جای پیام خشک ── */
+.empty{padding:54px 20px;border:1px dashed var(--glass-line);border-radius:var(--rad);background:linear-gradient(180deg,rgba(255,255,255,.028),transparent)}
+.empty .ic{font-size:46px;opacity:.9;filter:drop-shadow(0 6px 18px rgba(0,0,0,.5))}
+.empty h3{font-size:16.5px;font-weight:900}
+.empty .btn{margin-top:14px}
+/* ── اسکرول‌بار و انتخاب متن ── */
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#283246;border-radius:99px;border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:#3a4864;background-clip:content-box}
+/* ── احترام به تنظیم «کاهش حرکت» سیستم ── */
+@media (prefers-reduced-motion:reduce){
+  *,*:before,*:after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}
+  main{animation:none}
+}
+/* ── موبایل: تنظیم فاصله‌ها با پالت تازه ── */
+@media (max-width:600px){
+  .card:hover{transform:none;box-shadow:var(--shadow-s)}
+  .card:after{display:none}
+  .empty{padding:44px 16px}
 }
 </style>
 </head>
@@ -17175,6 +17291,44 @@ function emptyHtml (ic, title, sub, btnHtml) {
   return '<div class="empty"><div class="ic">' + (ic || '🎬') + '</div><h3>' + esc(title) + '</h3><p>' + esc(sub || '') + '</p>' +
     (btnHtml ? '<div style="margin-top:16px">' + btnHtml + '</div>' : '') + '</div>';
 }
+/* ── «ادامهٔ تماشا»: از localStorage پلیر (mvx_resume) ساخته می‌شود ──
+   هیچ داده‌ای به سرور نمی‌رود؛ فهرست محلی و خصوصی هر دستگاه است. */
+function resumeItems () {
+  try {
+    var list = JSON.parse(localStorage.getItem('mvx_resume') || '[]');
+    if (!Array.isArray(list)) return [];
+    var now = Date.now();
+    return list.filter(function (x) {
+      return x && x.id && Number(x.t) > 0 && (!x.d || Number(x.t) < Number(x.d)) && (!x.at || now - x.at < 90 * 86400000);
+    }).slice(0, 12);
+  } catch (e) { return []; }
+}
+function resumeCardHtml (x) {
+  var pct = x.d ? Math.max(3, Math.min(100, Math.round(x.t / x.d * 100))) : 0;
+  var left = x.d && x.t ? Math.max(1, Math.round((x.d - x.t) / 60)) : 0;
+  var poster = x.poster ? ' style="background-image:url(' + esc(x.poster) + ')"' : '';
+  return '<a class="card card-rsm" href="#/item/' + esc(x.id) + '" title="' + esc(x.title) + '">' +
+    '<div class="card-p"' + poster + '><div class="card-prog"><i style="width:' + pct + '%"></i></div>' +
+    '<span class="card-rsm-b">ادامه ' + faNum(pct) + '٪</span></div>' +
+    '<div class="card-t">' + esc(x.title) + '</div>' +
+    '<div class="card-m"><span>' + esc(x.epT || typeLabel(x.type)) + (left ? ' • ' + faNum(left) + ' دقیقه مانده' : '') + '</span></div></a>';
+}
+function resumeRowHtml () {
+  var list = resumeItems();
+  if (!list.length) return '';
+  return '<div class="row row-rsm" id="row-rsm"><div class="row-h"><h3>▶ ادامهٔ تماشا</h3>' +
+    '<button type="button" class="row-clear" id="rsm-clear">پاک کردن فهرست</button></div>' +
+    '<div class="hscroll">' + list.map(resumeCardHtml).join('') + '</div></div>';
+}
+function bindResumeRow () {
+  var b = $('#rsm-clear');
+  if (!b) return;
+  b.addEventListener('click', function () {
+    try { localStorage.removeItem('mvx_resume'); } catch (e) { }
+    var row = $('#row-rsm');
+    if (row && row.parentNode) row.parentNode.removeChild(row);
+  });
+}
 function adminEmptyGuide () {
   return APP.user && APP.user.role === 'admin'
     ? emptyHtml('📥', 'هنوز محتوایی ندارید', 'برای شروع، لینک یک پست تلگرام را در پنل مدیریت ← محتوا بچسبانید.', '<a class="btn btn-primary" href="#/admin">رفتن به پنل مدیریت</a>')
@@ -17246,7 +17400,8 @@ function bindHero () {
 }
 function viewHome (c) {
   var items = c.items;
-  if (!items.length) return '<div style="margin-top:40px">' + adminEmptyGuide() + '</div>';
+  /* سایت تازه: حتی با آرشیو خالی، اگر کاربر چیزی تماشا کرده باشد همان را نشان بده */
+  if (!items.length) return '<div style="margin-top:26px">' + resumeRowHtml() + adminEmptyGuide() + '</div>';
   var featured = items.filter(function (x) { return x.featured; });
   if (!featured.length) featured = items.slice(0, 1);
   var movies = items.filter(function (x) { return x.type === 'movie'; });
@@ -17254,6 +17409,7 @@ function viewHome (c) {
   var airing = series.filter(isAiring);
   return heroHtml(featured) +
     proSearchHtml(c, {}) +
+    resumeRowHtml() +
     (airing.length ? rowHtml('سریال‌های در حال پخش', airing.slice(0, 16), 'همه', '#/catalog?type=series&airing=1', 'row-live') : '') +
     rowHtml('🆕 جدیدترین‌ها', items.slice(0, 12), 'همه', '#/catalog') +
     (series.length ? rowHtml('📺 سریال‌ها', series.slice(0, 12), '', '#/catalog?type=series') : '') +
@@ -20882,6 +21038,7 @@ function render () {
       shell(viewHome(c));
       bindHero();
       bindProSearch();
+      bindResumeRow();
     }).catch(function (e) {
       app.innerHTML = headerHtml('home') + '<main>' + emptyHtml('⚠️', 'خطا در بارگذاری', e.message) + '</main>';
       bindHeader();
